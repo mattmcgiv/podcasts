@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+# Do NOT put the Hetzner token in any file. Export it per-shell instead:
+#   export TF_VAR_hcloud_token="$(op read 'op://Private/hetzner_podcasts_token/token')"
+#
+# AWS credentials come from the named profile (1Password credential_process).
+
+ssh_public_key  = "ssh-ed25519 AAAA... you@host"
+route53_zone_id = "Z0115995336TMVXI5W90N" # mcgiv.dev
+root_domain     = "mcgiv.dev"
+dev_subdomain   = "pods-dev"
+admin_username  = "matt"
+
+# server_type = "cpx11" # cheapest US x86; cloud-init adds 2G swap for builds
+# location    = "ash"
+# aws_profile = "bosque-chat-admin" # mcgiv.dev Route 53 always lives here

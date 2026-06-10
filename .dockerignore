@@ -1,0 +1,13 @@
+.git
+.gitignore
+client/node_modules
+client/dist
+client/coverage
+server/target
+server/data
+server/.env
+.env
+*.env
+dev/
+infra/
+*.md
