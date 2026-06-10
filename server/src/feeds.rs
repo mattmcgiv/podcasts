@@ -1,7 +1,6 @@
 use crate::error::AppError;
 use crate::{now, AppState};
 use feed_rs::model::{Entry, Feed};
-use sqlx::SqlitePool;
 
 pub fn sanitize_html(html: &str) -> String {
     ammonia::clean(html)
@@ -90,21 +89,30 @@ pub fn feed_image(feed: &Feed) -> String {
         .unwrap_or_default()
 }
 
-async fn refresh_fts(pool: &SqlitePool, episode_id: i64, title: &str, notes_html: &str) -> Result<(), sqlx::Error> {
+async fn refresh_fts(
+    conn: &mut sqlx::SqliteConnection,
+    episode_id: i64,
+    title: &str,
+    notes_html: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM episodes_fts WHERE rowid = ?")
         .bind(episode_id)
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("INSERT INTO episodes_fts (rowid, title, notes) VALUES (?, ?, ?)")
         .bind(episode_id)
         .bind(title)
         .bind(html_to_text(notes_html))
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
 
-pub async fn upsert_podcast_meta(pool: &SqlitePool, podcast_id: i64, feed: &Feed) -> Result<(), sqlx::Error> {
+pub async fn upsert_podcast_meta(
+    conn: &mut sqlx::SqliteConnection,
+    podcast_id: i64,
+    feed: &Feed,
+) -> Result<(), sqlx::Error> {
     let title = feed.title.as_ref().map(|t| t.content.clone()).unwrap_or_default();
     let description = sanitize_html(
         &feed.description.as_ref().map(|t| t.content.clone()).unwrap_or_default(),
@@ -119,13 +127,17 @@ pub async fn upsert_podcast_meta(pool: &SqlitePool, podcast_id: i64, feed: &Feed
     .bind(site)
     .bind(now())
     .bind(podcast_id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
 
 /// Insert/update all entries of a parsed feed. Returns how many were new.
-pub async fn upsert_episodes(pool: &SqlitePool, podcast_id: i64, feed: &Feed) -> Result<usize, sqlx::Error> {
+pub async fn upsert_episodes(
+    conn: &mut sqlx::SqliteConnection,
+    podcast_id: i64,
+    feed: &Feed,
+) -> Result<usize, sqlx::Error> {
     let mut new_count = 0usize;
     for entry in &feed.entries {
         let Some((audio_url, duration)) = entry_audio(entry) else {
@@ -141,7 +153,7 @@ pub async fn upsert_episodes(pool: &SqlitePool, podcast_id: i64, feed: &Feed) ->
             sqlx::query_scalar("SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?")
                 .bind(podcast_id)
                 .bind(&guid)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *conn)
                 .await?;
 
         let episode_id = match existing {
@@ -156,7 +168,7 @@ pub async fn upsert_episodes(pool: &SqlitePool, podcast_id: i64, feed: &Feed) ->
                 .bind(published)
                 .bind(&image)
                 .bind(id)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
                 id
             }
@@ -173,23 +185,27 @@ pub async fn upsert_episodes(pool: &SqlitePool, podcast_id: i64, feed: &Feed) ->
                 .bind(duration)
                 .bind(published)
                 .bind(&image)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
                 res.last_insert_rowid()
             }
         };
-        refresh_fts(pool, episode_id, &title, &notes_html).await?;
+        refresh_fts(conn, episode_id, &title, &notes_html).await?;
     }
     Ok(new_count)
 }
 
 /// Subscribe to a feed URL: insert the podcast, pull episodes, and archive the
-/// back catalog so only the newest 2 land in Recent.
+/// back catalog so only the newest 2 land in Recent. Holds the refresh lock so
+/// the background refresher can't race the initial import, and runs all DB
+/// writes in one transaction so a failure leaves no half-subscribed feed.
 pub async fn subscribe(state: &AppState, feed_url: &str) -> Result<i64, AppError> {
     let feed_url = feed_url.trim();
     if !(feed_url.starts_with("http://") || feed_url.starts_with("https://")) {
         return Err(AppError::Invalid("feed_url must be an http(s) URL".into()));
     }
+    let _guard = state.refresh_lock.lock().await;
+
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM podcasts WHERE feed_url = ?")
         .bind(feed_url)
         .fetch_optional(&state.pool)
@@ -199,14 +215,16 @@ pub async fn subscribe(state: &AppState, feed_url: &str) -> Result<i64, AppError
     }
 
     let feed = fetch_and_parse(&state.http, feed_url).await?;
+
+    let mut tx = state.pool.begin().await?;
     let res = sqlx::query("INSERT INTO podcasts (feed_url, created_at) VALUES (?, ?)")
         .bind(feed_url)
         .bind(now())
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     let podcast_id = res.last_insert_rowid();
-    upsert_podcast_meta(&state.pool, podcast_id, &feed).await?;
-    upsert_episodes(&state.pool, podcast_id, &feed).await?;
+    upsert_podcast_meta(&mut tx, podcast_id, &feed).await?;
+    upsert_episodes(&mut tx, podcast_id, &feed).await?;
 
     // Keep the newest 2 in Recent; everything older is archived (not "played").
     let ts = now();
@@ -219,16 +237,18 @@ pub async fn subscribe(state: &AppState, feed_url: &str) -> Result<i64, AppError
     .bind(ts)
     .bind(ts)
     .bind(podcast_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(podcast_id)
 }
 
 pub async fn refresh_one(state: &AppState, podcast_id: i64, feed_url: &str) -> Result<usize, AppError> {
     let feed = fetch_and_parse(&state.http, feed_url).await?;
-    upsert_podcast_meta(&state.pool, podcast_id, &feed).await?;
-    let new_count = upsert_episodes(&state.pool, podcast_id, &feed).await?;
+    let mut conn = state.pool.acquire().await?;
+    upsert_podcast_meta(&mut conn, podcast_id, &feed).await?;
+    let new_count = upsert_episodes(&mut conn, podcast_id, &feed).await?;
     Ok(new_count)
 }
 

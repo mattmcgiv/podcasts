@@ -186,14 +186,16 @@ async fn show_detail(
 
 async fn unsubscribe(State(state): State<AppState>, Path(id): Path<i64>) -> Result<StatusCode, AppError> {
     fetch_show(&state, id).await?;
+    let mut tx = state.pool.begin().await?;
     sqlx::query("DELETE FROM episodes_fts WHERE rowid IN (SELECT id FROM episodes WHERE podcast_id = ?)")
         .bind(id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM podcasts WHERE id = ?")
         .bind(id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
