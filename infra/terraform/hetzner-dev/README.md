@@ -1,7 +1,7 @@
 # Hetzner dev box (pods-dev)
 
 One Hetzner Cloud VPS (`cpx11`, Ubuntu 24.04, `ash`) running Pods via Docker
-Compose behind Caddy (automatic HTTPS), with DNS at `pods-dev.mcgiv.dev`
+Compose behind Caddy (automatic HTTPS), with DNS at `pods.mcgiv.dev`
 through Route 53.
 
 ## Secrets and credentials
@@ -26,12 +26,12 @@ terraform apply
 ```
 
 Cloud-init needs a few minutes after apply (Docker install, swap, hardening).
-`ssh matt@pods-dev.mcgiv.dev sudo cloud-init status --wait` blocks until done.
+`ssh matt@pods.mcgiv.dev sudo cloud-init status --wait` blocks until done.
 
 ## Deploy the app
 
 ```sh
-HOST=matt@pods-dev.mcgiv.dev
+HOST=matt@pods.mcgiv.dev
 
 # 1. Clone via read-only deploy key (key generated on the box, registered with
 #    `gh repo deploy-key add` from a trusted machine).
@@ -42,7 +42,7 @@ ssh $HOST 'git clone git@github.com:mattmcgiv/podcasts.git /opt/pods/app'
   printf 'API_TOKEN=';            op read 'op://Private/pods_dev_api_token/token'; \
   printf 'PODCASTINDEX_KEY=';     op read 'op://Private/Podcastindex/API KEY'; \
   printf 'PODCASTINDEX_SECRET=';  op read 'op://Private/Podcastindex/API SECRET'; \
-  printf 'PODS_HOSTNAME=pods-dev.mcgiv.dev\n'; \
+  printf 'PODS_HOSTNAME=pods.mcgiv.dev\n'; \
 } | ssh $HOST 'umask 077; cat > /opt/pods/app/.env'
 
 # 3. Build and start (also the command after any git pull):

@@ -8,7 +8,7 @@
 ssh_public_key  = "ssh-ed25519 AAAA... you@host"
 route53_zone_id = "Z0115995336TMVXI5W90N" # mcgiv.dev
 root_domain     = "mcgiv.dev"
-dev_subdomain   = "pods-dev"
+dev_subdomain   = "pods"
 admin_username  = "matt"
 
 # server_type = "cpx11" # cheapest US x86; cloud-init adds 2G swap for builds

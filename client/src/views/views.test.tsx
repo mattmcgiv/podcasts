@@ -186,6 +186,20 @@ describe("SearchView", () => {
     expect(screen.getByRole("button", { name: "Subscribe" })).toBeEnabled();
   });
 
+  it("clears the input with the × button in one tap", async () => {
+    loggedIn();
+    installApi({ ...settings });
+    const user = userEvent.setup();
+    wrap(<SearchView />);
+    const box = screen.getByRole("searchbox");
+    expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
+    await user.type(box, "quantum");
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(box).toHaveValue("");
+    expect(box).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
+  });
+
   it("explains when the directory is not configured", async () => {
     loggedIn();
     installApi({

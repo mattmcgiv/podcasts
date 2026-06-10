@@ -47,7 +47,7 @@ variable "root_domain" {
 
 variable "dev_subdomain" {
   type    = string
-  default = "pods-dev"
+  default = "pods"
 }
 
 variable "dev_hostname" {

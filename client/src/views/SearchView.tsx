@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Api } from "../api";
 import { Artwork } from "../components/Artwork";
 import { EpisodeRow } from "../components/EpisodeRow";
@@ -11,6 +11,7 @@ export function SearchView() {
   const [results, setResults] = useState<SearchResults | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const player = usePlayer();
 
   async function submit(e: FormEvent) {
@@ -34,13 +35,38 @@ export function SearchView() {
         <h1>Search</h1>
       </header>
       <form className="search-form" onSubmit={(e) => void submit(e)}>
-        <input
-          type="search"
-          placeholder="Podcasts and your episodes"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          aria-label="Search"
-        />
+        <div className="search-input-wrap">
+          <input
+            ref={inputRef}
+            type="search"
+            placeholder="Podcasts and your episodes"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            aria-label="Search"
+          />
+          {q !== "" && (
+            <button
+              type="button"
+              className="search-clear"
+              aria-label="Clear search"
+              onClick={() => {
+                setQ("");
+                inputRef.current?.focus();
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden>
+                <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.22" />
+                <path
+                  d="M8.6 8.6l6.8 6.8M15.4 8.6l-6.8 6.8"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  fill="none"
+                />
+              </svg>
+            </button>
+          )}
+        </div>
         <button type="submit" disabled={busy || !q.trim()}>
           {busy ? "…" : "Search"}
         </button>
