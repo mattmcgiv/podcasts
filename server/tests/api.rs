@@ -323,7 +323,7 @@ async fn search_local_fts_and_directory() {
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
     // Directory not configured
-    let (app2, _d2) = app().await;
+    let (app2, _d2) = app_with("http://127.0.0.1:1".into(), "").await;
     let (st, res) = get(&app2, "/api/search?q=anything").await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(res["directory_configured"], false);

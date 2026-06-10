@@ -28,6 +28,19 @@ Dev servers (run inside the container) publish to the host:
 - Client (Vite): http://127.0.0.1:5173
 - Server (axum): http://127.0.0.1:8080
 
+### Troubleshooting the container runtime
+
+Homebrew's `container` bottle doesn't link `libexec`, so the apiserver crash-loops with
+"cannot find any plugins with type network". Fix (one-time, survives upgrades):
+
+```sh
+ln -sfn /opt/homebrew/opt/container/libexec/container-plugins /opt/homebrew/libexec/container-plugins
+launchctl kickstart -k gui/$(id -u)/com.apple.container.apiserver
+```
+
+Headless starts should use `container system start --enable-kernel-install` (the default
+prompts interactively). Kernel can be (re)installed with `container system kernel set --recommended`.
+
 ## Configuration
 
 Server env (see `server/.env.example`): `API_TOKEN` (login token), `PODCASTINDEX_KEY` / `PODCASTINDEX_SECRET` (directory search), `DATABASE_PATH`, `BIND_ADDR`.

@@ -39,15 +39,18 @@ describe("RecentView", () => {
     const ep2 = episode({ id: 2, title: "Second" });
     const ep3 = episode({ id: 3, title: "Third" });
     let recentCalls = 0;
+    let ep1Played = false;
     const { calls } = installApi({
       ...settings,
-      "GET /api/recent": (url) => {
+      "GET /api/recent": (url: URL) => {
         recentCalls += 1;
-        return url.searchParams.get("offset") === "50"
-          ? page([ep3])
-          : page([ep1, ep2], 50);
+        if (url.searchParams.get("offset") === "50") return page([ep3]);
+        return ep1Played ? page([ep2], 50) : page([ep1, ep2], 50);
       },
-      "POST /api/episodes/1/played": null,
+      "POST /api/episodes/1/played": () => {
+        ep1Played = true;
+        return null;
+      },
     });
     const user = userEvent.setup();
     wrap(<RecentView />);

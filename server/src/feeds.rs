@@ -34,7 +34,7 @@ pub fn entry_audio(entry: &Entry) -> Option<(String, Option<i64>)> {
             let is_audio = content
                 .content_type
                 .as_ref()
-                .map(|m| m.essence_str().starts_with("audio/"))
+                .map(|m| m.ty().as_str().eq_ignore_ascii_case("audio"))
                 .unwrap_or(false);
             if is_audio {
                 return Some((url.to_string(), duration));

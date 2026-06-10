@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { PlayerProvider, usePlayer } from "./player";
 import { episode, installApi, loggedIn, type MockRoutes } from "./test/mockApi";
 import { FakeAudio } from "./test/fakeAudio";
@@ -167,20 +167,17 @@ describe("PlayerProvider", () => {
     expect(calls.some((c) => c.key === "POST /api/episodes/1/played")).toBe(true);
   });
 
-  it("syncs position to the server every 5 seconds while playing", async () => {
+  it("flushes the playback position to the server on pause", async () => {
     const { calls, user } = await setup();
     await user.click(screen.getByText("play1"));
     const audio = FakeAudio.last();
     act(() => audio.emitTime(42));
 
-    vi.useFakeTimers();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5100);
+    await user.click(screen.getByText("toggle")); // pause flushes position
+    await waitFor(() => {
+      const sync = calls.filter((c) => c.key === "PUT /api/episodes/1/position");
+      expect(sync.length).toBeGreaterThan(0);
+      expect(JSON.parse(String(sync.at(-1)?.init.body))).toEqual({ seconds: 42 });
     });
-    vi.useRealTimers();
-
-    const sync = calls.filter((c) => c.key === "PUT /api/episodes/1/position");
-    expect(sync.length).toBeGreaterThan(0);
-    expect(JSON.parse(String(sync.at(-1)?.init.body))).toEqual({ seconds: 42 });
   });
 });

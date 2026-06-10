@@ -14,7 +14,10 @@ pub fn parse_opml(xml: &str) -> Vec<String> {
                 }
                 for attr in e.attributes().flatten() {
                     if attr.key.as_ref() == b"xmlUrl" {
-                        if let Ok(v) = attr.unescape_value() {
+                        if let Ok(raw) = std::str::from_utf8(attr.value.as_ref()) {
+                            let v = quick_xml::escape::unescape(raw)
+                                .map(|c| c.into_owned())
+                                .unwrap_or_else(|_| raw.to_string());
                             let url = v.trim().to_string();
                             if !url.is_empty() && seen.insert(url.clone()) {
                                 urls.push(url);

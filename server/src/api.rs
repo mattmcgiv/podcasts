@@ -10,7 +10,7 @@ const PAGE: i64 = 50;
 
 const EPISODE_ITEM_SELECT: &str = "SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image, \
      e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url, \
-     COALESCE(s.position_secs, 0) AS position_secs, s.played_at \
+     CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at \
      FROM episodes e \
      JOIN podcasts p ON p.id = e.podcast_id \
      LEFT JOIN episode_state s ON s.episode_id = e.id ";
@@ -206,7 +206,7 @@ async fn episode_detail(
     let sql = format!(
         "SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image, \
          e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url, \
-         COALESCE(s.position_secs, 0) AS position_secs, s.played_at, e.notes_html, s.archived_at \
+         CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at, e.notes_html, s.archived_at \
          FROM episodes e JOIN podcasts p ON p.id = e.podcast_id \
          LEFT JOIN episode_state s ON s.episode_id = e.id WHERE e.id = ?"
     );

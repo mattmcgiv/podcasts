@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { PlayerProvider, usePlayer } from "../player";
@@ -79,12 +79,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     act(() => audio.emitLoadedMetadata(600));
 
     const scrubber = screen.getByRole("slider", { name: "Seek" });
-    // range inputs: change event with a value
-    act(() => {
-      (scrubber as HTMLInputElement).value = "120";
-      scrubber.dispatchEvent(new Event("input", { bubbles: true }));
-      scrubber.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    fireEvent.change(scrubber, { target: { value: "120" } });
     expect(audio.currentTime).toBe(120);
     expect(screen.getByText("2:00")).toBeInTheDocument();
     expect(screen.getByText("-8:00")).toBeInTheDocument();
