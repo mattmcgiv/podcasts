@@ -39,7 +39,7 @@ ssh $HOST 'git clone git@github.com:mattmcgiv/podcasts.git /opt/pods/app'
 
 # 2. Populate secrets without putting values in argv or history:
 {
-  printf 'API_TOKEN=';            op read 'op://Private/<your-api-token-item>/token'; \
+  printf 'API_TOKEN=';            op read 'op://Private/pods_dev_api_token/token'; \
   printf 'PODCASTINDEX_KEY=';     op read 'op://Private/Podcastindex/API KEY'; \
   printf 'PODCASTINDEX_SECRET=';  op read 'op://Private/Podcastindex/API SECRET'; \
   printf 'PODS_HOSTNAME=pods-dev.mcgiv.dev\n'; \
