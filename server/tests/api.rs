@@ -6,14 +6,11 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const TOKEN: &str = "testtoken";
-
 async fn app_with(pi_base: String, pi_key: &str) -> (Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.sqlite");
     let pool = pods_server::db::init(db_path.to_str().unwrap()).await.unwrap();
     let cfg = pods_server::Config {
-        api_token: TOKEN.into(),
         pi_key: pi_key.into(),
         pi_secret: if pi_key.is_empty() { String::new() } else { "s".into() },
         pi_base,
@@ -32,13 +29,9 @@ async fn call(
     app: &Router,
     method: &str,
     uri: &str,
-    token: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let mut b = Request::builder().method(method).uri(uri);
-    if let Some(t) = token {
-        b = b.header("authorization", format!("Bearer {t}"));
-    }
+    let b = Request::builder().method(method).uri(uri);
     let req = match body {
         Some(v) => b
             .header("content-type", "application/json")
@@ -59,7 +52,7 @@ async fn call(
 }
 
 async fn get(app: &Router, uri: &str) -> (StatusCode, Value) {
-    call(app, "GET", uri, Some(TOKEN), None).await
+    call(app, "GET", uri, None).await
 }
 
 fn rss(show: &str, items: &[(&str, &str, &str, &str)]) -> String {
@@ -91,22 +84,17 @@ const D3: &str = "Wed, 08 Jan 2025 00:00:00 GMT";
 const D4: &str = "Thu, 09 Jan 2025 00:00:00 GMT";
 
 async fn subscribe(app: &Router, feed_url: &str) -> Value {
-    let (st, body) = call(app, "POST", "/api/shows", Some(TOKEN), Some(json!({ "feed_url": feed_url }))).await;
+    let (st, body) = call(app, "POST", "/api/shows", Some(json!({ "feed_url": feed_url }))).await;
     assert_eq!(st, StatusCode::CREATED, "subscribe failed: {body}");
     body
 }
 
 #[tokio::test]
-async fn auth_gate_and_login() {
+async fn endpoints_do_not_require_auth() {
     let (app, _d) = app().await;
-    let (st, _) = call(&app, "GET", "/api/recent", None, None).await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
-    let (st, _) = call(&app, "GET", "/api/recent", Some("wrong"), None).await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
-    let (st, _) = call(&app, "POST", "/api/login", None, Some(json!({"token": "nope"}))).await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
-    let (st, _) = call(&app, "POST", "/api/login", None, Some(json!({"token": TOKEN}))).await;
-    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, body) = call(&app, "GET", "/api/recent", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body["items"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -143,11 +131,11 @@ async fn subscribe_backfills_two_and_lists_recent() {
     assert!(recent["next_offset"].is_null());
 
     // duplicate subscribe
-    let (st, _) = call(&app, "POST", "/api/shows", Some(TOKEN), Some(json!({ "feed_url": url("/a.xml") }))).await;
+    let (st, _) = call(&app, "POST", "/api/shows", Some(json!({ "feed_url": url("/a.xml") }))).await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     // bad url
-    let (st, _) = call(&app, "POST", "/api/shows", Some(TOKEN), Some(json!({ "feed_url": "ftp://x" }))).await;
+    let (st, _) = call(&app, "POST", "/api/shows", Some(json!({ "feed_url": "ftp://x" }))).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
     // show list + detail
@@ -182,7 +170,7 @@ async fn played_flow_roundtrip() {
     let (_, recent) = get(&app, "/api/recent").await;
     let id = recent["items"][0]["id"].as_i64().unwrap();
 
-    let (st, _) = call(&app, "POST", &format!("/api/episodes/{id}/played"), Some(TOKEN), None).await;
+    let (st, _) = call(&app, "POST", &format!("/api/episodes/{id}/played"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 
     let (_, recent) = get(&app, "/api/recent").await;
@@ -192,12 +180,12 @@ async fn played_flow_roundtrip() {
     assert_eq!(played_items.len(), 1);
     assert_eq!(played_items[0]["id"].as_i64().unwrap(), id);
 
-    let (st, _) = call(&app, "DELETE", &format!("/api/episodes/{id}/played"), Some(TOKEN), None).await;
+    let (st, _) = call(&app, "DELETE", &format!("/api/episodes/{id}/played"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (_, recent) = get(&app, "/api/recent").await;
     assert_eq!(recent["items"].as_array().unwrap().len(), 2);
 
-    let (st, _) = call(&app, "POST", "/api/episodes/424242/played", Some(TOKEN), None).await;
+    let (st, _) = call(&app, "POST", "/api/episodes/424242/played", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
@@ -210,7 +198,7 @@ async fn position_and_episode_detail() {
     let (_, recent) = get(&app, "/api/recent").await;
     let id = recent["items"][0]["id"].as_i64().unwrap();
 
-    let (st, _) = call(&app, "PUT", &format!("/api/episodes/{id}/position"), Some(TOKEN), Some(json!({"seconds": 42.5}))).await;
+    let (st, _) = call(&app, "PUT", &format!("/api/episodes/{id}/position"), Some(json!({"seconds": 42.5}))).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (st, detail) = get(&app, &format!("/api/episodes/{id}")).await;
     assert_eq!(st, StatusCode::OK);
@@ -218,7 +206,7 @@ async fn position_and_episode_detail() {
     assert!(detail["notes_html"].as_str().unwrap().contains("Notes for Ep1"));
     assert_eq!(detail["podcast_title"], "Alpha");
 
-    let (st, _) = call(&app, "PUT", &format!("/api/episodes/{id}/position"), Some(TOKEN), Some(json!({"seconds": -1}))).await;
+    let (st, _) = call(&app, "PUT", &format!("/api/episodes/{id}/position"), Some(json!({"seconds": -1}))).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
     let (st, _) = get(&app, "/api/episodes/424242").await;
     assert_eq!(st, StatusCode::NOT_FOUND);
@@ -231,12 +219,12 @@ async fn settings_roundtrip_and_validation() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(s, json!({"speed": 1.0, "autoplay": true}));
 
-    let (st, _) = call(&app, "PUT", "/api/settings", Some(TOKEN), Some(json!({"speed": 2.5, "autoplay": false}))).await;
+    let (st, _) = call(&app, "PUT", "/api/settings", Some(json!({"speed": 2.5, "autoplay": false}))).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (_, s) = get(&app, "/api/settings").await;
     assert_eq!(s, json!({"speed": 2.5, "autoplay": false}));
 
-    let (st, _) = call(&app, "PUT", "/api/settings", Some(TOKEN), Some(json!({"speed": 9.9, "autoplay": true}))).await;
+    let (st, _) = call(&app, "PUT", "/api/settings", Some(json!({"speed": 9.9, "autoplay": true}))).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -277,7 +265,7 @@ async fn next_episode_recent_and_show_contexts() {
     assert_eq!(next["id"].as_i64().unwrap(), ep3);
 
     // Played episodes are skipped: mark Ep2 played, next after Ep3 -> null.
-    call(&app, "POST", &format!("/api/episodes/{ep2}/played"), Some(TOKEN), None).await;
+    call(&app, "POST", &format!("/api/episodes/{ep2}/played"), None).await;
     let (_, next) = get(&app, &format!("/api/next?after={ep3}")).await;
     assert!(next.is_null());
 
@@ -331,6 +319,48 @@ async fn search_local_fts_and_directory() {
 }
 
 #[tokio::test]
+async fn show_search_is_scoped_to_one_show() {
+    let feeds = MockServer::start().await;
+    let url_a = format!("{}/a.xml", feeds.uri());
+    let url_b = format!("{}/b.xml", feeds.uri());
+    mount_feed(
+        &feeds,
+        "/a.xml",
+        &rss(
+            "Alpha",
+            &[
+                ("Quantum Entanglement Special", "a1", "https://h.example/a1.mp3", D1),
+                ("Ordinary Alpha", "a2", "https://h.example/a2.mp3", D2),
+            ],
+        ),
+    )
+    .await;
+    mount_feed(
+        &feeds,
+        "/b.xml",
+        &rss("Beta", &[("Quantum Beta", "b1", "https://h.example/b1.mp3", D3)]),
+    )
+    .await;
+
+    let (app, _d) = app().await;
+    let alpha = subscribe(&app, &url_a).await;
+    subscribe(&app, &url_b).await;
+    let alpha_id = alpha["id"].as_i64().unwrap();
+
+    let (st, res) = get(&app, &format!("/api/shows/{alpha_id}/search?q=quant")).await;
+    assert_eq!(st, StatusCode::OK);
+    let items = res["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "Quantum Entanglement Special");
+    assert!(res["next_offset"].is_null());
+
+    let (st, _) = get(&app, &format!("/api/shows/{alpha_id}/search?q=%20")).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    let (st, _) = get(&app, "/api/shows/424242/search?q=quant").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn opml_export_and_import() {
     let feeds = MockServer::start().await;
     let url_a = format!("{}/a.xml", feeds.uri());
@@ -358,7 +388,6 @@ async fn opml_export_and_import() {
     let req = Request::builder()
         .method("POST")
         .uri("/api/opml")
-        .header("authorization", format!("Bearer {TOKEN}"))
         .header("content-type", "text/xml")
         .body(Body::from(opml_doc))
         .unwrap();
@@ -368,7 +397,7 @@ async fn opml_export_and_import() {
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v, json!({"imported": 1, "skipped": 1, "failed": 1}));
 
-    let (st, _) = call(&app, "POST", "/api/opml", Some(TOKEN), Some(json!("no opml here"))).await;
+    let (st, _) = call(&app, "POST", "/api/opml", Some(json!("no opml here"))).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -398,7 +427,7 @@ async fn refresh_picks_up_new_episodes() {
     );
     mount_feed(&feeds, "/a.xml", &three).await;
 
-    let (st, res) = call(&app, "POST", "/api/refresh", Some(TOKEN), None).await;
+    let (st, res) = call(&app, "POST", "/api/refresh", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(res["refreshed"], 1);
 
@@ -416,13 +445,13 @@ async fn unsubscribe_removes_everything() {
     let show = subscribe(&app, &format!("{}/a.xml", feeds.uri())).await;
     let id = show["id"].as_i64().unwrap();
 
-    let (st, _) = call(&app, "DELETE", &format!("/api/shows/{id}"), Some(TOKEN), None).await;
+    let (st, _) = call(&app, "DELETE", &format!("/api/shows/{id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 
     let (_, recent) = get(&app, "/api/recent").await;
     assert!(recent["items"].as_array().unwrap().is_empty());
     let (_, res) = get(&app, "/api/search?q=findable").await;
     assert!(res["episodes"].as_array().unwrap().is_empty(), "fts rows must be purged");
-    let (st, _) = call(&app, "DELETE", &format!("/api/shows/{id}"), Some(TOKEN), None).await;
+    let (st, _) = call(&app, "DELETE", &format!("/api/shows/{id}"), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }

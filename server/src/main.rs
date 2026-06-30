@@ -11,11 +11,6 @@ async fn main() {
         .init();
 
     let cfg = Config::from_env();
-    if cfg.api_token.is_empty() {
-        tracing::error!("API_TOKEN is not set; refusing to start");
-        std::process::exit(1);
-    }
-
     let pool = db::init(&cfg.db_path).await.expect("database init");
     let bind = cfg.bind_addr.clone();
     let state = build_state(pool, cfg);

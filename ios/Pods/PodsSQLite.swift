@@ -1,0 +1,204 @@
+import Foundation
+import SQLite3
+
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+enum SQLiteValue {
+    case int(Int64)
+    case double(Double)
+    case text(String)
+    case null
+}
+
+final class PodsDatabase {
+    private let lock = NSRecursiveLock()
+    private var db: OpaquePointer?
+
+    init(url: URL) throws {
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK else {
+            defer { sqlite3_close(handle) }
+            throw PodsBackendError.database("could not open database")
+        }
+        db = handle
+        try execute("PRAGMA foreign_keys = ON")
+        try execute("PRAGMA journal_mode = WAL")
+        try installSchemaIfNeeded()
+    }
+
+    deinit {
+        sqlite3_close(db)
+    }
+
+    func installSchemaIfNeeded() throws {
+        try executeScript(Self.schemaSQL)
+    }
+
+    func withTransaction<T>(_ body: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+
+        try executeLocked("BEGIN IMMEDIATE", [])
+        do {
+            let result = try body()
+            try executeLocked("COMMIT", [])
+            return result
+        } catch {
+            try? executeLocked("ROLLBACK", [])
+            throw error
+        }
+    }
+
+    func execute(_ sql: String, _ values: [SQLiteValue] = []) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try executeLocked(sql, values)
+    }
+
+    func executeScript(_ sql: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        var error: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &error) == SQLITE_OK else {
+            let message = error.map { String(cString: $0) } ?? lastErrorMessage()
+            sqlite3_free(error)
+            throw PodsBackendError.database(message)
+        }
+    }
+
+    func query<T>(_ sql: String, _ values: [SQLiteValue] = [], map: (OpaquePointer?) throws -> T) throws -> [T] {
+        lock.lock()
+        defer { lock.unlock() }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw PodsBackendError.database(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(statement) }
+        try bind(values, to: statement)
+
+        var rows: [T] = []
+        while true {
+            let code = sqlite3_step(statement)
+            if code == SQLITE_ROW {
+                rows.append(try map(statement))
+            } else if code == SQLITE_DONE {
+                return rows
+            } else {
+                throw PodsBackendError.database(lastErrorMessage())
+            }
+        }
+    }
+
+    func scalarInt64(_ sql: String, _ values: [SQLiteValue] = []) throws -> Int64? {
+        try query(sql, values) { statement in
+            sqlite3_column_type(statement, 0) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 0)
+        }.first ?? nil
+    }
+
+    func lastInsertRowID() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    private func executeLocked(_ sql: String, _ values: [SQLiteValue]) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw PodsBackendError.database(lastErrorMessage())
+        }
+        defer { sqlite3_finalize(statement) }
+        try bind(values, to: statement)
+
+        let code = sqlite3_step(statement)
+        guard code == SQLITE_DONE || code == SQLITE_ROW else {
+            throw PodsBackendError.database(lastErrorMessage())
+        }
+    }
+
+    private func bind(_ values: [SQLiteValue], to statement: OpaquePointer?) throws {
+        for (index, value) in values.enumerated() {
+            let position = Int32(index + 1)
+            let code: Int32
+            switch value {
+            case .int(let value):
+                code = sqlite3_bind_int64(statement, position, value)
+            case .double(let value):
+                code = sqlite3_bind_double(statement, position, value)
+            case .text(let value):
+                code = sqlite3_bind_text(statement, position, value, -1, sqliteTransient)
+            case .null:
+                code = sqlite3_bind_null(statement, position)
+            }
+            guard code == SQLITE_OK else {
+                throw PodsBackendError.database(lastErrorMessage())
+            }
+        }
+    }
+
+    private func lastErrorMessage() -> String {
+        if let message = sqlite3_errmsg(db) {
+            return String(cString: message)
+        }
+        return "unknown sqlite error"
+    }
+
+    private static let schemaSQL = """
+    CREATE TABLE IF NOT EXISTS podcasts (
+        id INTEGER PRIMARY KEY,
+        feed_url TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        image_url TEXT NOT NULL DEFAULT '',
+        site_url TEXT NOT NULL DEFAULT '',
+        last_fetched_at INTEGER,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS episodes (
+        id INTEGER PRIMARY KEY,
+        podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+        guid TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        notes_html TEXT NOT NULL DEFAULT '',
+        audio_url TEXT NOT NULL,
+        duration_secs INTEGER,
+        published_at INTEGER NOT NULL DEFAULT 0,
+        image_url TEXT NOT NULL DEFAULT '',
+        UNIQUE (podcast_id, guid)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_episodes_pub ON episodes (published_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_episodes_podcast ON episodes (podcast_id, published_at DESC);
+
+    CREATE TABLE IF NOT EXISTS episode_state (
+        episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+        position_secs REAL NOT NULL DEFAULT 0,
+        played_at INTEGER,
+        archived_at INTEGER,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);
+    """
+}
+
+func sqliteString(_ statement: OpaquePointer?, _ index: Int32) -> String {
+    guard let text = sqlite3_column_text(statement, index) else {
+        return ""
+    }
+    return String(cString: text)
+}
+
+func sqliteOptionalString(_ statement: OpaquePointer?, _ index: Int32) -> String? {
+    sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : sqliteString(statement, index)
+}
+
+func sqliteOptionalInt64(_ statement: OpaquePointer?, _ index: Int32) -> Int64? {
+    sqlite3_column_type(statement, index) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, index)
+}

@@ -1,7 +1,7 @@
 import { navigate, type Tab } from "../router";
 
 const TABS: { tab: Tab; label: string; hash: string; icon: string }[] = [
-  { tab: "recent", label: "Recent", hash: "#/recent", icon: "M4 6h16M4 12h16M4 18h10" },
+  { tab: "recent", label: "Listen", hash: "#/recent", icon: "M4 6h16M4 12h16M4 18h10" },
   { tab: "played", label: "Played", hash: "#/played", icon: "M5 12.5l4 4 10-11" },
   { tab: "search", label: "Search", hash: "#/search", icon: "M10.5 17a6.5 6.5 0 110-13 6.5 6.5 0 010 13zM15.5 15.5L21 21" },
   { tab: "shows", label: "Shows", hash: "#/shows", icon: "M5 4h14v16H5zM5 9h14" },

@@ -39,7 +39,6 @@ ssh $HOST 'git clone git@github.com:mattmcgiv/podcasts.git /opt/pods/app'
 
 # 2. Populate secrets without putting values in argv or history:
 {
-  printf 'API_TOKEN=';            op read 'op://Private/pods_dev_api_token/token'; \
   printf 'PODCASTINDEX_KEY=';     op read 'op://Private/Podcastindex/API KEY'; \
   printf 'PODCASTINDEX_SECRET=';  op read 'op://Private/Podcastindex/API SECRET'; \
   printf 'PODS_HOSTNAME=pods.mcgiv.dev\n'; \
@@ -57,7 +56,9 @@ ssh $HOST pods-dev-up
 - Logs: `ssh $HOST 'cd /opt/pods/app && docker compose logs -f pods'`
 - SQLite data lives in the `pods-data` Docker volume; OPML export is the
   cheap backup.
-- Tear down: `terraform destroy` (DNS record included).
+- After iOS all-clear teardown: `CONFIRM_DESTROY_PODS=destroy-pods.mcgiv.dev infra/terraform/hetzner-dev/destroy-after-ios-all-clear.sh`
+  from the repo root. The script creates a destroy plan first and asks for final
+  typed confirmation before applying it.
 
 ## Validation
 
@@ -66,5 +67,5 @@ terraform fmt -check -diff
 terraform init -backend=false
 terraform validate
 scripts/verify-cloud-init.sh
-API_TOKEN=placeholder docker compose config   # from repo root
+docker compose config   # from repo root
 ```

@@ -1,5 +1,5 @@
 use crate::error::AppError;
-use crate::{auth, feeds, now, opml, podcastindex, AppState};
+use crate::{feeds, now, opml, podcastindex, AppState};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
@@ -71,21 +71,6 @@ fn paginate<T>(mut rows: Vec<T>, offset: i64) -> Page<T> {
         None
     };
     Page { items: rows, next_offset }
-}
-
-// ---------- auth ----------
-
-#[derive(Deserialize)]
-struct LoginBody {
-    token: String,
-}
-
-async fn login(State(state): State<AppState>, Json(body): Json<LoginBody>) -> Result<StatusCode, AppError> {
-    if auth::token_matches(&body.token, &state.cfg.api_token) {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::Unauthorized)
-    }
 }
 
 // ---------- episode lists ----------
@@ -184,6 +169,33 @@ async fn show_detail(
     Ok(Json(ShowDetail { show, episodes: paginate(rows, p.offset) }))
 }
 
+async fn show_search(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(p): Query<SearchParams>,
+) -> Result<Json<Page<EpisodeItem>>, AppError> {
+    fetch_show(&state, id).await?;
+    let q = p.q.trim();
+    if q.is_empty() {
+        return Err(AppError::Invalid("q must not be empty".into()));
+    }
+
+    let match_expr = fts_query(q);
+    let sql = format!(
+        "{EPISODE_ITEM_SELECT} WHERE e.podcast_id = ? AND e.id IN \
+         (SELECT rowid FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?) \
+         ORDER BY e.published_at DESC, e.id DESC"
+    );
+    let rows = sqlx::query_as::<_, EpisodeItem>(&sql)
+        .bind(id)
+        .bind(&match_expr)
+        .bind(PAGE)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+    Ok(Json(Page { items: rows, next_offset: None }))
+}
+
 async fn unsubscribe(State(state): State<AppState>, Path(id): Path<i64>) -> Result<StatusCode, AppError> {
     fetch_show(&state, id).await?;
     let mut tx = state.pool.begin().await?;
@@ -205,14 +217,12 @@ async fn episode_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<EpisodeDetail>, AppError> {
-    let sql = format!(
-        "SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image, \
+    let sql = "SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image, \
          e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url, \
          CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at, e.notes_html, s.archived_at \
          FROM episodes e JOIN podcasts p ON p.id = e.podcast_id \
-         LEFT JOIN episode_state s ON s.episode_id = e.id WHERE e.id = ?"
-    );
-    sqlx::query_as::<_, EpisodeDetail>(&sql)
+         LEFT JOIN episode_state s ON s.episode_id = e.id WHERE e.id = ?";
+    sqlx::query_as::<_, EpisodeDetail>(sql)
         .bind(id)
         .fetch_optional(&state.pool)
         .await?
@@ -491,11 +501,12 @@ async fn opml_import(State(state): State<AppState>, body: String) -> Result<Json
 // ---------- router ----------
 
 pub fn router(state: AppState) -> Router {
-    let protected = Router::new()
+    Router::new()
         .route("/api/recent", get(recent))
         .route("/api/played", get(played))
         .route("/api/shows", get(shows).post(subscribe))
         .route("/api/shows/{id}", get(show_detail).delete(unsubscribe))
+        .route("/api/shows/{id}/search", get(show_search))
         .route("/api/episodes/{id}", get(episode_detail))
         .route("/api/episodes/{id}/played", post(set_played).delete(clear_played))
         .route("/api/episodes/{id}/position", put(set_position))
@@ -504,11 +515,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/next", get(next_episode))
         .route("/api/search", get(search))
         .route("/api/opml", get(opml_export).post(opml_import))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_bearer));
-
-    Router::new()
-        .route("/api/login", post(login))
-        .merge(protected)
         .fallback(crate::assets::static_handler)
         .with_state(state)
 }

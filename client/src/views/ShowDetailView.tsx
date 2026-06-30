@@ -7,12 +7,24 @@ import { usePlayer } from "../player";
 import { navigate } from "../router";
 import type { EpisodeItem, Show } from "../types";
 
+type ListenConfirmation = {
+  id: number;
+  message: string;
+  phase: "visible" | "leaving";
+};
+
 export function ShowDetailView({ showId }: { showId: number }) {
   const [show, setShow] = useState<Show | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeItem[] | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchItems, setSearchItems] = useState<EpisodeItem[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [listenConfirmation, setListenConfirmation] = useState<ListenConfirmation | null>(null);
   const player = usePlayer();
+  const trimmedSearch = searchQuery.trim();
+  const isSearching = trimmedSearch.length > 0;
 
   const load = useCallback(
     async (offset: number) => {
@@ -37,6 +49,45 @@ export function ShowDetailView({ showId }: { showId: number }) {
     return onEpisodesChanged(() => void load(0));
   }, [load]);
 
+  useEffect(() => {
+    if (!trimmedSearch) {
+      setSearchItems(null);
+      setSearchError(null);
+      return;
+    }
+
+    let active = true;
+    setSearchItems(null);
+    setSearchError(null);
+    void Api.showSearch(showId, trimmedSearch)
+      .then((page) => {
+        if (active) setSearchItems(page.items);
+      })
+      .catch((e) => {
+        if (active) setSearchError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [showId, trimmedSearch]);
+
+  useEffect(() => {
+    if (!listenConfirmation) return;
+    if (listenConfirmation.phase === "leaving") {
+      const removeTimer = window.setTimeout(() => {
+        setListenConfirmation((current) => (current?.id === listenConfirmation.id ? null : current));
+      }, 180);
+      return () => window.clearTimeout(removeTimer);
+    }
+
+    const exitTimer = window.setTimeout(() => {
+      setListenConfirmation((current) =>
+        current?.id === listenConfirmation.id ? { ...current, phase: "leaving" } : current,
+      );
+    }, 3000);
+    return () => window.clearTimeout(exitTimer);
+  }, [listenConfirmation]);
+
   async function unsubscribe() {
     if (!show) return;
     if (!window.confirm(`Unsubscribe from “${show.title}”? Its episodes disappear from Pods.`)) return;
@@ -49,10 +100,20 @@ export function ShowDetailView({ showId }: { showId: number }) {
     }
   }
 
-  function togglePlayed(item: EpisodeItem) {
-    const call = item.played_at ? Api.unmarkPlayed(item.id) : Api.markPlayed(item.id);
-    void call.then(emitEpisodesChanged).catch(() => {});
+  function addToListen(item: EpisodeItem) {
+    void Api.unmarkPlayed(item.id)
+      .then(() => {
+        setListenConfirmation((current) => ({
+          id: (current?.id ?? 0) + 1,
+          message: `${item.title} added to Listen`,
+          phase: "visible",
+        }));
+        emitEpisodesChanged();
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }
+
+  const visibleEpisodes = isSearching ? searchItems : episodes;
 
   return (
     <section className="view">
@@ -65,6 +126,16 @@ export function ShowDetailView({ showId }: { showId: number }) {
         <h1 className="ellipsis">{show?.title ?? "…"}</h1>
       </header>
 
+      {listenConfirmation && (
+        <div
+          key={listenConfirmation.id}
+          className={`top-confirmation is-${listenConfirmation.phase}`}
+          role="status"
+          aria-label="Add to Listen confirmation"
+        >
+          {listenConfirmation.message}
+        </div>
+      )}
       {error && <p className="error">{error}</p>}
 
       {show && (
@@ -82,21 +153,46 @@ export function ShowDetailView({ showId }: { showId: number }) {
       )}
       {show?.description && <p className="show-desc">{stripHtml(show.description)}</p>}
 
-      {episodes == null && !error && <p className="muted">Loading…</p>}
+      <form className="search-form show-search" onSubmit={(e) => e.preventDefault()}>
+        <div className="search-input-wrap">
+          <input
+            type="search"
+            aria-label="Search this show"
+            placeholder="Search this show"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.currentTarget.value)}
+          />
+          {searchQuery && (
+            <button
+              className="search-clear"
+              type="button"
+              aria-label="Clear show search"
+              onClick={() => setSearchQuery("")}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      </form>
+
+      {searchError && <p className="error">{searchError}</p>}
+      {!isSearching && episodes == null && !error && <p className="muted">Loading…</p>}
+      {isSearching && searchItems == null && !searchError && <p className="muted">Searching…</p>}
+      {isSearching && searchItems != null && searchItems.length === 0 && <p className="empty">No episodes found.</p>}
       <ul className="episode-list">
-        {episodes?.map((item) => (
+        {visibleEpisodes?.map((item) => (
           <EpisodeRow
             key={item.id}
             item={item}
             showPodcast={false}
             onPlay={(ep) => player.playEpisode(ep, "show")}
-            actionLabel={item.played_at ? "Mark unplayed" : "Mark played"}
-            onAction={togglePlayed}
-            actionDone={item.played_at != null}
+            actionLabel="Add to Listen"
+            onAction={addToListen}
+            actionIcon="plus"
           />
         ))}
       </ul>
-      {nextOffset != null && episodes != null && (
+      {!isSearching && nextOffset != null && episodes != null && (
         <button className="load-more" onClick={() => void load(nextOffset)}>
           Load more
         </button>

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Api, clearToken, UNAUTHORIZED_EVENT } from "../api";
+import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
@@ -57,11 +57,6 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
-  function logout() {
-    clearToken();
-    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  }
-
   return (
     <div className="settings-sheet" role="dialog" aria-label="Settings">
       <header className="sheet-header">
@@ -110,11 +105,6 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
         </button>
         <button className="ghost-btn" onClick={() => void refreshAll()}>
           Refresh all feeds
-        </button>
-
-        <h2 className="section-title">Session</h2>
-        <button className="ghost-btn danger" onClick={logout}>
-          Log out
         </button>
 
         {status && <p className="status">{status}</p>}

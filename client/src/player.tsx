@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
+import { createAudioEngine, type AudioEngine } from "./audioEngine";
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeItem, PlayContext } from "./types";
@@ -52,7 +53,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [speed, setSpeedState] = useState(1);
   const [autoplay, setAutoplayState] = useState(true);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
   const contextRef = useRef<PlayContext>("recent");
   const speedRef = useRef(1);
@@ -134,9 +135,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const endedRef = useRef(handleEnded);
   endedRef.current = handleEnded;
 
-  function ensureAudio(): HTMLAudioElement {
+  function ensureAudio(): AudioEngine {
     if (audioRef.current) return audioRef.current;
-    const a = new Audio();
+    const a = createAudioEngine();
     a.preload = "metadata";
     a.addEventListener("play", () => setPlaying(true));
     a.addEventListener("pause", () => {
@@ -304,7 +305,7 @@ function updateMediaSessionMetadata(item: EpisodeItem): void {
   }
 }
 
-function syncMediaSessionPosition(a: HTMLAudioElement | null): void {
+function syncMediaSessionPosition(a: AudioEngine | null): void {
   const ms = navigator.mediaSession;
   if (!a || !ms || typeof ms.setPositionState !== "function") return;
   if (!Number.isFinite(a.duration) || a.duration <= 0) return;

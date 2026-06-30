@@ -8,3 +8,11 @@ coverage/
 *.sqlite
 *.sqlite-*
 .DS_Store
+ios/build/
+ios/DerivedData/
+ios/*.xcresult
+ios/**/*.xcuserstate
+ios/Pods/Web/*
+!ios/Pods/Web/.gitkeep
+ios/Pods/SeedData/*.sqlite
+ios/Pods/SeedData/*.sqlite-*
