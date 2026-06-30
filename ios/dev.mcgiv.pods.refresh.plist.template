@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.mcgiv.pods.refresh</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__ROOT__/ios/refresh-device.sh</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>IOS_DEVICE_ID</key>
+		<string>__DEVICE_ID__</string>
+		<key>IOS_XCODE_DESTINATION</key>
+		<string>__XCODE_DESTINATION__</string>
+		<key>IOS_TEAM_ID</key>
+		<string>__TEAM_ID__</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>432000</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>__ROOT__/ios/build/launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__ROOT__/ios/build/launchd.err.log</string>
+</dict>
+</plist>

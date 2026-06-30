@@ -43,4 +43,15 @@ prompts interactively). Kernel can be (re)installed with `container system kerne
 
 ## Configuration
 
-Server env (see `server/.env.example`): `API_TOKEN` (login token), `PODCASTINDEX_KEY` / `PODCASTINDEX_SECRET` (directory search), `DATABASE_PATH`, `BIND_ADDR`.
+Server env (see `server/.env.example`): `PODCASTINDEX_KEY` / `PODCASTINDEX_SECRET` (directory search), `DATABASE_PATH`, `BIND_ADDR`.
+
+## iOS migration
+
+The `feature-ios` branch adds a private iPhone target under `ios/`.
+
+- Full Xcode is required; Command Line Tools are not enough.
+- Free Personal Team installs expire after 7 days, so `ios/refresh-device.sh` and a launchd template automate reinstall-over-existing every 5 days.
+- Reinstall-over-existing must preserve the live SQLite DB in Application Support; uninstalling the app deletes that state.
+- Generated web assets and seed DBs are ignored by Git.
+
+See `ios/README.md` for setup, seed DB staging, refresh automation, and reinstall acceptance tests.

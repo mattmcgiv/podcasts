@@ -4,8 +4,6 @@ use axum::Json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("unauthorized")]
-    Unauthorized,
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -42,7 +40,6 @@ impl From<feed_rs::parser::ParseFeedError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
-            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,

@@ -1,11 +1,8 @@
-import { useEffect, useState } from "react";
-import { getToken, UNAUTHORIZED_EVENT } from "./api";
 import { MiniPlayer } from "./components/MiniPlayer";
 import { PlayerSheet } from "./components/PlayerSheet";
 import { TabBar } from "./components/TabBar";
 import { PlayerProvider } from "./player";
 import { useRoute } from "./router";
-import { LoginView } from "./views/LoginView";
 import { PlayedView } from "./views/PlayedView";
 import { RecentView } from "./views/RecentView";
 import { SearchView } from "./views/SearchView";
@@ -13,17 +10,6 @@ import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 
 export function App() {
-  const [authed, setAuthed] = useState(() => getToken() != null);
-
-  useEffect(() => {
-    const onUnauthorized = () => setAuthed(false);
-    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
-    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
-  }, []);
-
-  if (!authed) {
-    return <LoginView onLogin={() => setAuthed(true)} />;
-  }
   return (
     <PlayerProvider>
       <Shell />

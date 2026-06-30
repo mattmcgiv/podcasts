@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { PlayerProvider, usePlayer } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
-import { episode, installApi, loggedIn } from "../test/mockApi";
+import { episode, installApi } from "../test/mockApi";
 import { MiniPlayer } from "./MiniPlayer";
 import { PlayerSheet } from "./PlayerSheet";
 
@@ -17,7 +17,6 @@ function Starter() {
 }
 
 function setup() {
-  loggedIn();
   const mocked = installApi({
     "GET /api/settings": { speed: 1, autoplay: true },
     "PUT /api/settings": null,

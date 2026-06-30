@@ -1,10 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { PlayerProvider } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
-import { episode, HttpError, installApi, loggedIn, page, type MockRoutes } from "../test/mockApi";
+import { episode, HttpError, installApi, page, type MockRoutes } from "../test/mockApi";
 import type { Show } from "../types";
 import { PlayedView } from "./PlayedView";
 import { RecentView } from "./RecentView";
@@ -34,7 +34,6 @@ const settings: MockRoutes = { "GET /api/settings": { speed: 1, autoplay: true }
 
 describe("RecentView", () => {
   it("renders, marks played optimistically, loads more", async () => {
-    loggedIn();
     const ep1 = episode({ id: 1, title: "First" });
     const ep2 = episode({ id: 2, title: "Second" });
     const ep3 = episode({ id: 3, title: "Third" });
@@ -71,7 +70,6 @@ describe("RecentView", () => {
   });
 
   it("shows the empty state and triggers refresh", async () => {
-    loggedIn();
     const { calls } = installApi({
       ...settings,
       "GET /api/recent": page([]),
@@ -86,7 +84,6 @@ describe("RecentView", () => {
   });
 
   it("starts playback when a row is tapped", async () => {
-    loggedIn();
     installApi({
       ...settings,
       "GET /api/recent": page([episode({ id: 7, title: "Tap me", audio_url: "https://h.example/7.mp3" })]),
@@ -100,7 +97,6 @@ describe("RecentView", () => {
   });
 
   it("surfaces list errors", async () => {
-    loggedIn();
     installApi({ ...settings, "GET /api/recent": new HttpError(500, { error: "db exploded" }) });
     wrap(<RecentView />);
     await screen.findByText("db exploded");
@@ -109,7 +105,6 @@ describe("RecentView", () => {
 
 describe("PlayedView", () => {
   it("lists played episodes and unmarks", async () => {
-    loggedIn();
     const { calls } = installApi({
       ...settings,
       "GET /api/played": page([episode({ id: 4, title: "Old One", played_at: 1_750_000_100 })]),
@@ -126,7 +121,6 @@ describe("PlayedView", () => {
   });
 
   it("shows its empty state", async () => {
-    loggedIn();
     installApi({ ...settings, "GET /api/played": page([]) });
     wrap(<PlayedView />);
     await screen.findByText(/Episodes you mark played/);
@@ -135,7 +129,6 @@ describe("PlayedView", () => {
 
 describe("SearchView", () => {
   it("searches both directories and renders results", async () => {
-    loggedIn();
     const { calls } = installApi({
       ...settings,
       "GET /api/search": {
@@ -167,7 +160,6 @@ describe("SearchView", () => {
   });
 
   it("shows subscribe errors inline and recovers", async () => {
-    loggedIn();
     installApi({
       ...settings,
       "GET /api/search": {
@@ -187,7 +179,6 @@ describe("SearchView", () => {
   });
 
   it("clears the input with the × button in one tap", async () => {
-    loggedIn();
     installApi({ ...settings });
     const user = userEvent.setup();
     wrap(<SearchView />);
@@ -201,7 +192,6 @@ describe("SearchView", () => {
   });
 
   it("explains when the directory is not configured", async () => {
-    loggedIn();
     installApi({
       ...settings,
       "GET /api/search": { directory_configured: false, podcasts: [], episodes: [] },
@@ -216,7 +206,6 @@ describe("SearchView", () => {
 
 describe("ShowsView", () => {
   it("lists shows and navigates into one", async () => {
-    loggedIn();
     installApi({ ...settings, "GET /api/shows": [show()] });
     const user = userEvent.setup();
     wrap(<ShowsView />);
@@ -225,7 +214,6 @@ describe("ShowsView", () => {
   });
 
   it("opens settings from the gear", async () => {
-    loggedIn();
     installApi({ ...settings, "GET /api/shows": [] });
     const user = userEvent.setup();
     wrap(<ShowsView />);
@@ -237,7 +225,6 @@ describe("ShowsView", () => {
 
 describe("ShowDetailView", () => {
   it("renders episodes and unsubscribes with confirmation", async () => {
-    loggedIn();
     const { calls } = installApi({
       ...settings,
       "GET /api/shows/5": {
@@ -260,7 +247,6 @@ describe("ShowDetailView", () => {
   });
 
   it("does nothing when unsubscribe is cancelled", async () => {
-    loggedIn();
     const { calls } = installApi({
       ...settings,
       "GET /api/shows/5": { show: show(), episodes: page([]) },
@@ -273,22 +259,60 @@ describe("ShowDetailView", () => {
     expect(calls.some((c) => c.key === "DELETE /api/shows/5")).toBe(false);
   });
 
-  it("toggles played state from the catalog", async () => {
-    loggedIn();
+  it("adds an episode to Listen from the catalog", async () => {
     const { calls } = installApi({
       ...settings,
       "GET /api/shows/5": {
         show: show(),
-        episodes: page([episode({ id: 11, title: "Unplayed Ep" })]),
+        episodes: page([episode({ id: 11, title: "Archived Ep", played_at: 1_700_000_000 })]),
       },
-      "POST /api/episodes/11/played": null,
+      "DELETE /api/episodes/11/played": null,
+    });
+    wrap(<ShowDetailView showId={5} />);
+    await screen.findByText("Archived Ep");
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Add to Listen" }));
+    expect(calls.some((c) => c.key === "DELETE /api/episodes/11/played")).toBe(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const confirmation = screen.getByRole("status", { name: "Add to Listen confirmation" });
+    expect(screen.getByText("Archived Ep added to Listen")).toBeInTheDocument();
+    expect(confirmation).toHaveClass("is-visible");
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(confirmation).toHaveClass("is-leaving");
+
+    await act(async () => {
+      vi.advanceTimersByTime(180);
+    });
+    expect(screen.queryByRole("status", { name: "Add to Listen confirmation" })).not.toBeInTheDocument();
+  });
+
+  it("searches within the selected show", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/shows/5": {
+        show: show(),
+        episodes: page([episode({ id: 11, title: "Noise Episode" })]),
+      },
+      "GET /api/shows/5/search": (url: URL) => {
+        return url.searchParams.get("q") === "quant"
+          ? page([episode({ id: 12, title: "Quantum Episode" })])
+          : page([]);
+      },
     });
     const user = userEvent.setup();
     wrap(<ShowDetailView showId={5} />);
-    await screen.findByText("Unplayed Ep");
-    await user.click(screen.getByRole("button", { name: "Mark played" }));
-    await waitFor(() =>
-      expect(calls.some((c) => c.key === "POST /api/episodes/11/played")).toBe(true),
-    );
+    await screen.findByText("Noise Episode");
+
+    await user.type(screen.getByRole("searchbox", { name: "Search this show" }), "quant");
+
+    await screen.findByText("Quantum Episode");
+    expect(screen.queryByText("Noise Episode")).not.toBeInTheDocument();
+    expect(calls.some((c) => c.key === "GET /api/shows/5/search")).toBe(true);
   });
 });

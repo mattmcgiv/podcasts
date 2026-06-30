@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { PlayerProvider, usePlayer } from "./player";
-import { episode, installApi, loggedIn, type MockRoutes } from "./test/mockApi";
+import { episode, installApi, type MockRoutes } from "./test/mockApi";
 import { FakeAudio } from "./test/fakeAudio";
 
 function Probe() {
@@ -47,7 +47,6 @@ function baseRoutes(extra: MockRoutes = {}): MockRoutes {
 }
 
 async function setup(extra: MockRoutes = {}) {
-  loggedIn();
   const mocked = installApi(baseRoutes(extra));
   const user = userEvent.setup();
   render(

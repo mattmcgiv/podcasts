@@ -1,9 +1,10 @@
 pub mod api;
 pub mod assets;
-pub mod auth;
 pub mod db;
 pub mod error;
 pub mod feeds;
+#[cfg(feature = "ios-ffi")]
+pub mod ios;
 pub mod opml;
 pub mod podcastindex;
 
@@ -19,7 +20,6 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct Config {
-    pub api_token: String,
     pub pi_key: String,
     pub pi_secret: String,
     pub pi_base: String,
@@ -31,7 +31,6 @@ impl Config {
     pub fn from_env() -> Self {
         let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
         Self {
-            api_token: var("API_TOKEN", ""),
             pi_key: var("PODCASTINDEX_KEY", ""),
             pi_secret: var("PODCASTINDEX_SECRET", ""),
             pi_base: var("PODCASTINDEX_BASE_URL", "https://api.podcastindex.org/api/1.0"),

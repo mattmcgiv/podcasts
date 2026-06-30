@@ -1,13 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { getToken, UNAUTHORIZED_EVENT } from "../api";
-import { episode, HttpError, installApi, loggedIn } from "../test/mockApi";
+import { episode, HttpError, installApi } from "../test/mockApi";
 import { SettingsSheet } from "./SettingsSheet";
 
 describe("SettingsSheet", () => {
   it("adds a feed by URL", async () => {
-    loggedIn();
     const { calls } = installApi({
       "POST /api/shows": {
         id: 1, feed_url: "https://x.example/f", title: "Added Show", description: "",
@@ -24,7 +22,6 @@ describe("SettingsSheet", () => {
   });
 
   it("imports an OPML file and reports counts", async () => {
-    loggedIn();
     installApi({ "POST /api/opml": { imported: 2, skipped: 1, failed: 0 } });
     const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
@@ -35,7 +32,6 @@ describe("SettingsSheet", () => {
   });
 
   it("exports OPML through a blob download", async () => {
-    loggedIn();
     installApi({ "GET /api/opml": "<opml><body/></opml>" });
     const createUrl = vi.fn(() => "blob:fake");
     const revokeUrl = vi.fn();
@@ -51,7 +47,6 @@ describe("SettingsSheet", () => {
   });
 
   it("refreshes all feeds and reports errors", async () => {
-    loggedIn();
     installApi({ "POST /api/refresh": { refreshed: 4, errors: 1 } });
     const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
@@ -60,7 +55,6 @@ describe("SettingsSheet", () => {
   });
 
   it("surfaces API errors as status text", async () => {
-    loggedIn();
     installApi({ "POST /api/refresh": new HttpError(500, { error: "refresh blew up" }) });
     const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
@@ -68,21 +62,7 @@ describe("SettingsSheet", () => {
     await screen.findByText("refresh blew up");
   });
 
-  it("logs out: clears token and broadcasts", async () => {
-    loggedIn();
-    installApi({});
-    const listener = vi.fn();
-    window.addEventListener(UNAUTHORIZED_EVENT, listener);
-    const user = userEvent.setup();
-    render(<SettingsSheet onClose={() => {}} />);
-    await user.click(screen.getByRole("button", { name: "Log out" }));
-    expect(getToken()).toBeNull();
-    expect(listener).toHaveBeenCalled();
-    window.removeEventListener(UNAUTHORIZED_EVENT, listener);
-  });
-
   it("closes via the header button", async () => {
-    loggedIn();
     installApi({});
     const onClose = vi.fn();
     const user = userEvent.setup();

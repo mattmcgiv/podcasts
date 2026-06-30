@@ -1,5 +1,4 @@
 import { vi } from "vitest";
-import { setToken } from "../api";
 import type { EpisodeItem } from "../types";
 
 type RouteValue =
@@ -51,10 +50,6 @@ export function installApi(routes: MockRoutes) {
   const spy = vi.fn(impl);
   vi.stubGlobal("fetch", spy);
   return { spy, calls };
-}
-
-export function loggedIn(): void {
-  setToken("test-token");
 }
 
 export function episode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
