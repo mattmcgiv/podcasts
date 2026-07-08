@@ -52,7 +52,7 @@ export function RecentView() {
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
             {sortAscending ? (
               <path
-                d="M12 19V5M12 5l-5 5M12 5l5 5"
+                d="M12 19V5m0 0-5 5m5-5 5 5"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
@@ -61,7 +61,7 @@ export function RecentView() {
               />
             ) : (
               <path
-                d="M12 5v14M12 19l-5-5M12 19l5-5"
+                d="M12 5v14m0 0-5-5m5 5 5-5"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
@@ -69,13 +69,6 @@ export function RecentView() {
                 strokeLinejoin="round"
               />
             )}
-            <path
-              d="M5 5h4M5 12h3M5 19h2"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-            />
           </svg>
         </button>
         <button

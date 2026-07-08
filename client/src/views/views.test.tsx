@@ -110,6 +110,17 @@ describe("RecentView", () => {
     expect(titles()).toEqual(["Newest", "Middle", "Oldest"]);
   });
 
+  it("renders the Listen sort control as a single direction glyph", async () => {
+    installApi({
+      ...settings,
+      "GET /api/recent": page([episode({ id: 1, title: "Newest", published_at: 300 })]),
+    });
+    wrap(<RecentView />);
+
+    const sortButton = await screen.findByRole("button", { name: "Sort oldest first" });
+    expect(sortButton.querySelectorAll("svg path")).toHaveLength(1);
+  });
+
   it("starts playback when a row is tapped", async () => {
     installApi({
       ...settings,
