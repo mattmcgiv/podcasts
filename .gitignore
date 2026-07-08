@@ -19,3 +19,6 @@ ios/Pods/SeedData/*.sqlite-*
 infra/terraform/hetzner-dev/.terraform/
 infra/terraform/hetzner-dev/terraform.tfstate*
 infra/terraform/hetzner-dev/terraform.tfvars
+
+# Xcode user state
+**/xcuserdata/
