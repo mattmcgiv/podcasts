@@ -5,8 +5,10 @@ struct PodsStaticAssets {
 
     static func bundled(bundle: Bundle = .main) -> PodsStaticAssets? {
         guard let index = bundle.url(forResource: "index", withExtension: "html", subdirectory: "Web") else {
+            PodsDebugLog("Bundled static assets missing Web/index.html")
             return nil
         }
+        PodsDebugLog("Bundled static assets root=\(index.deletingLastPathComponent().path)")
         return PodsStaticAssets(root: index.deletingLastPathComponent())
     }
 
@@ -21,8 +23,10 @@ struct PodsStaticAssets {
         let relativePath = normalizedPath(request.path)
         let url = root.appendingPathComponent(relativePath, isDirectory: false)
         guard isInsideRoot(url), FileManager.default.fileExists(atPath: url.path) else {
+            PodsDebugLog("Static asset fallback path=\(request.path) normalized=\(relativePath)")
             return fileResponse(root.appendingPathComponent("index.html"))
         }
+        PodsDebugLog("Static asset serving path=\(request.path) normalized=\(relativePath)")
         return fileResponse(url, includeBody: request.method != "HEAD")
     }
 
@@ -80,4 +84,3 @@ struct PodsStaticAssets {
         }
     }
 }
-

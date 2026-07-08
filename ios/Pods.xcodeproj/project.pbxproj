@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -16,12 +16,14 @@
 		10A000000000000000000007 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000019 /* libsqlite3.tbd */; };
 		10A000000000000000000008 /* PodsAPIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000021 /* PodsAPIModels.swift */; };
 		10A000000000000000000009 /* PodsSQLite.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000022 /* PodsSQLite.swift */; };
+		10A00000000000000000001A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000018 /* Assets.xcassets */; };
 		10A00000000000000000000A /* PodsFeedParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000023 /* PodsFeedParser.swift */; };
 		10A00000000000000000000B /* PodsOPML.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000024 /* PodsOPML.swift */; };
 		10A00000000000000000000C /* PodsBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000025 /* PodsBackend.swift */; };
 		10A00000000000000000000D /* PodsLocalServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000026 /* PodsLocalServer.swift */; };
 		10A00000000000000000000E /* PodsStaticAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000027 /* PodsStaticAssets.swift */; };
 		10A00000000000000000000F /* PodsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000028 /* PodsLog.swift */; };
+		10A00000000000000000001B /* PodcastIndexClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000029 /* PodcastIndexClient.swift */; };
 		10B000000000000000000001 /* PodsBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000011 /* PodsBackendTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -44,6 +46,7 @@
 		10A000000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		10A000000000000000000016 /* Web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Web; sourceTree = "<group>"; };
 		10A000000000000000000017 /* SeedData */ = {isa = PBXFileReference; lastKnownFileType = folder; path = SeedData; sourceTree = "<group>"; };
+		10A000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		10A000000000000000000019 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		10A000000000000000000021 /* PodsAPIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsAPIModels.swift; sourceTree = "<group>"; };
 		10A000000000000000000022 /* PodsSQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsSQLite.swift; sourceTree = "<group>"; };
@@ -53,6 +56,7 @@
 		10A000000000000000000026 /* PodsLocalServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsLocalServer.swift; sourceTree = "<group>"; };
 		10A000000000000000000027 /* PodsStaticAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsStaticAssets.swift; sourceTree = "<group>"; };
 		10A000000000000000000028 /* PodsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsLog.swift; sourceTree = "<group>"; };
+		10A000000000000000000029 /* PodcastIndexClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastIndexClient.swift; sourceTree = "<group>"; };
 		10B000000000000000000010 /* PodsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PodsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		10B000000000000000000011 /* PodsBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsBackendTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -101,19 +105,13 @@
 				10A000000000000000000026 /* PodsLocalServer.swift */,
 				10A000000000000000000027 /* PodsStaticAssets.swift */,
 				10A000000000000000000028 /* PodsLog.swift */,
+				10A000000000000000000029 /* PodcastIndexClient.swift */,
 				10A000000000000000000015 /* Info.plist */,
+				10A000000000000000000018 /* Assets.xcassets */,
 				10A000000000000000000016 /* Web */,
 				10A000000000000000000017 /* SeedData */,
 			);
 			path = Pods;
-			sourceTree = "<group>";
-		};
-		10B000000000000000000030 /* PodsTests */ = {
-			isa = PBXGroup;
-			children = (
-				10B000000000000000000011 /* PodsBackendTests.swift */,
-			);
-			path = PodsTests;
 			sourceTree = "<group>";
 		};
 		10A000000000000000000032 /* Frameworks */ = {
@@ -133,6 +131,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		10B000000000000000000030 /* PodsTests */ = {
+			isa = PBXGroup;
+			children = (
+				10B000000000000000000011 /* PodsBackendTests.swift */,
+			);
+			path = PodsTests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -143,6 +149,7 @@
 				10A000000000000000000050 /* Sources */,
 				10A000000000000000000020 /* Frameworks */,
 				10A000000000000000000051 /* Resources */,
+				10A000000000000000000052 /* Write Podcast Index Credentials */,
 			);
 			buildRules = (
 			);
@@ -214,12 +221,36 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				10A00000000000000000001A /* Assets.xcassets in Resources */,
 				10A000000000000000000005 /* Web in Resources */,
 				10A000000000000000000006 /* SeedData in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		10A000000000000000000052 /* Write Podcast Index Credentials */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Write Podcast Index Credentials";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/PodcastIndexCredentials.plist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$PROJECT_DIR/write-podcastindex-credentials.sh\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/PodcastIndexCredentials.plist\"";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		10A000000000000000000050 /* Sources */ = {
@@ -238,6 +269,7 @@
 				10A00000000000000000000D /* PodsLocalServer.swift in Sources */,
 				10A00000000000000000000E /* PodsStaticAssets.swift in Sources */,
 				10A00000000000000000000F /* PodsLog.swift in Sources */,
+				10A00000000000000000001B /* PodcastIndexClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -374,6 +406,7 @@
 		10A000000000000000000071 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
@@ -387,9 +420,9 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -399,6 +432,7 @@
 		10A000000000000000000072 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
@@ -412,9 +446,9 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -436,9 +470,9 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pods.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pods";
@@ -460,9 +494,9 @@
 				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pods.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pods";

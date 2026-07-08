@@ -27,6 +27,7 @@ enum DatabaseBootstrap {
     static func prepare(fileManager: FileManager = .default, bundle: Bundle = .main) throws -> URL {
         let liveURL = try liveDatabaseURL()
         let seedURL = bundle.url(forResource: seedFileName, withExtension: seedExtension, subdirectory: "SeedData")
+        PodsDebugLog("Database bootstrap live=\(liveURL.path) seed=\(seedURL?.path ?? "none")")
         return try prepare(liveURL: liveURL, seedURL: seedURL, fileManager: fileManager)
     }
 
@@ -34,7 +35,10 @@ enum DatabaseBootstrap {
     static func prepare(liveURL: URL, seedURL: URL?, fileManager: FileManager = .default) throws -> URL {
         if !fileManager.fileExists(atPath: liveURL.path) {
             if let seedURL {
+                PodsDebugLog("Database bootstrap copying seed database")
                 try fileManager.copyItem(at: seedURL, to: liveURL)
+            } else {
+                PodsDebugLog("Database bootstrap has no live database and no seed; schema will be created")
             }
         }
         if fileManager.fileExists(atPath: liveURL.path) {

@@ -46,6 +46,15 @@ ios/stage-seed-db.sh /path/to/pods.sqlite
 
 The app copies `pods-seed.sqlite` into Application Support only if no live `pods.sqlite` exists. Reinstalling over the same bundle id must not overwrite the live database.
 
+Podcast Index show search credentials live outside the repo at `~/.config/podcasts/credentials.env`:
+
+```sh
+PODCASTINDEX_KEY=...
+PODCASTINDEX_SECRET=...
+```
+
+The Xcode build phase writes those values into the built app bundle as `PodcastIndexCredentials.plist`. If the file or either key is missing, `/api/search` still returns local episode matches but reports `directory_configured: false`.
+
 ## Manual Install
 
 Set the iPhone device id from `xcrun devicectl list devices`, then run:
@@ -57,7 +66,7 @@ IOS_DEVICE_ID=<device-id> ios/refresh-device.sh
 Optional:
 
 ```sh
-IOS_TEAM_ID=7626CK2W2G IOS_DEVICE_ID=<device-id> ios/refresh-device.sh
+IOS_TEAM_ID=<team-id> IOS_DEVICE_ID=<device-id> ios/refresh-device.sh
 IOS_DEVICE_ID=<devicectl-id> IOS_XCODE_DESTINATION='platform=iOS,id=<xcode-device-id>' ios/refresh-device.sh
 ```
 
@@ -68,7 +77,7 @@ The script builds with Xcode automatic signing and installs over the existing ap
 Free Personal Team installs expire after 7 days. Install the launchd job to refresh every 5 days:
 
 ```sh
-IOS_DEVICE_ID=<device-id> IOS_TEAM_ID=7626CK2W2G ios/install-refresh-agent.sh
+IOS_DEVICE_ID=<device-id> IOS_TEAM_ID=<team-id> ios/install-refresh-agent.sh
 ```
 
 Logs:
@@ -95,15 +104,7 @@ Do not uninstall the app during this test. Uninstalling removes the app containe
 
 The iOS app runs a native Swift backend inside the app process. It opens the reinstall-safe SQLite database in Application Support, listens on `127.0.0.1:18180`, and serves the same no-auth `/api` contract used by the React client. The bundled web app points at that loopback backend through `window.PODS_API_BASE`.
 
-The Rust backend was kept as far as practical: the server crate has an optional `ios-ffi` feature and C header at `server/ios-bridge.h`, but producing an iOS static library is blocked in the current isolated Linux dev container because it lacks Apple's iOS SDK/linker. The Swift backend is therefore the active iOS runtime.
-
-Run the Rust feasibility probe with:
-
-```sh
-ios/rust-backend-feasibility.sh
-```
-
-The existing `pods-dev` image is Linux-based and does not currently include an Apple iOS SDK/linker, so a Rust iOS backend is expected to remain blocked until that isolated build path is designed.
+The old Rust backend has been removed. Backend behavior for the app belongs in `ios/Pods/PodsBackend.swift` and adjacent Swift files.
 
 ## iOS Tests
 

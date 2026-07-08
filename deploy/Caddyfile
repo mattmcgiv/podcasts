@@ -1,8 +1,0 @@
-{
-	email {$ACME_EMAIL}
-}
-
-{$PODS_HOSTNAME} {
-	encode gzip
-	reverse_proxy pods:8080
-}

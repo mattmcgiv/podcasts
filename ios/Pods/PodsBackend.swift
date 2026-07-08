@@ -64,16 +64,35 @@ struct HTTPResponse {
     }
 }
 
-final class PodsBackend {
+protocol PlaybackProgressRecording: AnyObject {
+    func recordPlaybackProgress(episodeID: Int64, seconds: Double)
+}
+
+final class PodsBackend: PlaybackProgressRecording {
     private let database: PodsDatabase
     private let feedFetcher: FeedFetching
+    private let directorySearcher: PodcastDirectorySearching
 
-    init(database: PodsDatabase, feedFetcher: FeedFetching = URLSessionFeedFetcher()) {
+    init(
+        database: PodsDatabase,
+        feedFetcher: FeedFetching = URLSessionFeedFetcher(),
+        directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher()
+    ) {
         self.database = database
         self.feedFetcher = feedFetcher
+        self.directorySearcher = directorySearcher
+    }
+
+    func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
+        do {
+            try setPosition(id: episodeID, seconds: seconds)
+        } catch {
+            PodsLog("Pods playback progress record failed episodeID=\(episodeID) seconds=\(seconds): \(error)")
+        }
     }
 
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
+        PodsDebugLog("Backend request method=\(request.method) target=\(request.target)")
         do {
             if request.method == "OPTIONS" {
                 return HTTPResponse.noContent()
@@ -83,8 +102,10 @@ final class PodsBackend {
             }
             return try await route(request)
         } catch let error as PodsBackendError {
+            PodsDebugLog("Backend handled error method=\(request.method) target=\(request.target) status=\(error.statusCode) error=\(error.description)")
             return HTTPResponse.error(error)
         } catch {
+            PodsDebugLog("Backend unexpected error method=\(request.method) target=\(request.target) error=\(error.localizedDescription)")
             return HTTPResponse.error(.upstream(error.localizedDescription))
         }
     }
@@ -175,7 +196,7 @@ final class PodsBackend {
             guard let query = request.query("q") else {
                 throw PodsBackendError.invalid("q must not be empty")
             }
-            return .json(try search(query: query))
+            return .json(try await search(query: query))
         }
         if path == "/api/opml", request.method == "GET" {
             return .text(try exportOPML(), contentType: "text/xml; charset=utf-8")
@@ -406,9 +427,11 @@ final class PodsBackend {
                 try await refreshOne(podcastID: row.0, feedURL: row.1)
                 ok += 1
             } catch {
+                PodsDebugLog("Refresh failed podcastID=\(row.0) error=\(error.localizedDescription)")
                 errors += 1
             }
         }
+        PodsDebugLog("Refresh finished ok=\(ok) errors=\(errors)")
         return RefreshResult(refreshed: ok, errors: errors)
     }
 
@@ -416,14 +439,16 @@ final class PodsBackend {
         guard let url = URL(string: feedURL) else {
             throw PodsBackendError.invalid("feed_url must be an http(s) URL")
         }
+        PodsDebugLog("Refresh starting podcastID=\(podcastID) url=\(url.absoluteString)")
         let feed = try RSSParser.parse(try await feedFetcher.data(for: url))
         try database.withTransaction {
             try upsertPodcastMeta(podcastID: podcastID, feed: feed)
-            try upsertEpisodes(podcastID: podcastID, feed: feed)
+            let newCount = try upsertEpisodes(podcastID: podcastID, feed: feed)
+            PodsDebugLog("Refresh stored podcastID=\(podcastID) newEpisodes=\(newCount)")
         }
     }
 
-    private func search(query rawQuery: String) throws -> SearchResults {
+    private func search(query rawQuery: String) async throws -> SearchResults {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             throw PodsBackendError.invalid("q must not be empty")
@@ -435,7 +460,23 @@ final class PodsBackend {
         ORDER BY e.published_at DESC
         """
         let episodes = (try? database.query(sql, [.text(matchExpression)], map: Self.mapEpisodeItem)) ?? []
-        return SearchResults(directory_configured: false, podcasts: [], episodes: episodes)
+        let podcasts: [DirectoryPodcast]
+        if directorySearcher.isConfigured {
+            let subscribedFeeds = try Set(database.query("SELECT feed_url FROM podcasts", map: { sqliteString($0, 0) }))
+            podcasts = try await directorySearcher.search(query: query).map { podcast in
+                DirectoryPodcast(
+                    title: podcast.title,
+                    author: podcast.author,
+                    feed_url: podcast.feed_url,
+                    image_url: podcast.image_url,
+                    description: podcast.description,
+                    subscribed: subscribedFeeds.contains(podcast.feed_url)
+                )
+            }
+        } else {
+            podcasts = []
+        }
+        return SearchResults(directory_configured: directorySearcher.isConfigured, podcasts: podcasts, episodes: episodes)
     }
 
     private func exportOPML() throws -> String {

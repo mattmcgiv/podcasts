@@ -2,6 +2,89 @@ import SwiftUI
 import UIKit
 import WebKit
 
+@MainActor
+protocol PodsWebViewLoading: AnyObject {
+    var url: URL? { get }
+
+    @discardableResult
+    func load(_ request: URLRequest) -> WKNavigation?
+
+    @discardableResult
+    func reload() -> WKNavigation?
+
+    func evaluateJavaScript(
+        _ javaScriptString: String,
+        completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)?
+    )
+}
+
+extension WKWebView: PodsWebViewLoading {}
+
+@MainActor
+final class PodsWebViewRecovery {
+    private let rootURL: URL
+
+    init(rootURL: URL) {
+        self.rootURL = rootURL
+    }
+
+    func loadRoot(_ webView: PodsWebViewLoading) {
+        webView.load(URLRequest(url: rootURL))
+    }
+
+    func recoverFromWebContentTermination(_ webView: PodsWebViewLoading) {
+        PodsLog("Pods webview content process terminated; reloading \(rootURL.absoluteString)")
+        loadRoot(webView)
+    }
+
+    func reloadIfContentMissing(_ webView: PodsWebViewLoading) {
+        guard isServingRoot(webView.url) else {
+            PodsLog("Pods webview foreground URL missing or unexpected; reloading \(rootURL.absoluteString)")
+            loadRoot(webView)
+            return
+        }
+
+        webView.evaluateJavaScript(Self.renderedContentCheckScript) { [weak self] result, error in
+            guard let self else {
+                return
+            }
+            if let error {
+                PodsLog("Pods webview foreground health check failed: \(error.localizedDescription); reloading \(self.rootURL.absoluteString)")
+                self.loadRoot(webView)
+                return
+            }
+            if (result as? Bool) != true {
+                PodsLog("Pods webview foreground content empty; reloading \(self.rootURL.absoluteString)")
+                self.loadRoot(webView)
+            } else {
+                PodsDebugLog("Pods webview foreground content present")
+            }
+        }
+    }
+
+    private func isServingRoot(_ url: URL?) -> Bool {
+        guard let url else {
+            return false
+        }
+        return url.scheme == rootURL.scheme
+            && url.host == rootURL.host
+            && url.port == rootURL.port
+    }
+
+    private static let renderedContentCheckScript = """
+    (function() {
+      var root = document.getElementById("root");
+      if (!root) {
+        return false;
+      }
+      if (root.childElementCount > 0) {
+        return true;
+      }
+      return Boolean((root.textContent || "").trim());
+    })();
+    """
+}
+
 struct PodsWebView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> PodsWebViewController {
         PodsWebViewController()
@@ -11,9 +94,18 @@ struct PodsWebView: UIViewControllerRepresentable {
 }
 
 final class PodsWebViewController: UIViewController {
+    private static let localRootURL = URL(string: "http://127.0.0.1:18180/")!
+    private static let retiredRemoteHost = "pods.mcgiv.dev"
+
     private var webView: WKWebView!
+    private let recovery = PodsWebViewRecovery(rootURL: localRootURL)
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func loadView() {
+        PodsDebugLog("Webview loadView configuring loopback API base")
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -39,30 +131,52 @@ final class PodsWebViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        PodsDebugLog("Webview viewDidLoad")
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
         loadBundledWebApp()
     }
 
     private func loadBundledWebApp() {
-        if let url = URL(string: "http://127.0.0.1:18180/") {
-            PodsLog("Pods webview loading \(url.absoluteString)")
-            webView.load(URLRequest(url: url))
-            return
-        }
+        PodsLog("Pods webview loading \(Self.localRootURL.absoluteString)")
+        recovery.loadRoot(webView)
+    }
 
-        let html = """
-        <!doctype html>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Pods</title>
-        <style>
-          body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: -apple-system-body; background: #101418; color: white; }
-          main { max-width: 320px; padding: 24px; text-align: center; }
-        </style>
-        <main>
-          <h1>Pods</h1>
-          <p>Web assets are missing. Run ios/prepare-web-assets.sh before building the app.</p>
-        </main>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
+    @objc private func applicationWillEnterForeground() {
+        PodsDebugLog("Pods webview foreground health check requested")
+        recovery.reloadIfContentMissing(webView)
+    }
+
+    private func redirectRetiredRemoteHostIfNeeded(_ url: URL) -> Bool {
+        guard url.host?.lowercased() == Self.retiredRemoteHost else {
+            return false
+        }
+        PodsLog("Pods webview blocked retired remote host \(url.absoluteString); loading \(Self.localRootURL.absoluteString)")
+        webView.load(URLRequest(url: Self.localRootURL))
+        return true
+    }
+
+    private static func navigationTypeName(_ type: WKNavigationType) -> String {
+        switch type {
+        case .linkActivated:
+            return "linkActivated"
+        case .formSubmitted:
+            return "formSubmitted"
+        case .backForward:
+            return "backForward"
+        case .reload:
+            return "reload"
+        case .formResubmitted:
+            return "formResubmitted"
+        case .other:
+            return "other"
+        @unknown default:
+            return "unknown"
+        }
     }
 
     private static let diagnosticsScript = """
@@ -109,6 +223,22 @@ final class PodsWebViewController: UIViewController {
 }
 
 extension PodsWebViewController: WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        let url = navigationAction.request.url
+        PodsDebugLog(
+            "Webview navigation policy url=\(url?.absoluteString ?? "nil") type=\(Self.navigationTypeName(navigationAction.navigationType)) mainFrame=\(navigationAction.targetFrame?.isMainFrame == true)"
+        )
+        if let url, redirectRetiredRemoteHostIfNeeded(url) {
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         PodsLog("Pods webview finished \(webView.url?.absoluteString ?? "unknown URL")")
     }
@@ -119,6 +249,10 @@ extension PodsWebViewController: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         PodsLog("Pods webview provisional navigation failed: \(error)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        recovery.recoverFromWebContentTermination(webView)
     }
 }
 

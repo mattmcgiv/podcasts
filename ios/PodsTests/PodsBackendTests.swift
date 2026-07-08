@@ -1,4 +1,6 @@
 import XCTest
+import MediaPlayer
+import WebKit
 @testable import Pods
 
 final class PodsBackendTests: XCTestCase {
@@ -13,19 +15,36 @@ final class PodsBackendTests: XCTestCase {
         }
     }
 
+    private struct MockDirectorySearcher: PodcastDirectorySearching {
+        var podcasts: [DirectoryPodcast]
+
+        var isConfigured: Bool {
+            true
+        }
+
+        func search(query: String) async throws -> [DirectoryPodcast] {
+            podcasts
+        }
+    }
+
     private struct Harness {
         let backend: PodsBackend
         let fetcher: MockFeedFetcher
         let directory: URL
     }
 
-    private func makeHarness() throws -> Harness {
+    private func makeHarness(directorySearcher: PodcastDirectorySearching? = nil) throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
         let fetcher = MockFeedFetcher()
-        return Harness(backend: PodsBackend(database: database, feedFetcher: fetcher), fetcher: fetcher, directory: directory)
+        let backend = PodsBackend(
+            database: database,
+            feedFetcher: fetcher,
+            directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher()
+        )
+        return Harness(backend: backend, fetcher: fetcher, directory: directory)
     }
 
     private func call(
@@ -145,6 +164,25 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(invalidSettings.statusCode, 422)
     }
 
+    func testNativePlaybackProgressRecordingUpdatesEpisodePosition() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/a.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Alpha",
+            items: [
+                ("Long Listen", "g1", "https://h.example/1.mp3", Self.d1)
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        let episodeID = try XCTUnwrap(recent.items.first?.id)
+
+        harness.backend.recordPlaybackProgress(episodeID: episodeID, seconds: 4_200)
+
+        let detail = try decode(EpisodeDetail.self, from: try await call(harness.backend, "GET", "/api/episodes/\(episodeID)"))
+        XCTAssertEqual(detail.position_secs, 4_200)
+    }
+
     func testSearchRefreshOpmlAndUnsubscribe() async throws {
         let harness = try makeHarness()
         let urlA = "https://feeds.example/a.xml"
@@ -196,6 +234,38 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(afterDelete.items.contains { $0.podcast_title == "Alpha" })
         let deleteAgain = try await call(harness.backend, "DELETE", "/api/shows/\(alpha.id)")
         XCTAssertEqual(deleteAgain.statusCode, 404)
+    }
+
+    func testSearchIncludesConfiguredDirectoryResults() async throws {
+        let subscribedURL = "https://feeds.example/subscribed.xml"
+        let harness = try makeHarness(directorySearcher: MockDirectorySearcher(podcasts: [
+            DirectoryPodcast(
+                title: "Already Saved",
+                author: "Known Author",
+                feed_url: subscribedURL,
+                image_url: "https://img.example/saved.jpg",
+                description: "Saved show",
+                subscribed: false
+            ),
+            DirectoryPodcast(
+                title: "Fresh Find",
+                author: "New Author",
+                feed_url: "https://feeds.example/fresh.xml",
+                image_url: "https://img.example/fresh.jpg",
+                description: "New show",
+                subscribed: false
+            )
+        ]))
+        harness.fetcher.responses[subscribedURL] = Data(Self.rss(show: "Already Saved", items: [
+            ("Intro", "saved-1", "https://h.example/saved-1.mp3", Self.d1)
+        ]).utf8)
+        _ = try decode(Show.self, from: try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": subscribedURL]))
+
+        let search = try decode(SearchResults.self, from: try await call(harness.backend, "GET", "/api/search?q=software"))
+
+        XCTAssertTrue(search.directory_configured)
+        XCTAssertEqual(search.podcasts.map(\.title), ["Already Saved", "Fresh Find"])
+        XCTAssertEqual(search.podcasts.map(\.subscribed), [true, false])
     }
 
     func testShowSearchIsScopedToOneShow() async throws {
@@ -297,6 +367,52 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(try database.query("SELECT title FROM podcasts", map: { sqliteString($0, 0) }), ["Live"])
     }
 
+    func testTemporaryDebugLogExpiresAfterThreeDays() throws {
+        let formatter = ISO8601DateFormatter()
+        let beforeExpiry = try XCTUnwrap(formatter.date(from: "2026-07-04T23:59:58Z"))
+        let afterExpiry = try XCTUnwrap(formatter.date(from: "2026-07-05T00:00:00Z"))
+
+        XCTAssertEqual(PodsTemporaryDebugLog.expiryISO8601, "2026-07-04T23:59:59Z")
+        XCTAssertTrue(PodsTemporaryDebugLog.isEnabled(now: beforeExpiry))
+        XCTAssertFalse(PodsTemporaryDebugLog.isEnabled(now: afterExpiry))
+    }
+
+    func testNowPlayingInfoIncludesEpisodeMetadataAndPlaybackState() throws {
+        let metadata = try XCTUnwrap(AudioBridge.metadata(from: [
+            "title": "Episode Title",
+            "artist": "Show Title",
+            "artwork": "/api/artwork/episodes/4",
+            "duration": NSNumber(value: 1234)
+        ]))
+
+        XCTAssertEqual(metadata.title, "Episode Title")
+        XCTAssertEqual(metadata.artist, "Show Title")
+        XCTAssertEqual(metadata.artworkURL?.absoluteString, "http://127.0.0.1:18180/api/artwork/episodes/4")
+        XCTAssertEqual(metadata.duration, 1234)
+
+        let playing = AudioBridge.nowPlayingInfo(
+            metadata: metadata,
+            position: 42,
+            duration: 0,
+            playbackRate: 1.5,
+            paused: false
+        )
+        XCTAssertEqual(playing[MPMediaItemPropertyTitle] as? String, "Episode Title")
+        XCTAssertEqual(playing[MPMediaItemPropertyArtist] as? String, "Show Title")
+        XCTAssertEqual(playing[MPMediaItemPropertyPlaybackDuration] as? Double, 1234)
+        XCTAssertEqual(playing[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 42)
+        XCTAssertEqual(playing[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 1.5)
+
+        let paused = AudioBridge.nowPlayingInfo(
+            metadata: metadata,
+            position: 42,
+            duration: 0,
+            playbackRate: 1.5,
+            paused: true
+        )
+        XCTAssertEqual(paused[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 0)
+    }
+
     private static let d1 = "Mon, 06 Jan 2025 00:00:00 GMT"
     private static let d2 = "Tue, 07 Jan 2025 00:00:00 GMT"
     private static let d3 = "Wed, 08 Jan 2025 00:00:00 GMT"
@@ -331,5 +447,71 @@ final class PodsBackendTests: XCTestCase {
             """
         )
         try database.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)")
+    }
+}
+
+@MainActor
+final class PodsWebViewRecoveryTests: XCTestCase {
+    private final class FakeWebView: PodsWebViewLoading {
+        var url: URL?
+        var loadedURLs: [URL] = []
+        var evaluatedScripts: [String] = []
+        var nextEvaluationResult: Any?
+        var nextEvaluationError: Error?
+
+        func load(_ request: URLRequest) -> WKNavigation? {
+            if let url = request.url {
+                loadedURLs.append(url)
+                self.url = url
+            }
+            return nil
+        }
+
+        func reload() -> WKNavigation? {
+            nil
+        }
+
+        func evaluateJavaScript(
+            _ javaScriptString: String,
+            completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
+        ) {
+            evaluatedScripts.append(javaScriptString)
+            completionHandler?(nextEvaluationResult, nextEvaluationError)
+        }
+    }
+
+    private let localRootURL = URL(string: "http://127.0.0.1:18180/")!
+
+    func testWebContentTerminationReloadsLocalRoot() {
+        let recovery = PodsWebViewRecovery(rootURL: localRootURL)
+        let webView = FakeWebView()
+
+        recovery.recoverFromWebContentTermination(webView)
+
+        XCTAssertEqual(webView.loadedURLs, [localRootURL])
+    }
+
+    func testForegroundRecoveryReloadsWhenRootIsEmpty() {
+        let recovery = PodsWebViewRecovery(rootURL: localRootURL)
+        let webView = FakeWebView()
+        webView.url = localRootURL
+        webView.nextEvaluationResult = false
+
+        recovery.reloadIfContentMissing(webView)
+
+        XCTAssertEqual(webView.loadedURLs, [localRootURL])
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+    }
+
+    func testForegroundRecoveryKeepsRenderedRoot() {
+        let recovery = PodsWebViewRecovery(rootURL: localRootURL)
+        let webView = FakeWebView()
+        webView.url = localRootURL
+        webView.nextEvaluationResult = true
+
+        recovery.reloadIfContentMissing(webView)
+
+        XCTAssertTrue(webView.loadedURLs.isEmpty)
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
     }
 }

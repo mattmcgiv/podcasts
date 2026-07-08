@@ -7,6 +7,8 @@ DEVICE_ID="${IOS_DEVICE_ID:-}"
 XCODE_DESTINATION="${IOS_XCODE_DESTINATION:-}"
 TEAM_ID="${IOS_TEAM_ID:-}"
 PLIST_OUT="$HOME/Library/LaunchAgents/dev.mcgiv.pods.refresh.plist"
+LABEL="dev.mcgiv.pods.refresh"
+DOMAIN="gui/$(id -u)"
 
 if [ -z "$DEVICE_ID" ]; then
   echo "error: IOS_DEVICE_ID is required. Find it with: xcrun devicectl list devices" >&2
@@ -25,7 +27,8 @@ sed \
   -e "s#__TEAM_ID__#$TEAM_ID#g" \
   "$ROOT/ios/dev.mcgiv.pods.refresh.plist.template" > "$PLIST_OUT"
 
-launchctl unload "$PLIST_OUT" >/dev/null 2>&1 || true
-launchctl load "$PLIST_OUT"
+launchctl bootout "$DOMAIN" "$PLIST_OUT" >/dev/null 2>&1 || true
+launchctl bootstrap "$DOMAIN" "$PLIST_OUT"
+launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 echo "Installed launchd job at $PLIST_OUT"
-echo "It runs every 5 days and logs to ~/Library/Logs/Pods/ios-refresh.log."
+echo "It runs at login and every 48 hours, and logs to ~/Library/Logs/Pods/ios-refresh.log."

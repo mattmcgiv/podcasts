@@ -16,3 +16,6 @@ ios/Pods/Web/*
 !ios/Pods/Web/.gitkeep
 ios/Pods/SeedData/*.sqlite
 ios/Pods/SeedData/*.sqlite-*
+infra/terraform/hetzner-dev/.terraform/
+infra/terraform/hetzner-dev/terraform.tfstate*
+infra/terraform/hetzner-dev/terraform.tfvars

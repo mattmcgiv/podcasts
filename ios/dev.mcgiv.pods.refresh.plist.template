@@ -16,11 +16,13 @@
 		<string>__XCODE_DESTINATION__</string>
 		<key>IOS_TEAM_ID</key>
 		<string>__TEAM_ID__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>StartInterval</key>
-	<integer>432000</integer>
+	<integer>172800</integer>
 	<key>RunAtLoad</key>
-	<false/>
+	<true/>
 	<key>StandardOutPath</key>
 	<string>__ROOT__/ios/build/launchd.out.log</string>
 	<key>StandardErrorPath</key>

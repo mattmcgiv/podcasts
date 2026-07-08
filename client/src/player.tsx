@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
-import { createAudioEngine, type AudioEngine } from "./audioEngine";
+import { createAudioEngine, type AudioEngine, type AudioMetadata } from "./audioEngine";
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeItem, PlayContext } from "./types";
@@ -95,11 +95,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setExpanded(true);
       setPosition(item.position_secs);
       setDuration(item.duration_secs ?? 0);
-      resumeAtRef.current = item.position_secs > 1 ? item.position_secs : 0;
-      a.src = item.audio_url;
+      const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
+      resumeAtRef.current = a.loadSource ? 0 : resumeAt;
+      const metadata = audioMetadata(item);
+      a.setMetadata?.(metadata);
       a.playbackRate = speedRef.current;
+      if (a.loadSource) {
+        a.loadSource(item.audio_url, resumeAt, item.id);
+      } else {
+        a.src = item.audio_url;
+      }
       void a.play().catch(() => setPlaying(false));
-      updateMediaSessionMetadata(item);
+      updateMediaSessionMetadata(metadata);
       // Upgrade to the full detail (show notes) in the background.
       void Api.episode(item.id)
         .then((detail) => {
@@ -290,15 +297,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
 }
 
-function updateMediaSessionMetadata(item: EpisodeItem): void {
+function audioMetadata(item: EpisodeItem): AudioMetadata {
+  const art = item.image_url || item.podcast_image;
+  return {
+    title: item.title,
+    artist: item.podcast_title,
+    artwork: art ? absoluteArtworkUrl(art) : undefined,
+    duration: item.duration_secs ?? undefined,
+  };
+}
+
+function absoluteArtworkUrl(src: string): string {
+  try {
+    return new URL(src, window.PODS_API_BASE ?? window.location.origin).href;
+  } catch {
+    return src;
+  }
+}
+
+function updateMediaSessionMetadata(metadata: AudioMetadata): void {
   const ms = navigator.mediaSession;
   if (!ms || typeof MediaMetadata === "undefined") return;
   try {
-    const art = item.image_url || item.podcast_image;
     ms.metadata = new MediaMetadata({
-      title: item.title,
-      artist: item.podcast_title,
-      artwork: art ? [{ src: art }] : [],
+      title: metadata.title,
+      artist: metadata.artist,
+      artwork: metadata.artwork ? [{ src: metadata.artwork }] : [],
     });
   } catch {
     // metadata is best-effort

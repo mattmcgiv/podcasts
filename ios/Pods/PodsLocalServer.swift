@@ -16,12 +16,16 @@ final class PodsLocalServer {
 
     func start() throws {
         if listener != nil {
+            PodsDebugLog("Local server start skipped; listener already exists")
             return
         }
+        PodsDebugLog("Local server starting on 127.0.0.1:\(port)")
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         if let address = IPv4Address("127.0.0.1"), let nwPort = NWEndpoint.Port(rawValue: port) {
             parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(address), port: nwPort)
+        } else {
+            PodsDebugLog("Local server could not construct explicit 127.0.0.1 endpoint for port \(port)")
         }
         let listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] connection in
@@ -49,6 +53,7 @@ final class PodsLocalServer {
     }
 
     private func handle(_ connection: NWConnection) {
+        PodsDebugLog("Local server accepted connection from \(String(describing: connection.endpoint))")
         connection.start(queue: queue)
         readRequest(from: connection, buffer: Data())
     }
@@ -79,6 +84,7 @@ final class PodsLocalServer {
                         route = "api"
                     }
                     PodsLog("Pods local server \(request.method) \(request.target) -> \(response.statusCode) \(route)")
+                    PodsDebugLog("Local server response method=\(request.method) target=\(request.target) host=\(request.headers["host"] ?? "none") status=\(response.statusCode) route=\(route) bodyBytes=\(request.body.count)")
                     self.send(response, on: connection)
                 }
             } else if nextBuffer.count > 5_000_000 {

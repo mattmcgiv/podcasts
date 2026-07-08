@@ -78,8 +78,8 @@ export function SearchView() {
           <h2 className="section-title">Podcasts</h2>
           {!results.directory_configured && (
             <p className="muted">
-              Directory search is off — add Podcast Index keys to the server, or paste an RSS URL
-              in Shows → settings.
+              Directory search is off — add Podcast Index keys and reinstall the app, or paste an
+              RSS URL in Shows → settings.
             </p>
           )}
           {results.directory_configured && results.podcasts.length === 0 && (

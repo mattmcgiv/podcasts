@@ -2,6 +2,7 @@
 # Build/sign Pods and install it over the existing iPhone app.
 # This must never uninstall the app; reinstall-over-existing preserves app data.
 set -eu
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$HOME/Library/Logs/Pods"

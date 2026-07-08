@@ -5,10 +5,19 @@ export interface AudioEngine extends EventTarget {
   playbackRate: number;
   paused: boolean;
   preload: string;
+  loadSource?(src: string, position: number, episodeId?: number): void;
+  setMetadata?(metadata: AudioMetadata): void;
   play(): Promise<void>;
   pause(): void;
   load(): void;
   removeAttribute(name: string): void;
+}
+
+export interface AudioMetadata {
+  title: string;
+  artist: string;
+  artwork?: string;
+  duration?: number;
 }
 
 type NativeAudioEvent = {
@@ -21,7 +30,8 @@ type NativeAudioEvent = {
 };
 
 type NativeAudioCommandBody =
-  | { command: "load"; src: string; position: number; rate: number }
+  | { command: "load"; src: string; position: number; rate: number; episodeId?: number }
+  | { command: "metadata"; title: string; artist: string; artwork?: string; duration?: number }
   | { command: "play" }
   | { command: "pause" }
   | { command: "seek"; seconds: number }
@@ -77,8 +87,16 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
   }
 
   set src(value: string) {
-    this._src = value;
-    this.post({ command: "load", src: value, position: this._currentTime, rate: this._playbackRate });
+    this.loadSource(value, 0);
+  }
+
+  loadSource(src: string, position: number, episodeId?: number): void {
+    const initialPosition = Number.isFinite(position) ? Math.max(0, position) : 0;
+    this._src = src;
+    this._currentTime = initialPosition;
+    this._duration = NaN;
+    this._paused = true;
+    this.post({ command: "load", src, position: initialPosition, rate: this._playbackRate, episodeId });
   }
 
   get currentTime(): number {
@@ -135,6 +153,10 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this._duration = NaN;
     this._paused = true;
     this.post({ command: "stop" });
+  }
+
+  setMetadata(metadata: AudioMetadata): void {
+    this.post({ command: "metadata", ...metadata });
   }
 
   receive(event: NativeAudioEvent): void {

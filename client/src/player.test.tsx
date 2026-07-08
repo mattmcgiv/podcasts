@@ -1,9 +1,15 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { PlayerProvider, usePlayer } from "./player";
 import { episode, installApi, type MockRoutes } from "./test/mockApi";
 import { FakeAudio } from "./test/fakeAudio";
+
+afterEach(() => {
+  delete window.webkit;
+  delete window.PODS_API_BASE;
+  delete window.PodsAudioBridge;
+});
 
 function Probe() {
   const p = usePlayer();
@@ -11,6 +17,23 @@ function Probe() {
     <div>
       <button onClick={() => p.playEpisode(episode({ id: 1, position_secs: 30 }), "recent")}>
         play1
+      </button>
+      <button
+        onClick={() =>
+          p.playEpisode(
+            episode({
+              id: 4,
+              title: "Art Episode",
+              podcast_title: "Art Show",
+              audio_url: "https://h.example/art.mp3",
+              image_url: "/api/artwork/episodes/4",
+              duration_secs: 1234,
+            }),
+            "recent",
+          )
+        }
+      >
+        play-art
       </button>
       <button onClick={() => p.playEpisode(episode({ id: 9, position_secs: 0 }), "show")}>
         play9
@@ -37,8 +60,21 @@ function baseRoutes(extra: MockRoutes = {}): MockRoutes {
     "GET /api/settings": { speed: 2, autoplay: true },
     "PUT /api/settings": null,
     "GET /api/episodes/1": { ...episode({ id: 1, position_secs: 30 }), notes_html: "<p>n</p>", archived_at: null },
+    "GET /api/episodes/4": {
+      ...episode({
+        id: 4,
+        title: "Art Episode",
+        podcast_title: "Art Show",
+        audio_url: "https://h.example/art.mp3",
+        image_url: "/api/artwork/episodes/4",
+        duration_secs: 1234,
+      }),
+      notes_html: "",
+      archived_at: null,
+    },
     "GET /api/episodes/9": { ...episode({ id: 9 }), notes_html: "", archived_at: null },
     "PUT /api/episodes/1/position": null,
+    "PUT /api/episodes/4/position": null,
     "PUT /api/episodes/9/position": null,
     "POST /api/episodes/1/played": null,
     "POST /api/episodes/9/played": null,
@@ -74,6 +110,94 @@ describe("PlayerProvider", () => {
     expect(audio.currentTime).toBe(30); // resumed
     expect(audio.playbackRate).toBe(2); // persisted setting
     expect(screen.getByTestId("dur")).toHaveTextContent("1800");
+  });
+
+  it("sends now-playing metadata to the native audio bridge", async () => {
+    const messages: unknown[] = [];
+    window.PODS_API_BASE = "http://127.0.0.1:18180";
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play-art"));
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        command: "metadata",
+        title: "Art Episode",
+        artist: "Art Show",
+        artwork: "http://127.0.0.1:18180/api/artwork/episodes/4",
+        duration: 1234,
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({ command: "load", src: "https://h.example/art.mp3", rate: 2 }),
+    );
+  });
+
+  it("includes the episode id in native audio loads so native progress can persist", async () => {
+    const messages: unknown[] = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play1"));
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        command: "load",
+        episodeId: 1,
+        src: "https://h.example/ep.mp3",
+        position: 30,
+      }),
+    );
+  });
+
+  it("does not carry a previous native playback position into a fresh episode", async () => {
+    const messages: unknown[] = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play1"));
+    window.PodsAudioBridge?.emit({ type: "timeupdate", position: 4200, duration: 4800 });
+    await user.click(screen.getByText("play-art"));
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        command: "load",
+        src: "https://h.example/art.mp3",
+        position: 0,
+      }),
+    );
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({
+        command: "load",
+        src: "https://h.example/art.mp3",
+        position: 4200,
+      }),
+    );
   });
 
   it("toggles pause/play and tracks time", async () => {
