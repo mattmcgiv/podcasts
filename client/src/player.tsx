@@ -159,9 +159,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setPlaying(false);
       flushPosition();
     });
-    a.addEventListener("timeupdate", () => setPosition(a.currentTime));
+    const adoptDuration = () => {
+      if (Number.isFinite(a.duration) && a.duration > 0) setDuration(a.duration);
+    };
+    a.addEventListener("timeupdate", () => {
+      setPosition(a.currentTime);
+      adoptDuration();
+    });
     a.addEventListener("loadedmetadata", () => {
-      if (Number.isFinite(a.duration)) setDuration(a.duration);
+      adoptDuration();
       if (resumeAtRef.current > 0) {
         a.currentTime = resumeAtRef.current;
         resumeAtRef.current = 0;

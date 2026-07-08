@@ -4,6 +4,8 @@ import Network
 import UserNotifications
 
 /// Bonjour-advertised TCP control server. Accepts one active phone connection at a time.
+///
+/// Network I/O runs on `queue`. UI + `SpeakerPlayer` work always hops to the main actor.
 final class CastServer: ObservableObject {
     @Published private(set) var statusText: String = "Starting…"
     @Published private(set) var clientLabel: String = "No phone connected"
@@ -21,8 +23,19 @@ final class CastServer: ObservableObject {
 
     init(player: SpeakerPlayer) {
         self.player = player
-        self.player.onEvent = { [weak self] event in
-            self?.send(event, to: self?.connection)
+    }
+
+    /// Wire player → phone event delivery. Call from the main actor after construction.
+    @MainActor
+    func attachPlayerEvents() {
+        player.onEvent = { [weak self] event in
+            // Player events arrive on the main actor; hop sends onto the network queue so we
+            // never race `connection` mutations against NWConnection callbacks.
+            self?.queue.async {
+                guard let self else { return }
+                guard self.connectionAuthorized, let connection = self.connection else { return }
+                self.send(event, to: connection)
+            }
         }
     }
 
@@ -62,22 +75,50 @@ final class CastServer: ObservableObject {
     }
 
     func stop() {
-        connection?.cancel()
-        connection = nil
-        listener?.cancel()
-        listener = nil
-        isListening = false
-        statusText = "Stopped"
-        clientLabel = "No phone connected"
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.connection?.cancel()
+            self.connection = nil
+            self.connectionAuthorized = false
+            self.readBuffer = Data()
+            self.listener?.cancel()
+            self.listener = nil
+            DispatchQueue.main.async {
+                self.isListening = false
+                self.statusText = "Stopped"
+                self.clientLabel = "No phone connected"
+                Task { @MainActor in
+                    self.player.handle(command: ["cmd": "stop"])
+                }
+            }
+        }
     }
 
     func disconnectClient() {
         queue.async { [weak self] in
-            self?.connection?.cancel()
+            guard let self else { return }
+            let connection = self.connection
+            self.connectionAuthorized = false
+            self.connection = nil
+            self.readBuffer = Data()
+            // Prefer an orderly stop command before cancelling the socket.
+            if let connection, let data = CastProtocol.encodeLine([
+                "v": CastProtocol.version,
+                "type": "pause",
+                "position": 0,
+                "paused": true,
+            ]) {
+                connection.send(content: data, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            } else {
+                connection?.cancel()
+            }
             DispatchQueue.main.async {
-                self?.connection = nil
-                self?.connectionAuthorized = false
-                self?.clientLabel = "No phone connected"
+                self.clientLabel = "No phone connected"
+                Task { @MainActor in
+                    self.player.handle(command: ["cmd": "stop"])
+                }
             }
         }
     }
@@ -102,18 +143,28 @@ final class CastServer: ObservableObject {
                 self.sendHello(to: newConnection)
                 self.receive(on: newConnection)
             case .failed, .cancelled:
-                DispatchQueue.main.async {
-                    if self.connection === newConnection {
-                        self.connection = nil
-                        self.connectionAuthorized = false
-                        self.clientLabel = "No phone connected"
-                    }
-                }
+                self.handleConnectionEnded(newConnection, reason: "\(state)")
             default:
                 break
             }
         }
         newConnection.start(queue: queue)
+    }
+
+    private func handleConnectionEnded(_ ended: NWConnection, reason: String) {
+        // Only clear if this is still the active connection (ignore stale cancels).
+        guard connection === ended else { return }
+        connection = nil
+        connectionAuthorized = false
+        readBuffer = Data()
+        DispatchQueue.main.async {
+            self.clientLabel = "No phone connected"
+            // Exclusive sink: never keep Mac audio going without a phone controller.
+            Task { @MainActor in
+                self.player.handle(command: ["cmd": "stop"])
+            }
+        }
+        _ = reason
     }
 
     private func sendHello(to connection: NWConnection) {
@@ -129,6 +180,9 @@ final class CastServer: ObservableObject {
     private func receive(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
+            // Ignore receives for superseded connections.
+            guard self.connection === connection else { return }
+
             if let data, !data.isEmpty {
                 self.readBuffer.append(data)
                 let messages = CastProtocol.parseLines(from: &self.readBuffer)
@@ -138,13 +192,7 @@ final class CastServer: ObservableObject {
             }
             if isComplete || error != nil {
                 connection.cancel()
-                DispatchQueue.main.async {
-                    if self.connection === connection {
-                        self.connection = nil
-                        self.connectionAuthorized = false
-                        self.clientLabel = "No phone connected"
-                    }
-                }
+                self.handleConnectionEnded(connection, reason: isComplete ? "closed" : "error")
                 return
             }
             self.receive(on: connection)
@@ -163,7 +211,9 @@ final class CastServer: ObservableObject {
                 }
                 DispatchQueue.main.async {
                     self.clientLabel = "Phone connected"
-                    self.player.handle(command: body)
+                    Task { @MainActor in
+                        self.player.handle(command: body)
+                    }
                 }
             default:
                 break
@@ -204,7 +254,10 @@ final class CastServer: ObservableObject {
 
     private func completePairing(token: String, connection: NWConnection, label: String) {
         addAllowedToken(token)
-        connectionAuthorized = true
+        // Only authorize if this connection is still current.
+        if self.connection === connection {
+            connectionAuthorized = true
+        }
         send([
             "v": CastProtocol.version,
             "type": "paired",
@@ -224,16 +277,18 @@ final class CastServer: ObservableObject {
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Deny")
             let response = alert.runModal()
-            if response == .alertFirstButtonReturn {
-                self.completePairing(token: suggestedToken, connection: connection, label: "Phone paired")
-                self.notify(title: "Pods Speaker", body: "iPhone paired. Ready to play.")
-            } else {
-                self.send([
-                    "v": CastProtocol.version,
-                    "type": "error",
-                    "message": "pairing denied",
-                ], to: connection)
-                connection.cancel()
+            self.queue.async {
+                if response == .alertFirstButtonReturn {
+                    self.completePairing(token: suggestedToken, connection: connection, label: "Phone paired")
+                    self.notify(title: "Pods Speaker", body: "iPhone paired. Ready to play.")
+                } else {
+                    self.send([
+                        "v": CastProtocol.version,
+                        "type": "error",
+                        "message": "pairing denied",
+                    ], to: connection)
+                    connection.cancel()
+                }
             }
         }
     }

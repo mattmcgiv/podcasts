@@ -25,7 +25,9 @@ final class SpeakerBootstrap: ObservableObject {
     init() {
         let player = SpeakerPlayer()
         self.player = player
-        self.server = CastServer(player: player)
+        let server = CastServer(player: player)
+        server.attachPlayerEvents()
+        self.server = server
     }
 
     func startIfNeeded() {

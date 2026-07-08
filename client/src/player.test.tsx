@@ -200,6 +200,107 @@ describe("PlayerProvider", () => {
     );
   });
 
+  it("keeps feed duration when native loadedmetadata reports zero", async () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play1"));
+    // Default episode fixture has duration_secs: 1800
+    expect(screen.getByTestId("dur")).toHaveTextContent("1800");
+
+    act(() => {
+      window.PodsAudioBridge?.emit({ type: "loadedmetadata", duration: 0, position: 30 });
+    });
+    expect(screen.getByTestId("dur")).toHaveTextContent("1800");
+  });
+
+  it("adopts a positive duration from later native timeupdate events", async () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play1"));
+    act(() => {
+      window.PodsAudioBridge?.emit({ type: "loadedmetadata", duration: 0, position: 0 });
+    });
+    expect(screen.getByTestId("dur")).toHaveTextContent("1800");
+
+    act(() => {
+      window.PodsAudioBridge?.emit({ type: "timeupdate", position: 12, duration: 2400 });
+    });
+    expect(screen.getByTestId("dur")).toHaveTextContent("2400");
+    expect(screen.getByTestId("pos")).toHaveTextContent("12");
+  });
+
+  it("learns duration from native timeupdate when feed duration is missing", async () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+
+    function NullDurProbe() {
+      const p = usePlayer();
+      return (
+        <div>
+          <button
+            onClick={() =>
+              p.playEpisode(episode({ id: 11, duration_secs: null, position_secs: 0 }), "recent")
+            }
+          >
+            play-null-dur
+          </button>
+          <span data-testid="dur">{p.duration}</span>
+          <span data-testid="pos">{Math.floor(p.position)}</span>
+        </div>
+      );
+    }
+
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/11": {
+        ...episode({ id: 11, duration_secs: null }),
+        notes_html: "",
+        archived_at: null,
+      },
+      "PUT /api/episodes/11/position": null,
+    });
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <NullDurProbe />
+      </PlayerProvider>,
+    );
+
+    await user.click(screen.getByText("play-null-dur"));
+    expect(screen.getByTestId("dur")).toHaveTextContent("0");
+
+    act(() => {
+      window.PodsAudioBridge?.emit({ type: "loadedmetadata", duration: 0, position: 0 });
+    });
+    expect(screen.getByTestId("dur")).toHaveTextContent("0");
+
+    act(() => {
+      window.PodsAudioBridge?.emit({ type: "timeupdate", position: 3, duration: 999 });
+    });
+    expect(screen.getByTestId("dur")).toHaveTextContent("999");
+    expect(screen.getByTestId("pos")).toHaveTextContent("3");
+  });
+
   it("toggles pause/play and tracks time", async () => {
     const { user } = await setup();
     await user.click(screen.getByText("play1"));

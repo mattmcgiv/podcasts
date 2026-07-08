@@ -220,8 +220,9 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     if (event.position != null && Number.isFinite(event.position)) {
       this._currentTime = Math.max(0, event.position);
     }
-    if (event.duration != null && Number.isFinite(event.duration)) {
-      this._duration = Math.max(0, event.duration);
+    // Only adopt a positive duration; early native/Mac events often send 0 while unknown.
+    if (event.duration != null && Number.isFinite(event.duration) && event.duration > 0) {
+      this._duration = event.duration;
     }
     if (event.playbackRate != null && Number.isFinite(event.playbackRate)) {
       this._playbackRate = event.playbackRate;

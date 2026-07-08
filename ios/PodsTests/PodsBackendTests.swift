@@ -377,6 +377,15 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(PodsTemporaryDebugLog.isEnabled(now: afterExpiry))
     }
 
+    func testPositiveDurationRejectsZeroAndNonFinite() {
+        XCTAssertNil(AudioBridge.positiveDuration(nil))
+        XCTAssertNil(AudioBridge.positiveDuration(0))
+        XCTAssertNil(AudioBridge.positiveDuration(-1))
+        XCTAssertNil(AudioBridge.positiveDuration(.nan))
+        XCTAssertNil(AudioBridge.positiveDuration(.infinity))
+        XCTAssertEqual(AudioBridge.positiveDuration(1234), 1234)
+    }
+
     func testNowPlayingInfoIncludesEpisodeMetadataAndPlaybackState() throws {
         let metadata = try XCTUnwrap(AudioBridge.metadata(from: [
             "title": "Episode Title",

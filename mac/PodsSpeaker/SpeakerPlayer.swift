@@ -3,6 +3,10 @@ import Foundation
 import MediaPlayer
 
 /// Plays podcast media on the Mac and emits transport/progress events for the phone.
+///
+/// All player/UI mutations stay on the main actor. Remote-command and AVFoundation
+/// callbacks are hopped to main — updating `@Published` off-main has crashed this app.
+@MainActor
 final class SpeakerPlayer: ObservableObject {
     var onEvent: (([String: Any]) -> Void)?
 
@@ -11,11 +15,15 @@ final class SpeakerPlayer: ObservableObject {
     @Published private(set) var nowPlayingArtist = ""
 
     private var player: AVPlayer?
+    private var observedPlayer: AVPlayer?
     private var timeObserver: Any?
     private var requestedRate: Float = 1
     private var title: String = ""
     private var artist: String = ""
     private var episodeID: Int64?
+    private var metadataDuration: Double = 0
+    private var isStopping = false
+    private var loadGeneration: UInt64 = 0
 
     init() {
         NotificationCenter.default.addObserver(
@@ -24,11 +32,18 @@ final class SpeakerPlayer: ObservableObject {
             name: .AVPlayerItemDidPlayToEndTime,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(itemFailed(_:)),
+            name: .AVPlayerItemFailedToPlayToEndTime,
+            object: nil
+        )
         configureRemoteCommands()
     }
 
     deinit {
-        removeTimeObserver()
+        // Best-effort; MainActor deinit cannot always touch actor state safely on older SDKs.
+        // Observer removal also happens in stop()/load().
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -44,7 +59,8 @@ final class SpeakerPlayer: ObservableObject {
             artist = body["artist"] as? String ?? ""
             nowPlayingTitle = title.isEmpty ? "Pods Speaker" : title
             nowPlayingArtist = artist
-            load(url: url, position: position, rate: rate)
+            let metadataDuration = CastProtocol.doubleValue(body["duration"])
+            load(url: url, position: position, rate: rate, metadataDuration: metadataDuration)
         case "play":
             play()
         case "pause":
@@ -65,8 +81,8 @@ final class SpeakerPlayer: ObservableObject {
     }
 
     func togglePlayPause() {
-        guard let player else { return }
-        if player.rate == 0 {
+        guard player != nil else { return }
+        if player?.rate == 0 {
             play()
         } else {
             pause()
@@ -75,65 +91,95 @@ final class SpeakerPlayer: ObservableObject {
 
     // MARK: - Playback
 
-    private func load(url: URL, position: Double, rate: Float) {
+    private func load(url: URL, position: Double, rate: Float, metadataDuration: Double? = nil) {
+        isStopping = false
+        loadGeneration &+= 1
+        let generation = loadGeneration
+
         removeTimeObserver()
         requestedRate = rate
-        let item = AVPlayerItem(url: url)
-        player = AVPlayer(playerItem: item)
-        player?.automaticallyWaitsToMinimizeStalling = true
-        if position > 0 {
-            player?.seek(to: CMTime(seconds: max(0, position), preferredTimescale: 600))
+        if let metadataDuration, metadataDuration.isFinite, metadataDuration > 0 {
+            self.metadataDuration = metadataDuration
+        } else {
+            self.metadataDuration = 0
         }
-        addTimeObserver()
-        let duration = item.duration.seconds
+
+        // Tear down previous item fully before replacing the player.
+        if let existing = player {
+            existing.pause()
+            existing.rate = 0
+            existing.replaceCurrentItem(with: nil)
+        }
+
+        let item = AVPlayerItem(url: url)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.automaticallyWaitsToMinimizeStalling = true
+        player = newPlayer
+
+        if position > 0 {
+            let seekTime = CMTime(seconds: max(0, position), preferredTimescale: 600)
+            newPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+
+        // Only attach observer if this load is still current.
+        guard generation == loadGeneration, player === newPlayer else { return }
+        addTimeObserver(for: newPlayer, generation: generation)
+
+        let duration = Self.positiveDuration(item.duration.seconds) ?? Self.positiveDuration(self.metadataDuration)
         publishUI(playing: false)
         updateNowPlaying(position: position, duration: duration, rate: rate, paused: true)
-        emit([
+        var payload: [String: Any] = [
             "type": "loadedmetadata",
             "position": max(0, position),
-            "duration": duration.isFinite && duration > 0 ? duration : 0,
             "playbackRate": rate,
             "paused": true,
-        ])
+        ]
+        if let d = duration {
+            payload["duration"] = d
+        }
+        emit(payload)
     }
 
     private func play() {
-        player?.rate = requestedRate
+        guard !isStopping, let player else { return }
+        player.rate = requestedRate
         publishUI(playing: true)
         updateNowPlaying(rate: requestedRate, paused: false)
-        emit([
-            "type": "play",
-            "position": player?.currentTime().seconds ?? 0,
-            "duration": player?.currentItem?.duration.seconds ?? 0,
-            "playbackRate": requestedRate,
-            "paused": false,
-        ])
+        emit(transportEvent(
+            type: "play",
+            position: player.currentTime().seconds,
+            duration: currentDuration(),
+            playbackRate: requestedRate,
+            paused: false
+        ))
     }
 
     private func pause() {
-        player?.pause()
+        guard let player else { return }
+        player.pause()
         publishUI(playing: false)
         updateNowPlaying(rate: 0, paused: true)
-        emit([
-            "type": "pause",
-            "position": player?.currentTime().seconds ?? 0,
-            "duration": player?.currentItem?.duration.seconds ?? 0,
-            "playbackRate": requestedRate,
-            "paused": true,
-        ])
+        emit(transportEvent(
+            type: "pause",
+            position: player.currentTime().seconds,
+            duration: currentDuration(),
+            playbackRate: requestedRate,
+            paused: true
+        ))
     }
 
     private func seek(to seconds: Double) {
+        guard let player else { return }
         let safe = max(0, seconds)
-        player?.seek(to: CMTime(seconds: safe, preferredTimescale: 600))
+        player.seek(to: CMTime(seconds: safe, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         updateNowPlaying(position: safe)
-        emit([
-            "type": "timeupdate",
-            "position": safe,
-            "duration": player?.currentItem?.duration.seconds ?? 0,
-            "playbackRate": player?.rate == 0 ? requestedRate : (player?.rate ?? requestedRate),
-            "paused": player?.rate == 0,
-        ])
+        emit(transportEvent(
+            type: "timeupdate",
+            position: safe,
+            duration: currentDuration(),
+            playbackRate: player.rate == 0 ? requestedRate : player.rate,
+            paused: player.rate == 0
+        ))
     }
 
     private func setRate(_ rate: Float) {
@@ -148,21 +194,30 @@ final class SpeakerPlayer: ObservableObject {
     }
 
     private func stop() {
+        if isStopping { return }
+        isStopping = true
+        loadGeneration &+= 1
+
         removeTimeObserver()
-        player?.pause()
+        if let player {
+            player.pause()
+            player.rate = 0
+            player.replaceCurrentItem(with: nil)
+        }
         player = nil
         episodeID = nil
         title = ""
         artist = ""
+        metadataDuration = 0
         publishUI(playing: false)
         clearNowPlaying()
         emit([
             "type": "pause",
             "position": 0,
-            "duration": 0,
-            "playbackRate": 1,
+            "playbackRate": 1.0,
             "paused": true,
         ])
+        isStopping = false
     }
 
     private func publishUI(playing: Bool) {
@@ -171,60 +226,127 @@ final class SpeakerPlayer: ObservableObject {
         nowPlayingArtist = artist
     }
 
-    private func addTimeObserver() {
-        guard let player else { return }
+    private func currentDuration() -> Double? {
+        Self.positiveDuration(player?.currentItem?.duration.seconds)
+            ?? Self.positiveDuration(metadataDuration)
+    }
+
+    private func addTimeObserver(for player: AVPlayer, generation: UInt64) {
+        removeTimeObserver()
+        observedPlayer = player
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 1, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            guard let self else { return }
-            let duration = player.currentItem?.duration.seconds ?? 0
-            let rate = player.rate
-            self.updateNowPlaying(
-                position: time.seconds,
-                duration: duration,
-                rate: rate == 0 ? self.requestedRate : rate,
-                paused: rate == 0
-            )
-            self.emit([
-                "type": "timeupdate",
-                "position": time.seconds,
-                "duration": duration.isFinite && duration > 0 ? duration : 0,
-                "playbackRate": rate == 0 ? self.requestedRate : rate,
-                "paused": rate == 0,
-            ])
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard generation == self.loadGeneration else { return }
+                guard self.player === player, self.observedPlayer === player else { return }
+                guard !self.isStopping else { return }
+
+                let duration = self.currentDuration()
+                let rate = player.rate
+                let position = time.seconds
+                self.updateNowPlaying(
+                    position: position,
+                    duration: duration,
+                    rate: rate == 0 ? self.requestedRate : rate,
+                    paused: rate == 0
+                )
+                self.emit(self.transportEvent(
+                    type: "timeupdate",
+                    position: position,
+                    duration: duration,
+                    playbackRate: rate == 0 ? self.requestedRate : rate,
+                    paused: rate == 0
+                ))
+            }
         }
     }
 
     private func removeTimeObserver() {
-        if let timeObserver, let player {
+        // Must remove from the *same* AVPlayer that added the observer; wrong player raises.
+        if let timeObserver, let observedPlayer {
+            observedPlayer.removeTimeObserver(timeObserver)
+        } else if let timeObserver, let player {
+            // Fallback for older state.
             player.removeTimeObserver(timeObserver)
         }
         timeObserver = nil
+        observedPlayer = nil
     }
 
     @objc private func itemEnded(_ notification: Notification) {
-        guard let ended = notification.object as? AVPlayerItem, ended === player?.currentItem else {
-            return
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let ended = notification.object as? AVPlayerItem,
+                  ended === self.player?.currentItem else {
+                return
+            }
+            self.publishUI(playing: false)
+            self.updateNowPlaying(rate: 0, paused: true)
+            self.emit(self.transportEvent(
+                type: "ended",
+                position: self.player?.currentTime().seconds ?? 0,
+                duration: self.currentDuration(),
+                playbackRate: self.requestedRate,
+                paused: true
+            ))
         }
-        updateNowPlaying(rate: 0, paused: true)
-        emit([
-            "type": "ended",
-            "position": player?.currentTime().seconds ?? 0,
-            "duration": player?.currentItem?.duration.seconds ?? 0,
-            "playbackRate": requestedRate,
-            "paused": true,
-        ])
+    }
+
+    @objc private func itemFailed(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let failed = notification.object as? AVPlayerItem,
+                  failed === self.player?.currentItem else {
+                return
+            }
+            let message = failed.error?.localizedDescription ?? "playback failed"
+            self.publishUI(playing: false)
+            self.updateNowPlaying(rate: 0, paused: true)
+            self.emit([
+                "type": "error",
+                "message": message,
+                "position": self.player?.currentTime().seconds ?? 0,
+                "paused": true,
+            ])
+        }
     }
 
     private func emitState(type: String) {
-        emit([
+        emit(transportEvent(
+            type: type,
+            position: player?.currentTime().seconds ?? 0,
+            duration: currentDuration(),
+            playbackRate: player?.rate == 0 ? requestedRate : (player?.rate ?? requestedRate),
+            paused: player?.rate == 0
+        ))
+    }
+
+    private func transportEvent(
+        type: String,
+        position: Double,
+        duration: Double?,
+        playbackRate: Float,
+        paused: Bool
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
             "type": type,
-            "position": player?.currentTime().seconds ?? 0,
-            "duration": player?.currentItem?.duration.seconds ?? 0,
-            "playbackRate": player?.rate == 0 ? requestedRate : (player?.rate ?? requestedRate),
-            "paused": player?.rate == 0,
-        ])
+            "position": position.isFinite ? max(0, position) : 0,
+            "playbackRate": Double(playbackRate.isFinite && playbackRate > 0 ? playbackRate : 1),
+            "paused": paused,
+        ]
+        if let d = Self.positiveDuration(duration) {
+            payload["duration"] = d
+        }
+        return payload
+    }
+
+    /// Duration suitable for the phone player: finite and strictly greater than zero.
+    private static func positiveDuration(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
     }
 
     private func emit(_ fields: [String: Any]) {
@@ -233,7 +355,8 @@ final class SpeakerPlayer: ObservableObject {
             payload[k] = v
         }
         if let episodeID {
-            payload["episodeId"] = episodeID
+            // JSONSerialization is happiest with NSNumber-friendly ints.
+            payload["episodeId"] = NSNumber(value: episodeID)
         }
         onEvent?(payload)
     }
@@ -243,15 +366,24 @@ final class SpeakerPlayer: ObservableObject {
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in
-            self?.play()
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.play()
+            }
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
-            self?.pause()
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.pause()
+            }
             return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            self?.togglePlayPause()
+            guard let self else { return .commandFailed }
+            Task { @MainActor in
+                self.togglePlayPause()
+            }
             return .success
         }
     }
@@ -271,13 +403,14 @@ final class SpeakerPlayer: ObservableObject {
         }
         let pos = position ?? player?.currentTime().seconds ?? 0
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = pos.isFinite ? max(0, pos) : 0
-        let dur = duration ?? player?.currentItem?.duration.seconds ?? 0
-        if dur.isFinite && dur > 0 {
-            info[MPMediaItemPropertyPlaybackDuration] = dur
+        let rawDur = duration ?? player?.currentItem?.duration.seconds ?? metadataDuration
+        if let d = Self.positiveDuration(rawDur) {
+            info[MPMediaItemPropertyPlaybackDuration] = d
         }
         let playing = !(paused ?? (player?.rate == 0))
         let r = rate ?? requestedRate
-        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? Double(CastProtocol.normalizedRate(r)) : 0.0
+        let safeRate = r.isFinite && r > 0 ? r : 1
+        info[MPNowPlayingInfoPropertyPlaybackRate] = playing ? Double(safeRate) : 0.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         MPNowPlayingInfoCenter.default().playbackState = playing ? .playing : .paused
     }

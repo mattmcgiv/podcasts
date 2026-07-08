@@ -99,6 +99,32 @@ describe("native audio bridge", () => {
     );
   });
 
+  it("ignores non-positive duration events so early native zeros do not stick", () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+
+    const audio = createAudioEngine();
+    audio.loadSource?.("https://h.example/one.mp3", 0);
+    expect(Number.isNaN(audio.duration)).toBe(true);
+
+    window.PodsAudioBridge?.emit({ type: "loadedmetadata", duration: 0 });
+    expect(Number.isNaN(audio.duration)).toBe(true);
+
+    window.PodsAudioBridge?.emit({ type: "timeupdate", position: 5, duration: 1800 });
+    expect(audio.duration).toBe(1800);
+    expect(audio.currentTime).toBe(5);
+
+    // A later zero must not wipe a known duration.
+    window.PodsAudioBridge?.emit({ type: "timeupdate", position: 6, duration: 0 });
+    expect(audio.duration).toBe(1800);
+    expect(audio.currentTime).toBe(6);
+  });
+
   it("posts cast connect/disconnect and surfaces cast status events", () => {
     const messages: unknown[] = [];
     window.webkit = {

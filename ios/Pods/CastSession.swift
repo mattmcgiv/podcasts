@@ -68,15 +68,29 @@ final class CastSession {
     func disconnect(sendStop: Bool = true) {
         queue.async { [weak self] in
             guard let self else { return }
-            if sendStop {
-                self.sendRaw(["v": CastProtocol.version, "cmd": "stop"])
+            let connection = self.connection
+            let finish: () -> Void = { [weak self] in
+                guard let self else { return }
+                connection?.cancel()
+                if self.connection === connection {
+                    self.connection = nil
+                }
+                self.readBuffer = Data()
+                self.publishStatus { status in
+                    status.connected = false
+                    status.error = nil
+                }
             }
-            self.connection?.cancel()
-            self.connection = nil
-            self.readBuffer = Data()
-            self.publishStatus { status in
-                status.connected = false
-                status.error = nil
+            if sendStop, let connection, let data = CastProtocol.encodeLine([
+                "v": CastProtocol.version,
+                "cmd": "stop",
+            ]) {
+                // Deliver stop before tearing down the socket so Mac audio actually halts.
+                connection.send(content: data, completion: .contentProcessed { _ in
+                    finish()
+                })
+            } else {
+                finish()
             }
         }
     }
