@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Api } from "../api";
 import { EpisodeRow } from "../components/EpisodeRow";
 import { APP_NAME } from "../config";
@@ -11,6 +11,12 @@ export function RecentView() {
   const list = useList<EpisodeItem>(Api.recent);
   const player = usePlayer();
   const [refreshing, setRefreshing] = useState(false);
+  const [sortAscending, setSortAscending] = useState(false);
+  const sortLabel = sortAscending ? "Sort newest first" : "Sort oldest first";
+  const sortedItems = useMemo(
+    () => list.items?.slice().sort((a, b) => compareByReleaseDate(a, b, sortAscending)) ?? null,
+    [list.items, sortAscending],
+  );
 
   async function refresh() {
     if (refreshing) return;
@@ -36,6 +42,42 @@ export function RecentView() {
     <section className="view">
       <header className="view-header">
         <h1>{APP_NAME}</h1>
+        <button
+          className="icon-btn"
+          onClick={() => setSortAscending((current) => !current)}
+          aria-label={sortLabel}
+          aria-pressed={sortAscending}
+          title={sortLabel}
+        >
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
+            {sortAscending ? (
+              <path
+                d="M12 19V5M12 5l-5 5M12 5l5 5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ) : (
+              <path
+                d="M12 5v14M12 19l-5-5M12 19l5-5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+            <path
+              d="M5 5h4M5 12h3M5 19h2"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
         <button
           className={`icon-btn${refreshing ? " spinning" : ""}`}
           onClick={() => void refresh()}
@@ -63,7 +105,7 @@ export function RecentView() {
         </p>
       )}
       <ul className="episode-list">
-        {list.items?.map((item) => (
+        {sortedItems?.map((item) => (
           <EpisodeRow
             key={item.id}
             item={item}
@@ -80,4 +122,9 @@ export function RecentView() {
       )}
     </section>
   );
+}
+
+function compareByReleaseDate(a: EpisodeItem, b: EpisodeItem, ascending: boolean): number {
+  const direction = ascending ? 1 : -1;
+  return (a.published_at - b.published_at || a.id - b.id) * direction;
 }

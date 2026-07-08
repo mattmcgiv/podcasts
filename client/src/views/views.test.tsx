@@ -83,6 +83,33 @@ describe("RecentView", () => {
     await waitFor(() => expect(calls.some((c) => c.key === "POST /api/refresh")).toBe(true));
   });
 
+  it("toggles Listen episode sort by release date", async () => {
+    installApi({
+      ...settings,
+      "GET /api/recent": page([
+        episode({ id: 1, title: "Newest", published_at: 300 }),
+        episode({ id: 2, title: "Middle", published_at: 200 }),
+        episode({ id: 3, title: "Oldest", published_at: 100 }),
+      ]),
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+
+    await screen.findByText("Newest");
+    const titles = () =>
+      within(screen.getByRole("list"))
+        .getAllByRole("listitem")
+        .map((item) => within(item).getByText(/Newest|Middle|Oldest/).textContent);
+
+    expect(titles()).toEqual(["Newest", "Middle", "Oldest"]);
+
+    await user.click(screen.getByRole("button", { name: "Sort oldest first" }));
+    expect(titles()).toEqual(["Oldest", "Middle", "Newest"]);
+
+    await user.click(screen.getByRole("button", { name: "Sort newest first" }));
+    expect(titles()).toEqual(["Newest", "Middle", "Oldest"]);
+  });
+
   it("starts playback when a row is tapped", async () => {
     installApi({
       ...settings,
