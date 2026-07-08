@@ -8,7 +8,14 @@ export function MiniPlayer() {
     <div className="miniplayer">
       <button className="mini-main" onClick={() => p.setExpanded(true)} aria-label="Open player">
         <Artwork src={p.current.image_url || p.current.podcast_image} size={40} />
-        <span className="mini-title">{p.current.title}</span>
+        <span className="mini-title">
+          {p.cast.output === "mac" && p.cast.connected ? (
+            <span className="mini-cast" aria-label="Playing on Mac">
+              Mac ·{" "}
+            </span>
+          ) : null}
+          {p.current.title}
+        </span>
       </button>
       <button className="mini-toggle" onClick={p.toggle} aria-label={p.playing ? "Pause" : "Play"}>
         {p.playing ? <PauseIcon /> : <PlayIcon />}

@@ -4,6 +4,10 @@ import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
 import { PauseIcon, PlayIcon } from "./MiniPlayer";
 
+function shortName(name: string): string {
+  return name.replace(/^Pods Speaker\s*\(/, "").replace(/\)$/, "").slice(0, 22);
+}
+
 export function PlayerSheet() {
   const p = usePlayer();
   if (!p.current || !p.expanded) return null;
@@ -73,6 +77,47 @@ export function PlayerSheet() {
         </div>
 
         <div className="player-options">
+          <div className="cast-row" role="group" aria-label="Audio output">
+            <span className="cast-label">Play on</span>
+            <div className="cast-choices">
+              <button
+                type="button"
+                className={`chip${p.cast.output !== "mac" ? " active" : ""}`}
+                onClick={() => p.setCastOutput("local")}
+              >
+                iPhone
+              </button>
+              <button
+                type="button"
+                className={`chip${p.cast.output === "mac" ? " active" : ""}`}
+                onClick={() => p.setCastOutput("mac")}
+                disabled={!p.cast.available && !p.cast.connected}
+                title={
+                  p.cast.available || p.cast.connected
+                    ? p.cast.name ?? "Mac"
+                    : "Open Pods Speaker on your Mac (same Wi‑Fi)"
+                }
+              >
+                {p.cast.connected || p.cast.output === "mac"
+                  ? p.cast.name
+                    ? `Mac · ${shortName(p.cast.name)}`
+                    : "Mac"
+                  : p.cast.available
+                    ? "Mac"
+                    : "Mac (offline)"}
+              </button>
+            </div>
+            {p.cast.error && p.cast.output === "mac" && (
+              <p className="cast-error" role="status">
+                {p.cast.error}
+              </p>
+            )}
+            {p.cast.connected && p.cast.output === "mac" && (
+              <p className="cast-hint" role="status">
+                Playing through Mac · progress saves on this phone
+              </p>
+            )}
+          </div>
           <label className="switch-row">
             <span>Autoplay next</span>
             <input

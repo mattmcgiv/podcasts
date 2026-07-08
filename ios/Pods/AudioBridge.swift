@@ -10,6 +10,11 @@ struct NowPlayingMetadata: Equatable {
     let duration: Double?
 }
 
+enum PlaybackOutput: String {
+    case local
+    case mac
+}
+
 final class AudioBridge: NSObject, WKScriptMessageHandler {
     static let shared = AudioBridge()
 
@@ -33,6 +38,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var nowPlayingRate: Float = 1
     private var nowPlayingPaused = true
     private let progressRecordStrideSeconds: Double = 5
+
+    private var output: PlaybackOutput = .local
+    private var lastSrc: String?
+    private var pendingPlayAfterCastConnect = false
+    private var castWired = false
 
     private override init() {
         super.init()
@@ -59,6 +69,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     func attach(webView: WKWebView) {
         self.webView = webView
+        wireCastSessionIfNeeded()
+        CastSession.shared.startBrowsing()
+        emitCastStatus(CastSession.shared.currentStatus)
     }
 
     func configureSession() {
@@ -91,42 +104,255 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             )
         case "metadata":
             setNowPlayingMetadata(Self.metadata(from: body))
+            if output == .mac, let lastSrc, let url = URL(string: lastSrc) {
+                // Refresh Mac now-playing metadata via a silent reload of current position is heavy;
+                // metadata is included on the next load. Keep local now playing in sync.
+                _ = url
+            }
         case "play":
-            configureSession()
-            player?.rate = requestedRate
-            updateNowPlaying(rate: requestedRate, paused: false)
-            emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
+            play(id: id)
         case "pause":
-            player?.pause()
-            recordCurrentProgress(force: true)
-            updateNowPlaying(rate: 0, paused: true)
-            emitPlaybackState(type: "pause", id: id, paused: true)
+            pause(id: id)
         case "seek":
             let seconds = Self.doubleValue(body["seconds"]) ?? 0
-            player?.seek(to: CMTime(seconds: max(0, seconds), preferredTimescale: 600))
-            updateNowPlaying(position: seconds)
-            recordPlaybackProgress(position: seconds, force: true)
+            seek(id: id, seconds: seconds)
         case "rate":
             let rate = Self.normalizedRate(Self.floatValue(body["rate"]) ?? 1)
-            requestedRate = rate
-            if let player, player.rate != 0 {
-                player.rate = rate
-                updateNowPlaying(rate: rate, paused: false)
-            } else {
-                updateNowPlaying(rate: rate)
-            }
+            setRate(id: id, rate: rate)
         case "stop":
             stop(id: id)
+        case "castConnect":
+            setOutput(.mac, id: id, resume: true)
+        case "castDisconnect":
+            setOutput(.local, id: id, resume: true)
+        case "castStatus":
+            emitCastStatus(CastSession.shared.currentStatus)
         default:
             break
         }
     }
 
+    // MARK: - Output switching
+
+    private func setOutput(_ next: PlaybackOutput, id: Int, resume: Bool) {
+        if next == output, next == .local || CastSession.shared.currentStatus.connected {
+            emitCastStatus(CastSession.shared.currentStatus)
+            return
+        }
+        let position = nowPlayingPosition
+        let wasPlaying = !nowPlayingPaused
+        let rate = requestedRate
+
+        if next == .mac {
+            pendingPlayAfterCastConnect = resume && wasPlaying
+            stopLocalPlayer(record: true)
+            output = .mac
+            CastSession.shared.connectToFirstAvailable()
+            // If already connected, push load immediately.
+            if CastSession.shared.currentStatus.connected {
+                pushLoadToMac(position: position, rate: rate, autoplay: pendingPlayAfterCastConnect)
+                pendingPlayAfterCastConnect = false
+            }
+            emitCastStatus(CastSession.shared.currentStatus)
+            return
+        }
+
+        // Switch back to local
+        recordCurrentProgress(force: true)
+        CastSession.shared.disconnect(sendStop: true)
+        output = .local
+        pendingPlayAfterCastConnect = false
+        if resume, let lastSrc, let url = URL(string: lastSrc) {
+            loadLocal(id: id, url: url, episodeID: currentEpisodeID, position: position, rate: rate)
+            if wasPlaying {
+                playLocal(id: id)
+            }
+        }
+        emitCastStatus(CastSession.shared.currentStatus)
+    }
+
+    private func wireCastSessionIfNeeded() {
+        guard !castWired else { return }
+        castWired = true
+        CastSession.shared.onStatusChange = { [weak self] status in
+            guard let self else { return }
+            self.emitCastStatus(status)
+            if self.output == .mac, status.connected, self.pendingPlayAfterCastConnect || self.lastSrc != nil {
+                let shouldPlay = self.pendingPlayAfterCastConnect || !self.nowPlayingPaused
+                self.pushLoadToMac(
+                    position: self.nowPlayingPosition,
+                    rate: self.requestedRate,
+                    autoplay: shouldPlay
+                )
+                self.pendingPlayAfterCastConnect = false
+            }
+        }
+        CastSession.shared.onEvent = { [weak self] event in
+            self?.handleCastEvent(event)
+        }
+    }
+
+    private func pushLoadToMac(position: Double, rate: Float, autoplay: Bool) {
+        guard let lastSrc else { return }
+        var body: [String: Any] = [
+            "cmd": "load",
+            "src": lastSrc,
+            "position": max(0, position),
+            "rate": rate,
+        ]
+        if let currentEpisodeID {
+            body["episodeId"] = currentEpisodeID
+        }
+        if let metadata = nowPlayingMetadata {
+            body["title"] = metadata.title
+            body["artist"] = metadata.artist
+            if let artwork = metadata.artworkURL?.absoluteString {
+                body["artwork"] = artwork
+            }
+        }
+        CastSession.shared.sendCommand(body)
+        if autoplay {
+            CastSession.shared.sendCommand(["cmd": "play"])
+            updateNowPlaying(position: position, rate: rate, paused: false)
+            emit(type: "play", id: currentId, position: position, playbackRate: rate, paused: false)
+        } else {
+            updateNowPlaying(position: position, rate: rate, paused: true)
+        }
+    }
+
+    private func handleCastEvent(_ event: [String: Any]) {
+        let type = event["type"] as? String ?? ""
+        if type == "castDisconnected" {
+            // Fall back to local at last known position; keep progress durable.
+            recordCurrentProgress(force: true)
+            if output == .mac {
+                output = .local
+                if let lastSrc, let url = URL(string: lastSrc) {
+                    loadLocal(
+                        id: currentId,
+                        url: url,
+                        episodeID: currentEpisodeID,
+                        position: nowPlayingPosition,
+                        rate: requestedRate
+                    )
+                    // Resume local so listening continues if Mac drops.
+                    playLocal(id: currentId)
+                }
+            }
+            emitCastStatus(CastSession.shared.currentStatus)
+            return
+        }
+        if type == "castConnected" {
+            emitCastStatus(CastSession.shared.currentStatus)
+            return
+        }
+
+        guard output == .mac else { return }
+
+        let position = Self.doubleValue(event["position"])
+        let duration = Self.doubleValue(event["duration"])
+        let rate = Self.floatValue(event["playbackRate"]).map(Self.normalizedRate)
+        let paused = event["paused"] as? Bool
+
+        if let position {
+            nowPlayingPosition = max(0, position)
+        }
+        if let duration, duration > 0 {
+            nowPlayingDuration = duration
+        }
+        if let rate {
+            nowPlayingRate = rate
+            requestedRate = rate
+        }
+        if let paused {
+            nowPlayingPaused = paused
+        }
+
+        updateNowPlaying(
+            position: position,
+            duration: duration,
+            rate: rate,
+            paused: paused
+        )
+
+        switch type {
+        case "timeupdate":
+            if let position {
+                recordPlaybackProgress(position: position)
+            }
+            emit(
+                type: "timeupdate",
+                id: currentId,
+                position: position ?? nowPlayingPosition,
+                duration: duration ?? nowPlayingDuration,
+                playbackRate: rate ?? requestedRate,
+                paused: paused ?? nowPlayingPaused
+            )
+        case "play":
+            emit(type: "play", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: false)
+        case "pause":
+            if let position {
+                recordPlaybackProgress(position: position, force: true)
+            } else {
+                recordCurrentProgress(force: true)
+            }
+            emit(type: "pause", id: currentId, position: position ?? nowPlayingPosition, duration: duration ?? nowPlayingDuration, playbackRate: rate ?? requestedRate, paused: true)
+        case "loadedmetadata":
+            emit(type: "loadedmetadata", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: paused ?? true)
+        case "ended":
+            recordCurrentProgress(force: true)
+            emit(type: "ended", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: true)
+        case "state":
+            emit(type: "state", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: paused)
+        default:
+            break
+        }
+    }
+
+    // MARK: - Transport
+
     private func load(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
-        removeTimeObserver()
+        lastSrc = url.absoluteString
         currentEpisodeID = episodeID
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
+        requestedRate = rate
+        nowPlayingPosition = max(0, position)
+
+        if output == .mac {
+            stopLocalPlayer(record: false)
+            var body: [String: Any] = [
+                "cmd": "load",
+                "src": url.absoluteString,
+                "position": max(0, position),
+                "rate": rate,
+            ]
+            if let episodeID {
+                body["episodeId"] = episodeID
+            }
+            if let metadata = nowPlayingMetadata {
+                body["title"] = metadata.title
+                body["artist"] = metadata.artist
+                if let artwork = metadata.artworkURL?.absoluteString {
+                    body["artwork"] = artwork
+                }
+            }
+            if !CastSession.shared.currentStatus.connected {
+                pendingPlayAfterCastConnect = false
+                CastSession.shared.connectToFirstAvailable()
+            }
+            CastSession.shared.sendCommand(body)
+            updateNowPlaying(position: position, rate: rate, paused: true)
+            emit(type: "loadedmetadata", id: id, position: position, duration: nowPlayingDuration, playbackRate: rate, paused: true)
+            return
+        }
+
+        loadLocal(id: id, url: url, episodeID: episodeID, position: position, rate: rate)
+    }
+
+    private func loadLocal(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
+        removeTimeObserver()
+        currentEpisodeID = episodeID
         requestedRate = rate
         let item = AVPlayerItem(url: url)
         player = AVPlayer(playerItem: item)
@@ -140,16 +366,97 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         emit(type: "loadedmetadata", id: id, position: position, duration: initialDuration, playbackRate: rate, paused: true)
     }
 
+    private func play(id: Int) {
+        if output == .mac {
+            if !CastSession.shared.currentStatus.connected {
+                pendingPlayAfterCastConnect = true
+                CastSession.shared.connectToFirstAvailable()
+                return
+            }
+            CastSession.shared.sendCommand(["cmd": "play"])
+            updateNowPlaying(rate: requestedRate, paused: false)
+            emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
+            return
+        }
+        playLocal(id: id)
+    }
+
+    private func playLocal(id: Int) {
+        configureSession()
+        player?.rate = requestedRate
+        updateNowPlaying(rate: requestedRate, paused: false)
+        emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
+    }
+
+    private func pause(id: Int) {
+        if output == .mac {
+            CastSession.shared.sendCommand(["cmd": "pause"])
+            recordCurrentProgress(force: true)
+            updateNowPlaying(rate: 0, paused: true)
+            emitPlaybackState(type: "pause", id: id, paused: true)
+            return
+        }
+        player?.pause()
+        recordCurrentProgress(force: true)
+        updateNowPlaying(rate: 0, paused: true)
+        emitPlaybackState(type: "pause", id: id, paused: true)
+    }
+
+    private func seek(id: Int, seconds: Double) {
+        let safe = max(0, seconds)
+        nowPlayingPosition = safe
+        if output == .mac {
+            CastSession.shared.sendCommand(["cmd": "seek", "seconds": safe])
+            updateNowPlaying(position: safe)
+            recordPlaybackProgress(position: safe, force: true)
+            emit(type: "timeupdate", id: id, position: safe, duration: nowPlayingDuration, playbackRate: requestedRate, paused: nowPlayingPaused)
+            return
+        }
+        player?.seek(to: CMTime(seconds: safe, preferredTimescale: 600))
+        updateNowPlaying(position: safe)
+        recordPlaybackProgress(position: safe, force: true)
+    }
+
+    private func setRate(id: Int, rate: Float) {
+        requestedRate = rate
+        if output == .mac {
+            CastSession.shared.sendCommand(["cmd": "rate", "rate": rate])
+            if !nowPlayingPaused {
+                updateNowPlaying(rate: rate, paused: false)
+            } else {
+                updateNowPlaying(rate: rate)
+            }
+            return
+        }
+        if let player, player.rate != 0 {
+            player.rate = rate
+            updateNowPlaying(rate: rate, paused: false)
+        } else {
+            updateNowPlaying(rate: rate)
+        }
+    }
+
     private func stop(id: Int) {
         recordCurrentProgress(force: true)
-        removeTimeObserver()
-        player?.pause()
-        player = nil
+        if output == .mac {
+            CastSession.shared.sendCommand(["cmd": "stop"])
+        }
+        stopLocalPlayer(record: false)
         currentEpisodeID = nil
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
+        lastSrc = nil
         clearNowPlaying()
         emit(type: "pause", id: id, position: 0, duration: 0)
+    }
+
+    private func stopLocalPlayer(record: Bool) {
+        if record {
+            recordCurrentProgress(force: true)
+        }
+        removeTimeObserver()
+        player?.pause()
+        player = nil
     }
 
     private func addTimeObserver(id: Int) {
@@ -159,6 +466,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             queue: .main
         ) { [weak self] time in
             guard let self else { return }
+            // Only local clock writes progress when not casting.
+            guard self.output == .local else { return }
             self.emit(
                 type: "timeupdate",
                 id: id,
@@ -185,11 +494,13 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @objc private func playerItemEnded(_ notification: Notification) {
+        guard output == .local else { return }
         recordCurrentProgress(force: true)
         emit(type: "ended", id: currentId, paused: true)
     }
 
     @objc private func audioInterrupted(_ notification: Notification) {
+        guard output == .local else { return }
         guard let info = notification.userInfo,
               let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
@@ -219,6 +530,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @objc private func audioRouteChanged(_ notification: Notification) {
+        guard output == .local else { return }
         emit(
             type: "state",
             id: currentId,
@@ -239,37 +551,27 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in
             guard let self else { return .noSuchContent }
-            self.player?.rate = self.requestedRate
-            self.updateNowPlaying(rate: self.requestedRate, paused: false)
-            self.emit(type: "play", id: self.currentId, playbackRate: self.requestedRate, paused: false)
+            self.play(id: self.currentId)
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
             guard let self else { return .noSuchContent }
-            self.player?.pause()
-            self.recordCurrentProgress(force: true)
-            self.updateNowPlaying(rate: 0, paused: true)
-            self.emitPlaybackState(type: "pause", id: self.currentId, paused: true)
+            self.pause(id: self.currentId)
             return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self, let player = self.player else { return .noSuchContent }
-            if player.rate == 0 {
-                player.rate = self.requestedRate
-                self.updateNowPlaying(rate: self.requestedRate, paused: false)
-                self.emit(type: "play", id: self.currentId, playbackRate: self.requestedRate, paused: false)
+            guard let self else { return .noSuchContent }
+            if self.nowPlayingPaused {
+                self.play(id: self.currentId)
             } else {
-                player.pause()
-                self.recordCurrentProgress(force: true)
-                self.updateNowPlaying(rate: 0, paused: true)
-                self.emitPlaybackState(type: "pause", id: self.currentId, paused: true)
+                self.pause(id: self.currentId)
             }
             return .success
         }
     }
 
     private func recordCurrentProgress(force: Bool = false) {
-        recordPlaybackProgress(position: player?.currentTime().seconds ?? nowPlayingPosition, force: force)
+        recordPlaybackProgress(position: nowPlayingPosition, force: force)
     }
 
     private func recordPlaybackProgress(position: Double, force: Bool = false) {
@@ -285,6 +587,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         progressRecorder?.recordPlaybackProgress(episodeID: currentEpisodeID, seconds: position)
         lastRecordedEpisodeID = currentEpisodeID
         lastRecordedPosition = position
+        nowPlayingPosition = position
     }
 
     private func setNowPlayingMetadata(_ metadata: NowPlayingMetadata?) {
@@ -393,11 +696,32 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         emit(
             type: type,
             id: id,
-            position: player?.currentTime().seconds ?? nowPlayingPosition,
-            duration: player?.currentItem?.duration.seconds ?? nowPlayingDuration,
-            playbackRate: player?.rate ?? requestedRate,
+            position: output == .local ? (player?.currentTime().seconds ?? nowPlayingPosition) : nowPlayingPosition,
+            duration: output == .local ? (player?.currentItem?.duration.seconds ?? nowPlayingDuration) : nowPlayingDuration,
+            playbackRate: requestedRate,
             paused: paused
         )
+    }
+
+    private func emitCastStatus(_ status: CastStatus) {
+        var payload: [String: Any] = [
+            "type": "cast",
+            "id": currentId,
+            "output": output.rawValue,
+        ]
+        for (k, v) in status.jsObject {
+            payload[k] = v
+        }
+        // Also mirror under cast key for the JS engine.
+        payload["cast"] = status.jsObject.merging(["output": output.rawValue]) { _, new in new }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.PodsAudioBridge && window.PodsAudioBridge.emit(\(json));")
+        }
     }
 
     static func metadata(from body: [String: Any]) -> NowPlayingMetadata? {

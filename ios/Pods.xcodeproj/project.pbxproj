@@ -24,6 +24,8 @@
 		10A00000000000000000000E /* PodsStaticAssets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000027 /* PodsStaticAssets.swift */; };
 		10A00000000000000000000F /* PodsLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000028 /* PodsLog.swift */; };
 		10A00000000000000000001B /* PodcastIndexClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000029 /* PodcastIndexClient.swift */; };
+		10C000000000000000000001 /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000011 /* CastSession.swift */; };
+		10C000000000000000000002 /* CastProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000012 /* CastProtocol.swift */; };
 		10B000000000000000000001 /* PodsBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000011 /* PodsBackendTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -57,6 +59,8 @@
 		10A000000000000000000027 /* PodsStaticAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsStaticAssets.swift; sourceTree = "<group>"; };
 		10A000000000000000000028 /* PodsLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsLog.swift; sourceTree = "<group>"; };
 		10A000000000000000000029 /* PodcastIndexClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastIndexClient.swift; sourceTree = "<group>"; };
+		10C000000000000000000011 /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
+		10C000000000000000000012 /* CastProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastProtocol.swift; sourceTree = "<group>"; };
 		10B000000000000000000010 /* PodsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PodsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		10B000000000000000000011 /* PodsBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsBackendTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -106,6 +110,8 @@
 				10A000000000000000000027 /* PodsStaticAssets.swift */,
 				10A000000000000000000028 /* PodsLog.swift */,
 				10A000000000000000000029 /* PodcastIndexClient.swift */,
+				10C000000000000000000011 /* CastSession.swift */,
+				10C000000000000000000012 /* CastProtocol.swift */,
 				10A000000000000000000015 /* Info.plist */,
 				10A000000000000000000018 /* Assets.xcassets */,
 				10A000000000000000000016 /* Web */,
@@ -270,6 +276,8 @@
 				10A00000000000000000000E /* PodsStaticAssets.swift in Sources */,
 				10A00000000000000000000F /* PodsLog.swift in Sources */,
 				10A00000000000000000001B /* PodcastIndexClient.swift in Sources */,
+				10C000000000000000000001 /* CastSession.swift in Sources */,
+				10C000000000000000000002 /* CastProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

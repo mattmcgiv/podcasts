@@ -8,6 +8,7 @@ No discovery. No recommendations. Just your episodes, newest first.
 
 - `client/` — React app (runtime deps: react + react-dom, nothing else)
 - `ios/` — private iPhone target, Swift backend, local server, reinstall automation
+- `mac/` — optional **Pods Speaker** menu-bar app (play phone-controlled audio on the Mac without AirPlay)
 
 ## Renaming the app
 

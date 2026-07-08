@@ -7,6 +7,9 @@ export interface AudioEngine extends EventTarget {
   preload: string;
   loadSource?(src: string, position: number, episodeId?: number): void;
   setMetadata?(metadata: AudioMetadata): void;
+  castConnect?(): void;
+  castDisconnect?(): void;
+  requestCastStatus?(): void;
   play(): Promise<void>;
   pause(): void;
   load(): void;
@@ -20,13 +23,27 @@ export interface AudioMetadata {
   duration?: number;
 }
 
+export interface CastInfo {
+  available: boolean;
+  connected: boolean;
+  name?: string;
+  error?: string;
+  output?: "local" | "mac";
+}
+
 type NativeAudioEvent = {
   id?: number;
-  type: "play" | "pause" | "timeupdate" | "loadedmetadata" | "ended" | "state";
+  type: "play" | "pause" | "timeupdate" | "loadedmetadata" | "ended" | "state" | "cast";
   position?: number;
   duration?: number;
   playbackRate?: number;
   paused?: boolean;
+  available?: boolean;
+  connected?: boolean;
+  name?: string;
+  error?: string;
+  output?: "local" | "mac";
+  cast?: CastInfo;
 };
 
 type NativeAudioCommandBody =
@@ -36,7 +53,10 @@ type NativeAudioCommandBody =
   | { command: "pause" }
   | { command: "seek"; seconds: number }
   | { command: "rate"; rate: number }
-  | { command: "stop" };
+  | { command: "stop" }
+  | { command: "castConnect" }
+  | { command: "castDisconnect" }
+  | { command: "castStatus" };
 
 type NativeAudioCommand = NativeAudioCommandBody & { id: number };
 
@@ -75,11 +95,13 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
   private _duration = NaN;
   private _playbackRate = 1;
   private _paused = true;
+  private _cast: CastInfo = { available: false, connected: false, output: "local" };
 
   constructor() {
     super();
     nativeEngines.set(this.id, this);
     installNativeBridgeDispatcher();
+    this.post({ command: "castStatus" });
   }
 
   get src(): string {
@@ -127,6 +149,10 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     return this._paused;
   }
 
+  get cast(): CastInfo {
+    return this._cast;
+  }
+
   play(): Promise<void> {
     this._paused = false;
     this.post({ command: "play" });
@@ -159,7 +185,37 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this.post({ command: "metadata", ...metadata });
   }
 
+  castConnect(): void {
+    this.post({ command: "castConnect" });
+  }
+
+  castDisconnect(): void {
+    this.post({ command: "castDisconnect" });
+  }
+
+  requestCastStatus(): void {
+    this.post({ command: "castStatus" });
+  }
+
   receive(event: NativeAudioEvent): void {
+    if (event.type === "cast") {
+      const cast = event.cast ?? {
+        available: !!event.available,
+        connected: !!event.connected,
+        name: event.name,
+        error: event.error,
+        output: event.output,
+      };
+      this._cast = {
+        available: !!cast.available,
+        connected: !!cast.connected,
+        name: cast.name,
+        error: cast.error,
+        output: cast.output ?? event.output ?? this._cast.output,
+      };
+      this.dispatchEvent(new CustomEvent("cast", { detail: this._cast }));
+      return;
+    }
     if (event.id != null && event.id !== this.id) return;
     if (event.position != null && Number.isFinite(event.position)) {
       this._currentTime = Math.max(0, event.position);

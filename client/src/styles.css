@@ -654,6 +654,46 @@ input[type="search"]::-webkit-search-cancel-button {
   padding-top: 6px;
 }
 
+.cast-row {
+  padding: 12px 2px 4px;
+}
+
+.cast-label {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+
+.cast-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cast-choices .chip:disabled {
+  opacity: 0.45;
+}
+
+.cast-hint,
+.cast-error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.cast-hint {
+  color: var(--text-dim);
+}
+
+.cast-error {
+  color: var(--danger, #c44);
+}
+
+.mini-cast {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .switch-row {
   display: flex;
   align-items: center;

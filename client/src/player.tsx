@@ -9,7 +9,12 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
-import { createAudioEngine, type AudioEngine, type AudioMetadata } from "./audioEngine";
+import {
+  createAudioEngine,
+  type AudioEngine,
+  type AudioMetadata,
+  type CastInfo,
+} from "./audioEngine";
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeItem, PlayContext } from "./types";
@@ -24,6 +29,7 @@ export interface PlayerApi {
   duration: number;
   speed: number;
   autoplay: boolean;
+  cast: CastInfo;
   playEpisode: (item: EpisodeItem, context: PlayContext) => void;
   toggle: () => void;
   seekTo: (secs: number) => void;
@@ -32,6 +38,7 @@ export interface PlayerApi {
   setSpeed: (speed: number) => void;
   setAutoplay: (on: boolean) => void;
   setExpanded: (on: boolean) => void;
+  setCastOutput: (target: "local" | "mac") => void;
   markPlayedAndClose: () => Promise<void>;
   close: () => void;
 }
@@ -52,6 +59,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(0);
   const [speed, setSpeedState] = useState(1);
   const [autoplay, setAutoplayState] = useState(true);
+  const [cast, setCast] = useState<CastInfo>({ available: false, connected: false, output: "local" });
 
   const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
@@ -161,9 +169,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.playbackRate = speedRef.current;
     });
     a.addEventListener("ended", () => void endedRef.current());
+    a.addEventListener("cast", ((e: Event) => {
+      const detail = (e as CustomEvent<CastInfo>).detail;
+      if (detail) setCast(detail);
+    }) as EventListener);
+    a.requestCastStatus?.();
     audioRef.current = a;
     return a;
   }
+
+  // Ensure cast discovery starts even before the first play.
+  useEffect(() => {
+    ensureAudio();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Periodic position sync while playing.
   useEffect(() => {
@@ -237,6 +256,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     close();
   }, [close]);
 
+  const setCastOutput = useCallback((target: "local" | "mac") => {
+    const a = ensureAudio();
+    if (target === "mac") {
+      a.castConnect?.();
+      setCast((prev) => ({ ...prev, output: "mac" }));
+    } else {
+      a.castDisconnect?.();
+      setCast((prev) => ({ ...prev, output: "local", connected: false }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Lock-screen / hardware controls.
   useEffect(() => {
     const ms = navigator.mediaSession;
@@ -263,6 +294,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       duration,
       speed,
       autoplay,
+      cast,
       playEpisode,
       toggle,
       seekTo,
@@ -271,6 +303,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setSpeed,
       setAutoplay,
       setExpanded,
+      setCastOutput,
       markPlayedAndClose,
       close,
     }),
@@ -282,6 +315,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       duration,
       speed,
       autoplay,
+      cast,
       playEpisode,
       toggle,
       seekTo,
@@ -289,6 +323,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       skipBack,
       setSpeed,
       setAutoplay,
+      setCastOutput,
       markPlayedAndClose,
       close,
     ],

@@ -2,6 +2,12 @@
 
 This directory contains the private iPhone app target and the refresh automation for a free Xcode Personal Team install.
 
+## Play on Mac (Pods Speaker)
+
+Optional menu-bar companion so episode audio plays on your MacBook while you fully use the computer (not AirPlay). Progress still saves on the phone.
+
+See [`mac/README.md`](../mac/README.md) for setup. Summary: run `mac/PodsSpeaker.xcodeproj`, then in the iPhone player choose **Play on → Mac**.
+
 ## Xcode Setup
 
 The Mac must have full Xcode, not only Command Line Tools.

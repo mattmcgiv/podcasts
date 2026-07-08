@@ -37,8 +37,10 @@ describe("native audio bridge", () => {
     audio.currentTime = 42;
     audio.pause();
 
-    expect(messages).toEqual([
+    expect(messages).toContainEqual(
       expect.objectContaining({ command: "load", src: "https://h.example/one.mp3" }),
+    );
+    expect(messages).toContainEqual(
       expect.objectContaining({
         command: "metadata",
         title: "Episode",
@@ -46,11 +48,11 @@ describe("native audio bridge", () => {
         artwork: "http://127.0.0.1:18180/api/artwork/episodes/1",
         duration: 180,
       }),
-      expect.objectContaining({ command: "rate", rate: 2 }),
-      expect.objectContaining({ command: "play" }),
-      expect.objectContaining({ command: "seek", seconds: 42 }),
-      expect.objectContaining({ command: "pause" }),
-    ]);
+    );
+    expect(messages).toContainEqual(expect.objectContaining({ command: "rate", rate: 2 }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "play" }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "seek", seconds: 42 }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "pause" }));
 
     window.PodsAudioBridge?.emit({ type: "timeupdate", position: 12, duration: 180, paused: false });
     expect(audio.currentTime).toBe(12);
@@ -93,6 +95,48 @@ describe("native audio bridge", () => {
         command: "load",
         src: "https://h.example/three.mp3",
         position: 30,
+      }),
+    );
+  });
+
+  it("posts cast connect/disconnect and surfaces cast status events", () => {
+    const messages: unknown[] = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+
+    const audio = createAudioEngine();
+    const statuses: unknown[] = [];
+    audio.addEventListener("cast", ((e: Event) => {
+      statuses.push((e as CustomEvent).detail);
+    }) as EventListener);
+
+    audio.castConnect?.();
+    audio.castDisconnect?.();
+
+    expect(messages).toContainEqual(expect.objectContaining({ command: "castStatus" }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "castConnect" }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "castDisconnect" }));
+
+    window.PodsAudioBridge?.emit({
+      type: "cast",
+      available: true,
+      connected: true,
+      name: "Pods Speaker (MacBook)",
+      output: "mac",
+    });
+    expect(statuses).toContainEqual(
+      expect.objectContaining({
+        available: true,
+        connected: true,
+        name: "Pods Speaker (MacBook)",
+        output: "mac",
       }),
     );
   });
