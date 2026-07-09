@@ -45,6 +45,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var lastSrc: String?
     private var pendingPlayAfterCastConnect = false
     private var castWired = false
+    /// Silent local loop so iOS keeps us alive while Mac is the exclusive audio sink.
+    private var castKeepAlivePlayer: AVAudioPlayer?
 
     private override init() {
         super.init()
@@ -65,6 +67,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             selector: #selector(audioRouteChanged(_:)),
             name: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance()
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
         )
         configureRemoteCommands()
     }
@@ -148,6 +156,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             stopLocalPlayer(record: true)
             output = .mac
             nowPlayingPaused = !(resume && wasPlaying)
+            updateCastKeepAlive()
             if CastSession.shared.currentStatus.connected {
                 pushLoadToMac(position: position, rate: rate, autoplay: pendingPlayAfterCastConnect)
                 pendingPlayAfterCastConnect = false
@@ -165,6 +174,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         pendingPlayAfterCastConnect = false
         CastSession.shared.disconnect(sendStop: true)
         output = .local
+        updateCastKeepAlive()
         stopLocalPlayer(record: false)
         if resume, let lastSrc, let url = URL(string: lastSrc) {
             loadLocal(id: id, url: url, episodeID: currentEpisodeID, position: position, rate: rate)
@@ -183,8 +193,13 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             // Always hop to main — status callbacks should already be main, but be strict.
             let apply = {
                 self.emitCastStatus(status)
-                guard self.preferredOutput == .mac, status.connected else { return }
-                // Never leave local audio running once Mac is reachable.
+                guard self.preferredOutput == .mac else {
+                    self.updateCastKeepAlive()
+                    return
+                }
+                self.updateCastKeepAlive()
+                guard status.connected else { return }
+                // Never leave local episode audio running once Mac is reachable.
                 self.stopLocalPlayer(record: false)
                 self.output = .mac
                 if self.pendingPlayAfterCastConnect || self.lastSrc != nil {
@@ -257,10 +272,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             if preferredOutput == .mac {
                 output = .mac
                 stopLocalPlayer(record: false)
+                updateCastKeepAlive()
                 // Best-effort reconnect; Mac side stops audio on disconnect.
                 CastSession.shared.connectToFirstAvailable()
             } else {
                 output = .local
+                updateCastKeepAlive()
             }
             emitCastStatus(CastSession.shared.currentStatus)
             return
@@ -273,10 +290,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         // Progress / transport from Mac only while Mac is the chosen sink.
         guard preferredOutput == .mac else { return }
         output = .mac
-        // Exclusive sink: ignore any residual local player.
+        // Exclusive sink: ignore any residual episode player (keep-alive is separate).
         stopLocalPlayer(record: false)
+        updateCastKeepAlive()
 
-        let position = Self.doubleValue(event["position"])
+        let rawPosition = Self.doubleValue(event["position"])
+        let position = rawPosition.map {
+            PlaybackProgressPolicy.resolvedTransportPosition(candidate: $0, lastKnown: nowPlayingPosition)
+        }
         let duration = Self.doubleValue(event["duration"])
         let rate = Self.floatValue(event["playbackRate"]).map(Self.normalizedRate)
         let paused = event["paused"] as? Bool
@@ -306,7 +327,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "timeupdate":
             if let position {
                 // Cast path: persist frequently so phone progress stays in lockstep with Mac.
-                recordPlaybackProgress(position: position, force: true)
+                // allowRegress false so stop/pre-seek zeros cannot wipe minutes of progress.
+                recordPlaybackProgress(position: position, force: true, allowRegress: false)
             }
             emit(
                 type: "timeupdate",
@@ -317,12 +339,13 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 paused: paused ?? nowPlayingPaused
             )
         case "play":
-            // Mac started — ensure phone is silent.
+            // Mac started — ensure phone episode player is silent (keep-alive stays).
             stopLocalPlayer(record: false)
+            updateCastKeepAlive()
             emit(type: "play", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: false)
         case "pause":
             if let position {
-                recordPlaybackProgress(position: position, force: true)
+                recordPlaybackProgress(position: position, force: true, allowRegress: false)
             } else {
                 recordCurrentProgress(force: true)
             }
@@ -341,7 +364,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             emit(type: "ended", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: true)
         case "state":
             if let position {
-                recordPlaybackProgress(position: position, force: true)
+                recordPlaybackProgress(position: position, force: true, allowRegress: false)
             }
             emit(type: "state", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: paused)
         default:
@@ -363,6 +386,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             preferredOutput = .mac
             output = .mac
             stopLocalPlayer(record: false)
+            updateCastKeepAlive()
             if !CastSession.shared.currentStatus.connected {
                 pendingPlayAfterCastConnect = !nowPlayingPaused
                 CastSession.shared.connectToFirstAvailable()
@@ -381,6 +405,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             return
         }
 
+        updateCastKeepAlive()
         loadLocal(id: id, url: url, episodeID: episodeID, position: position, rate: rate)
     }
 
@@ -407,6 +432,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             preferredOutput = .mac
             output = .mac
             stopLocalPlayer(record: false)
+            updateCastKeepAlive()
             if !CastSession.shared.currentStatus.connected {
                 pendingPlayAfterCastConnect = true
                 CastSession.shared.connectToFirstAvailable()
@@ -452,7 +478,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "seek", "seconds": safe])
             updateNowPlaying(position: safe)
-            recordPlaybackProgress(position: safe, force: true)
+            recordPlaybackProgress(position: safe, force: true, allowRegress: true)
             emit(
                 type: "timeupdate",
                 id: id,
@@ -465,7 +491,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         player?.seek(to: CMTime(seconds: safe, preferredTimescale: 600))
         updateNowPlaying(position: safe)
-        recordPlaybackProgress(position: safe, force: true)
+        recordPlaybackProgress(position: safe, force: true, allowRegress: true)
     }
 
     private func setRate(id: Int, rate: Float) {
@@ -495,6 +521,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         preferredOutput = .local
         output = .local
         pendingPlayAfterCastConnect = false
+        updateCastKeepAlive()
         stopLocalPlayer(record: false)
         currentEpisodeID = nil
         lastRecordedEpisodeID = nil
@@ -567,10 +594,25 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @objc private func audioInterrupted(_ notification: Notification) {
-        guard output == .local else { return }
         guard let info = notification.userInfo,
               let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+            return
+        }
+
+        // While casting, only the silent keep-alive uses the phone audio session.
+        if preferredOutput == .mac || output == .mac {
+            switch type {
+            case .began:
+                recordCurrentProgress(force: true)
+            case .ended:
+                updateCastKeepAlive()
+                if CastSession.shared.currentStatus.connected {
+                    CastSession.shared.sendCommand(["cmd": "ping"])
+                }
+            @unknown default:
+                break
+            }
             return
         }
 
@@ -640,23 +682,76 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func recordCurrentProgress(force: Bool = false) {
-        recordPlaybackProgress(position: nowPlayingPosition, force: force)
+        recordPlaybackProgress(position: nowPlayingPosition, force: force, allowRegress: false)
     }
 
-    private func recordPlaybackProgress(position: Double, force: Bool = false) {
-        guard let currentEpisodeID, position.isFinite, position >= 0 else {
+    private func recordPlaybackProgress(position: Double, force: Bool = false, allowRegress: Bool = false) {
+        guard let currentEpisodeID else {
             return
         }
-        if !force,
-           lastRecordedEpisodeID == currentEpisodeID,
-           let lastRecordedPosition,
-           abs(position - lastRecordedPosition) < progressRecordStrideSeconds {
+        let lastForEpisode = lastRecordedEpisodeID == currentEpisodeID ? lastRecordedPosition : nil
+        guard PlaybackProgressPolicy.shouldPersist(
+            position: position,
+            lastRecordedPosition: lastForEpisode,
+            force: force,
+            allowRegress: allowRegress,
+            strideSeconds: progressRecordStrideSeconds
+        ) else {
             return
         }
         progressRecorder?.recordPlaybackProgress(episodeID: currentEpisodeID, seconds: position)
         lastRecordedEpisodeID = currentEpisodeID
         lastRecordedPosition = position
         nowPlayingPosition = position
+    }
+
+    // MARK: - Cast keep-alive (prevents iOS suspend while Mac plays)
+
+    private func updateCastKeepAlive() {
+        if PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: preferredOutput == .mac) {
+            startCastKeepAliveIfNeeded()
+        } else {
+            stopCastKeepAlive()
+        }
+    }
+
+    private func startCastKeepAliveIfNeeded() {
+        if let castKeepAlivePlayer, castKeepAlivePlayer.isPlaying {
+            return
+        }
+        configureSession()
+        do {
+            let player = try AVAudioPlayer(data: PlaybackProgressPolicy.silentKeepAliveWavData())
+            player.numberOfLoops = -1
+            player.volume = 0
+            player.prepareToPlay()
+            if player.play() {
+                castKeepAlivePlayer = player
+                PodsLog("Pods cast keep-alive started")
+            } else {
+                PodsLog("Pods cast keep-alive failed to start playback")
+            }
+        } catch {
+            PodsLog("Pods cast keep-alive setup failed: \(error)")
+        }
+    }
+
+    private func stopCastKeepAlive() {
+        guard castKeepAlivePlayer != nil else { return }
+        castKeepAlivePlayer?.stop()
+        castKeepAlivePlayer = nil
+        PodsLog("Pods cast keep-alive stopped")
+    }
+
+    @objc private func appDidBecomeActive() {
+        guard preferredOutput == .mac else { return }
+        updateCastKeepAlive()
+        if CastSession.shared.currentStatus.connected {
+            // Pull latest Mac clock after any suspension gap.
+            CastSession.shared.sendCommand(["cmd": "ping"])
+        } else {
+            CastSession.shared.connectToFirstAvailable()
+        }
     }
 
     private func setNowPlayingMetadata(_ metadata: NowPlayingMetadata?) {

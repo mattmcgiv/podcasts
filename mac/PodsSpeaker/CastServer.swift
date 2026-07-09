@@ -101,20 +101,24 @@ final class CastServer: ObservableObject {
             self.connectionAuthorized = false
             self.connection = nil
             self.readBuffer = Data()
-            // Prefer an orderly stop command before cancelling the socket.
-            if let connection, let data = CastProtocol.encodeLine([
-                "v": CastProtocol.version,
-                "type": "pause",
-                "position": 0,
-                "paused": true,
-            ]) {
-                connection.send(content: data, completion: .contentProcessed { _ in
-                    connection.cancel()
-                })
-            } else {
-                connection?.cancel()
-            }
+            // Prefer an orderly pause with the real position before cancelling the socket.
+            // Never send position 0 here — that wiped phone SQLite progress on disconnect.
             DispatchQueue.main.async {
+                let position = self.player.currentPositionSeconds
+                self.queue.async {
+                    if let connection, let data = CastProtocol.encodeLine([
+                        "v": CastProtocol.version,
+                        "type": "pause",
+                        "position": position,
+                        "paused": true,
+                    ]) {
+                        connection.send(content: data, completion: .contentProcessed { _ in
+                            connection.cancel()
+                        })
+                    } else {
+                        connection?.cancel()
+                    }
+                }
                 self.clientLabel = "No phone connected"
                 Task { @MainActor in
                     self.player.handle(command: ["cmd": "stop"])

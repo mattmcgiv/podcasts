@@ -26,6 +26,7 @@
 		10A00000000000000000001B /* PodcastIndexClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10A000000000000000000029 /* PodcastIndexClient.swift */; };
 		10C000000000000000000001 /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000011 /* CastSession.swift */; };
 		10C000000000000000000002 /* CastProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000012 /* CastProtocol.swift */; };
+		10C000000000000000000003 /* PlaybackProgressPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000013 /* PlaybackProgressPolicy.swift */; };
 		10B000000000000000000001 /* PodsBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000011 /* PodsBackendTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -61,6 +62,7 @@
 		10A000000000000000000029 /* PodcastIndexClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastIndexClient.swift; sourceTree = "<group>"; };
 		10C000000000000000000011 /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		10C000000000000000000012 /* CastProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastProtocol.swift; sourceTree = "<group>"; };
+		10C000000000000000000013 /* PlaybackProgressPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackProgressPolicy.swift; sourceTree = "<group>"; };
 		10B000000000000000000010 /* PodsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PodsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		10B000000000000000000011 /* PodsBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsBackendTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -112,6 +114,7 @@
 				10A000000000000000000029 /* PodcastIndexClient.swift */,
 				10C000000000000000000011 /* CastSession.swift */,
 				10C000000000000000000012 /* CastProtocol.swift */,
+				10C000000000000000000013 /* PlaybackProgressPolicy.swift */,
 				10A000000000000000000015 /* Info.plist */,
 				10A000000000000000000018 /* Assets.xcassets */,
 				10A000000000000000000016 /* Web */,
@@ -278,6 +281,7 @@
 				10A00000000000000000001B /* PodcastIndexClient.swift in Sources */,
 				10C000000000000000000001 /* CastSession.swift in Sources */,
 				10C000000000000000000002 /* CastProtocol.swift in Sources */,
+				10C000000000000000000003 /* PlaybackProgressPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

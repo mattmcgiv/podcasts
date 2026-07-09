@@ -386,6 +386,126 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(AudioBridge.positiveDuration(1234), 1234)
     }
 
+    func testPlaybackProgressPolicyRejectsNonFiniteAndRegressions() {
+        // Fresh episode: any finite non-negative position is eligible.
+        XCTAssertTrue(PlaybackProgressPolicy.shouldPersist(
+            position: 0,
+            lastRecordedPosition: nil,
+            force: false,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+        XCTAssertTrue(PlaybackProgressPolicy.shouldPersist(
+            position: 12,
+            lastRecordedPosition: nil,
+            force: false,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+
+        // Glitch zeros / NaN from cast stop or pre-seek clock must not wipe progress.
+        XCTAssertFalse(PlaybackProgressPolicy.shouldPersist(
+            position: .nan,
+            lastRecordedPosition: 1_800,
+            force: true,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.shouldPersist(
+            position: 0,
+            lastRecordedPosition: 1_800,
+            force: true,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.shouldPersist(
+            position: 1_700,
+            lastRecordedPosition: 1_800,
+            force: true,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+
+        // Explicit seek (scrub / skip-back) may move backwards.
+        XCTAssertTrue(PlaybackProgressPolicy.shouldPersist(
+            position: 1_700,
+            lastRecordedPosition: 1_800,
+            force: true,
+            allowRegress: true,
+            strideSeconds: 5
+        ))
+
+        // Normal stride throttling when not forced.
+        XCTAssertFalse(PlaybackProgressPolicy.shouldPersist(
+            position: 1_802,
+            lastRecordedPosition: 1_800,
+            force: false,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+        XCTAssertTrue(PlaybackProgressPolicy.shouldPersist(
+            position: 1_806,
+            lastRecordedPosition: 1_800,
+            force: false,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+        // Cast path forces frequent writes once advancing.
+        XCTAssertTrue(PlaybackProgressPolicy.shouldPersist(
+            position: 1_801,
+            lastRecordedPosition: 1_800,
+            force: true,
+            allowRegress: false,
+            strideSeconds: 5
+        ))
+    }
+
+    func testCastKeepAliveRunsOnlyWhileMacIsPreferredOutput() {
+        // While casting, the phone stops local AVPlayer. Without a keep-alive audio
+        // session, iOS suspends the app when locked and progress stops saving.
+        XCTAssertTrue(PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: true))
+        XCTAssertFalse(PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: false))
+    }
+
+    func testTransportPositionPrefersLastKnownOverInvalidClock() {
+        // Mac stop / pre-seek AVPlayer clocks must not report 0 when we already know better.
+        XCTAssertEqual(
+            PlaybackProgressPolicy.resolvedTransportPosition(
+                candidate: .nan,
+                lastKnown: 1_234
+            ),
+            1_234
+        )
+        XCTAssertEqual(
+            PlaybackProgressPolicy.resolvedTransportPosition(
+                candidate: 0,
+                lastKnown: 1_234
+            ),
+            1_234
+        )
+        XCTAssertEqual(
+            PlaybackProgressPolicy.resolvedTransportPosition(
+                candidate: 1_250,
+                lastKnown: 1_234
+            ),
+            1_250
+        )
+        XCTAssertEqual(
+            PlaybackProgressPolicy.resolvedTransportPosition(
+                candidate: 0,
+                lastKnown: 0
+            ),
+            0
+        )
+    }
+
+    func testSilentKeepAliveWavIsValidRIFF() {
+        let data = PlaybackProgressPolicy.silentKeepAliveWavData()
+        XCTAssertGreaterThan(data.count, 44)
+        XCTAssertEqual(String(data: data.prefix(4), encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: data.subdata(in: 8..<12), encoding: .ascii), "WAVE")
+    }
+
     func testNowPlayingInfoIncludesEpisodeMetadataAndPlaybackState() throws {
         let metadata = try XCTUnwrap(AudioBridge.metadata(from: [
             "title": "Episode Title",

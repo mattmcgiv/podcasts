@@ -22,8 +22,17 @@ final class SpeakerPlayer: ObservableObject {
     private var artist: String = ""
     private var episodeID: Int64?
     private var metadataDuration: Double = 0
+    private var lastKnownPosition: Double = 0
     private var isStopping = false
     private var loadGeneration: UInt64 = 0
+
+    /// Last finite playback position, for disconnect/stop events that must not report 0.
+    var currentPositionSeconds: Double {
+        if let seconds = player?.currentTime().seconds, seconds.isFinite {
+            return max(0, seconds)
+        }
+        return lastKnownPosition.isFinite ? max(0, lastKnownPosition) : 0
+    }
 
     init() {
         NotificationCenter.default.addObserver(
@@ -60,6 +69,9 @@ final class SpeakerPlayer: ObservableObject {
             nowPlayingTitle = title.isEmpty ? "Pods Speaker" : title
             nowPlayingArtist = artist
             let metadataDuration = CastProtocol.doubleValue(body["duration"])
+            if position.isFinite, position >= 0 {
+                lastKnownPosition = position
+            }
             load(url: url, position: position, rate: rate, metadataDuration: metadataDuration)
         case "play":
             play()
@@ -171,6 +183,8 @@ final class SpeakerPlayer: ObservableObject {
     private func seek(to seconds: Double) {
         guard let player else { return }
         let safe = max(0, seconds)
+        // Intentional scrub — update last known before emit so near-zero seeks are not treated as glitches.
+        lastKnownPosition = safe
         player.seek(to: CMTime(seconds: safe, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         updateNowPlaying(position: safe)
         emit(transportEvent(
@@ -198,6 +212,12 @@ final class SpeakerPlayer: ObservableObject {
         isStopping = true
         loadGeneration &+= 1
 
+        // Capture real progress before teardown so the phone does not persist a glitch zero.
+        let stopPosition = currentPositionSeconds
+        let stopDuration = currentDuration()
+        let stopEpisodeID = episodeID
+        lastKnownPosition = stopPosition
+
         removeTimeObserver()
         if let player {
             player.pause()
@@ -205,18 +225,23 @@ final class SpeakerPlayer: ObservableObject {
             player.replaceCurrentItem(with: nil)
         }
         player = nil
-        episodeID = nil
+        episodeID = stopEpisodeID
         title = ""
         artist = ""
         metadataDuration = 0
         publishUI(playing: false)
         clearNowPlaying()
-        emit([
+        var payload: [String: Any] = [
             "type": "pause",
-            "position": 0,
+            "position": stopPosition,
             "playbackRate": 1.0,
             "paused": true,
-        ])
+        ]
+        if let stopDuration {
+            payload["duration"] = stopDuration
+        }
+        emit(payload)
+        episodeID = nil
         isStopping = false
     }
 
@@ -331,9 +356,13 @@ final class SpeakerPlayer: ObservableObject {
         playbackRate: Float,
         paused: Bool
     ) -> [String: Any] {
+        let resolved = Self.resolvedPosition(candidate: position, lastKnown: lastKnownPosition)
+        if resolved.isFinite {
+            lastKnownPosition = resolved
+        }
         var payload: [String: Any] = [
             "type": type,
-            "position": position.isFinite ? max(0, position) : 0,
+            "position": resolved,
             "playbackRate": Double(playbackRate.isFinite && playbackRate > 0 ? playbackRate : 1),
             "paused": paused,
         ]
@@ -341,6 +370,19 @@ final class SpeakerPlayer: ObservableObject {
             payload["duration"] = d
         }
         return payload
+    }
+
+    /// Prefer last known progress over invalid / sudden-zero clocks (pre-seek, teardown).
+    static func resolvedPosition(candidate: Double, lastKnown: Double) -> Double {
+        let known = lastKnown.isFinite ? max(0, lastKnown) : 0
+        guard candidate.isFinite else {
+            return known
+        }
+        let safe = max(0, candidate)
+        if safe < 1, known > 1 {
+            return known
+        }
+        return safe
     }
 
     /// Duration suitable for the phone player: finite and strictly greater than zero.
