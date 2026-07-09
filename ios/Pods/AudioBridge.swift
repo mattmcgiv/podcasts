@@ -744,6 +744,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @objc private func appDidBecomeActive() {
+        // Re-browse so a Mac that launched (or recovered) while we were suspended shows up.
+        CastSession.shared.refreshBrowsing()
+        emitCastStatus(CastSession.shared.currentStatus)
         guard preferredOutput == .mac else { return }
         updateCastKeepAlive()
         if CastSession.shared.currentStatus.connected {

@@ -30,15 +30,48 @@ final class CastSession {
     var currentStatus: CastStatus { status }
 
     func startBrowsing() {
+        queue.async { [weak self] in
+            self?.startBrowsingLocked()
+        }
+    }
+
+    /// Restart discovery (e.g. after returning to foreground) so a Mac that appeared
+    /// while the browser was wedged becomes visible again.
+    func refreshBrowsing() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let browser = self.browser {
+                browser.cancel()
+                self.browser = nil
+            }
+            self.startBrowsingLocked()
+        }
+    }
+
+    private func startBrowsingLocked() {
         guard browser == nil else { return }
         let descriptor = NWBrowser.Descriptor.bonjour(type: CastProtocol.bonjourType, domain: nil)
-        let browser = NWBrowser(for: descriptor, using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let browser = NWBrowser(for: descriptor, using: parameters)
         browser.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
+            guard let self else { return }
+            switch state {
+            case .failed(let error):
                 PodsLog("Pods cast browser failed: \(error)")
-                self?.publishStatus { status in
+                self.publishStatus { status in
                     status.error = error.localizedDescription
+                    status.available = false
                 }
+                // Drop failed browser so a later refresh can recreate it.
+                browser.cancel()
+                if self.browser === browser {
+                    self.browser = nil
+                }
+            case .ready:
+                PodsLog("Pods cast browser ready")
+            default:
+                break
             }
         }
         browser.browseResultsChangedHandler = { [weak self] results, _ in
@@ -143,7 +176,9 @@ final class CastSession {
     private func openConnection(to endpoint: NWEndpoint, name: String) {
         connection?.cancel()
         readBuffer = Data()
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = true
+        let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
         publishStatus { status in
             status.name = name

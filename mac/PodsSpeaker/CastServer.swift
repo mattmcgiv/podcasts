@@ -43,6 +43,7 @@ final class CastServer: ObservableObject {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
+            parameters.includePeerToPeer = true
             let listener = try NWListener(using: parameters)
             listener.service = NWListener.Service(name: "Pods Speaker (\(deviceName))", type: CastProtocol.bonjourType)
             listener.stateUpdateHandler = { [weak self] state in

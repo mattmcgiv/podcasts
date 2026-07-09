@@ -467,6 +467,13 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: false))
     }
 
+    func testMacCastIsSelectableWhenDiscoveredOrConnected() {
+        XCTAssertFalse(PlaybackProgressPolicy.isMacCastSelectable(available: false, connected: false))
+        XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: true, connected: false))
+        XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: false, connected: true))
+        XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: true, connected: true))
+    }
+
     func testTransportPositionPrefersLastKnownOverInvalidClock() {
         // Mac stop / pre-seek AVPlayer clocks must not report 0 when we already know better.
         XCTAssertEqual(

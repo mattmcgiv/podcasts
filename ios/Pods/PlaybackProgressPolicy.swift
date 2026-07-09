@@ -35,6 +35,11 @@ enum PlaybackProgressPolicy {
         preferredOutputIsMac
     }
 
+    /// Phone UI shows Mac as selectable only when Bonjour has discovered a speaker (or we are already connected).
+    static func isMacCastSelectable(available: Bool, connected: Bool) -> Bool {
+        available || connected
+    }
+
     /// Prefer a known-good position over invalid / zero clocks when we already advanced.
     static func resolvedTransportPosition(candidate: Double, lastKnown: Double) -> Double {
         let known = lastKnown.isFinite ? max(0, lastKnown) : 0
