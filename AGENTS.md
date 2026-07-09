@@ -31,6 +31,6 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 - Mobile-only (iPhone). No tablet/desktop layouts.
 - Primary browser: **Chrome on iPhone** — Matt uses it most of the time. Pods is for his personal use, so optimize for Chrome's features. (Note: Chrome on iOS still uses the WebKit engine, so web-platform capabilities match Safari; the differences are in browser UI/features, not the rendering/JS engine.)
 - **No discovery/recommendation features — ever.** This is an anti-requirement from Matt.
-- Recent (default view) = unplayed episodes, newest first. Mark-played removes; Played view is the archive.
+- Recent (default view) = unplayed episodes, oldest first. Mark-played removes; Played view is the archive.
 - Client runtime deps stay at exactly `react` + `react-dom`. Routing is the hand-rolled hash router in `client/src/router.ts`. Justify any proposed new dependency in terms of the supply-chain posture.
 - App display name: `APP_NAME` in `client/src/config.ts` + `client/public/manifest.webmanifest`.

@@ -10,26 +10,11 @@ import type { EpisodeItem } from "../types";
 export function RecentView() {
   const list = useList<EpisodeItem>(Api.recent);
   const player = usePlayer();
-  const [refreshing, setRefreshing] = useState(false);
-  const [sortAscending, setSortAscending] = useState(false);
-  const sortLabel = sortAscending ? "Sort newest first" : "Sort oldest first";
+  const [sortAscending, setSortAscending] = useState(true);
   const sortedItems = useMemo(
     () => list.items?.slice().sort((a, b) => compareByReleaseDate(a, b, sortAscending)) ?? null,
     [list.items, sortAscending],
   );
-
-  async function refresh() {
-    if (refreshing) return;
-    setRefreshing(true);
-    try {
-      await Api.refresh();
-      emitEpisodesChanged();
-    } catch {
-      // surfaced on next manual attempt; lists stay as they were
-    } finally {
-      setRefreshing(false);
-    }
-  }
 
   function markPlayed(item: EpisodeItem) {
     list.removeById(item.id);
@@ -43,49 +28,23 @@ export function RecentView() {
       <header className="view-header">
         <h1>{APP_NAME}</h1>
         <button
-          className="icon-btn"
+          type="button"
+          className="sort-toggle"
+          role="switch"
+          aria-checked={sortAscending}
+          aria-label="Oldest first Newest"
+          title={sortAscending ? "Oldest first" : "Newest"}
           onClick={() => setSortAscending((current) => !current)}
-          aria-label={sortLabel}
-          aria-pressed={sortAscending}
-          title={sortLabel}
         >
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
-            {sortAscending ? (
-              <path
-                d="M12 19V5m0 0-5 5m5-5 5 5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            ) : (
-              <path
-                d="M12 5v14m0 0-5-5m5 5 5-5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            )}
-          </svg>
-        </button>
-        <button
-          className={`icon-btn${refreshing ? " spinning" : ""}`}
-          onClick={() => void refresh()}
-          aria-label="Refresh feeds"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
-            <path
-              d="M20 12a8 8 0 11-2.34-5.66M20 3v4h-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <span className={`sort-toggle-label${sortAscending ? " is-active" : ""}`}>
+            Oldest first
+          </span>
+          <span className="sort-toggle-track" aria-hidden>
+            <span className="sort-toggle-thumb" />
+          </span>
+          <span className={`sort-toggle-label${!sortAscending ? " is-active" : ""}`}>
+            Newest
+          </span>
         </button>
       </header>
 
@@ -93,8 +52,8 @@ export function RecentView() {
       {list.items == null && !list.error && <p className="muted">Loading…</p>}
       {list.items != null && list.items.length === 0 && (
         <p className="empty">
-          Nothing new. Subscribe to podcasts in the Search tab, or pull fresh episodes with the
-          refresh button.
+          Nothing new. Subscribe to podcasts in the Search tab. Feeds refresh
+          automatically while Pods is open, or use Refresh all feeds in Settings.
         </p>
       )}
       <ul className="episode-list">

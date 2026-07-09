@@ -69,18 +69,16 @@ describe("RecentView", () => {
     await waitFor(() => expect(recentCalls).toBeGreaterThanOrEqual(3)); // initial + loadMore + reload
   });
 
-  it("shows the empty state and triggers refresh", async () => {
-    const { calls } = installApi({
+  it("has no Listen refresh control and empty state does not mention refresh button", async () => {
+    installApi({
       ...settings,
       "GET /api/recent": page([]),
-      "POST /api/refresh": { refreshed: 2, errors: 0 },
     });
-    const user = userEvent.setup();
     wrap(<RecentView />);
     await screen.findByText(/Nothing new/);
 
-    await user.click(screen.getByRole("button", { name: "Refresh feeds" }));
-    await waitFor(() => expect(calls.some((c) => c.key === "POST /api/refresh")).toBe(true));
+    expect(screen.queryByRole("button", { name: "Refresh feeds" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Nothing new/).textContent).not.toMatch(/refresh button/i);
   });
 
   it("toggles Listen episode sort by release date", async () => {
@@ -101,24 +99,34 @@ describe("RecentView", () => {
         .getAllByRole("listitem")
         .map((item) => within(item).getByText(/Newest|Middle|Oldest/).textContent);
 
-    expect(titles()).toEqual(["Newest", "Middle", "Oldest"]);
-
-    await user.click(screen.getByRole("button", { name: "Sort oldest first" }));
     expect(titles()).toEqual(["Oldest", "Middle", "Newest"]);
 
-    await user.click(screen.getByRole("button", { name: "Sort newest first" }));
+    const sortToggle = screen.getByRole("switch", { name: "Oldest first Newest" });
+    expect(sortToggle).toHaveAttribute("aria-checked", "true");
+
+    await user.click(sortToggle);
     expect(titles()).toEqual(["Newest", "Middle", "Oldest"]);
+    expect(sortToggle).toHaveAttribute("aria-checked", "false");
+
+    await user.click(sortToggle);
+    expect(titles()).toEqual(["Oldest", "Middle", "Newest"]);
+    expect(sortToggle).toHaveAttribute("aria-checked", "true");
   });
 
-  it("renders the Listen sort control as a single direction glyph", async () => {
+  it("renders the Listen sort control as an Oldest first / Newest toggle", async () => {
     installApi({
       ...settings,
       "GET /api/recent": page([episode({ id: 1, title: "Newest", published_at: 300 })]),
     });
     wrap(<RecentView />);
 
-    const sortButton = await screen.findByRole("button", { name: "Sort oldest first" });
-    expect(sortButton.querySelectorAll("svg path")).toHaveLength(1);
+    const sortToggle = await screen.findByRole("switch", { name: "Oldest first Newest" });
+    expect(sortToggle).toHaveAttribute("aria-checked", "true");
+    expect(sortToggle).toHaveTextContent("Oldest first");
+    expect(sortToggle).toHaveTextContent("Newest");
+    expect(sortToggle.querySelector(".sort-toggle-track")).toBeTruthy();
+    expect(sortToggle.querySelector(".sort-toggle-thumb")).toBeTruthy();
+    expect(sortToggle.querySelectorAll("svg")).toHaveLength(0);
   });
 
   it("starts playback when a row is tapped", async () => {

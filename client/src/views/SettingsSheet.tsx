@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
+import { refreshFeeds } from "../refreshFeeds";
 
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
@@ -51,7 +52,10 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
 
   async function refreshAll() {
     await run("Refreshing", async () => {
-      const r = await Api.refresh();
+      const r = await refreshFeeds();
+      // Always reload after an explicit user-initiated refresh so the UI
+      // reflects current state (even if no feeds were pulled this pass).
+      // Auto-refresh only emits when refreshed > 0 to avoid periodic no-op reloads.
       emitEpisodesChanged();
       return `Refreshed ${r.refreshed} feeds${r.errors ? `, ${r.errors} failed` : ""}`;
     });

@@ -10,6 +10,8 @@ coverage/
 .DS_Store
 ios/build/
 ios/DerivedData/
+# PodsSpeaker Xcode build output (mirrors ios/build/)
+mac/build/
 ios/*.xcresult
 ios/**/*.xcuserstate
 ios/Pods/Web/*

@@ -68,7 +68,12 @@ export const Api = {
   search: (q: string) => request<SearchResults>(`/search?q=${encodeURIComponent(q)}`),
   next: (afterId: number, context: PlayContext) =>
     request<EpisodeItem | null>(`/next?after=${afterId}&context=${context}`),
-  refresh: () => request<{ refreshed: number; errors: number }>("/refresh", { method: "POST" }),
+  /** @param init.signal optional AbortSignal to cancel a hung refresh */
+  refresh: (init: { signal?: AbortSignal } = {}) =>
+    request<{ refreshed: number; errors: number }>("/refresh", {
+      method: "POST",
+      signal: init.signal,
+    }),
   opmlExport: () => request<string>("/opml", {}, true),
   opmlImport: (xml: string) =>
     request<{ imported: number; skipped: number; failed: number }>("/opml", {

@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { EPISODES_CHANGED_EVENT } from "../events";
 import { episode, HttpError, installApi } from "../test/mockApi";
 import { SettingsSheet } from "./SettingsSheet";
 
@@ -52,6 +53,18 @@ describe("SettingsSheet", () => {
     render(<SettingsSheet onClose={() => {}} />);
     await user.click(screen.getByRole("button", { name: "Refresh all feeds" }));
     await screen.findByText("Refreshed 4 feeds, 1 failed");
+  });
+
+  it("emits episodes-changed after manual refresh even when refreshed is 0", async () => {
+    installApi({ "POST /api/refresh": { refreshed: 0, errors: 0 } });
+    const changed = vi.fn();
+    window.addEventListener(EPISODES_CHANGED_EVENT, changed);
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+    await user.click(screen.getByRole("button", { name: "Refresh all feeds" }));
+    await screen.findByText("Refreshed 0 feeds");
+    expect(changed).toHaveBeenCalled();
+    window.removeEventListener(EPISODES_CHANGED_EVENT, changed);
   });
 
   it("surfaces API errors as status text", async () => {
