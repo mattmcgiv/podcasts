@@ -72,6 +72,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private let database: PodsDatabase
     private let feedFetcher: FeedFetching
     private let directorySearcher: PodcastDirectorySearching
+    private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
 
     init(
         database: PodsDatabase,
@@ -89,6 +90,42 @@ final class PodsBackend: PlaybackProgressRecording {
         } catch {
             PodsLog("Pods playback progress record failed episodeID=\(episodeID) seconds=\(seconds): \(error)")
         }
+    }
+
+    /// Installed by the app lifecycle after the native coordinator exists.
+    /// Tests and standalone backend use retain a direct, audited fallback.
+    func setRefreshRequestHandler(_ handler: @escaping (RefreshSource) async -> RefreshResult) {
+        refreshRequestHandler = handler
+    }
+
+    func refreshStatus() -> RefreshStatus {
+        do {
+            return try database.query(
+                "SELECT last_attempt_at, last_success_at, last_source, last_refreshed, last_errors FROM feed_refresh_state WHERE id = 1"
+            ) { statement in
+                RefreshStatus(
+                    last_attempt_at: sqliteOptionalInt64(statement, 0),
+                    last_success_at: sqliteOptionalInt64(statement, 1),
+                    last_source: sqliteOptionalString(statement, 2),
+                    last_refreshed: Int(sqlite3_column_int64(statement, 3)),
+                    last_errors: Int(sqlite3_column_int64(statement, 4))
+                )
+            }.first ?? .empty
+        } catch {
+            PodsLog("Pods refresh status read failed: \(error)")
+            return .empty
+        }
+    }
+
+    func performRefresh(source: RefreshSource) async -> RefreshResult {
+        let startedAt = nowUnix()
+        recordRefreshAttempt(source: source, startedAt: startedAt)
+        let result = await refreshAll()
+        let finishedAt = nowUnix()
+        recordRefreshCompletion(source: source, startedAt: startedAt, finishedAt: finishedAt, result: result)
+        PodsLog("Pods feed refresh source=\(source.rawValue) refreshed=\(result.refreshed) errors=\(result.errors)")
+        NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
+        return result
     }
 
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
@@ -183,8 +220,14 @@ final class PodsBackend: PlaybackProgressRecording {
             try saveSettings(SettingsPayload(speed: speed, autoplay: autoplay))
             return .noContent()
         }
+        if path == "/api/refresh-status", request.method == "GET" {
+            return .json(refreshStatus())
+        }
         if path == "/api/refresh", request.method == "POST" {
-            return .json(await refreshAll())
+            if let refreshRequestHandler {
+                return .json(await refreshRequestHandler(.manual))
+            }
+            return .json(await performRefresh(source: .manual))
         }
         if path == "/api/next", request.method == "GET" {
             guard let afterRaw = request.query("after"), let after = Int64(afterRaw) else {
@@ -252,12 +295,17 @@ final class PodsBackend: PlaybackProgressRecording {
             throw PodsBackendError.conflict("already subscribed")
         }
 
-        let feed = try RSSParser.parse(try await feedFetcher.data(for: url))
+        let fetched = try await fetchFeed(url, validators: FeedValidators())
+        guard case let .data(data, validators) = fetched else {
+            throw PodsBackendError.upstream("feed returned HTTP 304 during subscription")
+        }
+        let feed = try RSSParser.parse(data)
         let podcastID = try database.withTransaction { () -> Int64 in
             try database.execute("INSERT INTO podcasts (feed_url, created_at) VALUES (?, ?)", [.text(feedURL), .int(nowUnix())])
             let podcastID = database.lastInsertRowID()
             try upsertPodcastMeta(podcastID: podcastID, feed: feed)
             try upsertEpisodes(podcastID: podcastID, feed: feed)
+            try saveFeedValidators(podcastID: podcastID, validators: validators)
             let ts = nowUnix()
             try database.execute(
                 """
@@ -422,11 +470,19 @@ final class PodsBackend: PlaybackProgressRecording {
         }
         var ok = 0
         var errors = 0
-        for row in rows {
+        for (index, row) in rows.enumerated() {
+            if Task.isCancelled {
+                errors += rows.count - index
+                break
+            }
             do {
                 try await refreshOne(podcastID: row.0, feedURL: row.1)
                 ok += 1
             } catch {
+                if Task.isCancelled {
+                    errors += rows.count - index
+                    break
+                }
                 PodsDebugLog("Refresh failed podcastID=\(row.0) error=\(error.localizedDescription)")
                 errors += 1
             }
@@ -435,17 +491,105 @@ final class PodsBackend: PlaybackProgressRecording {
         return RefreshResult(refreshed: ok, errors: errors)
     }
 
+    private func recordRefreshAttempt(source: RefreshSource, startedAt: Int64) {
+        do {
+            try database.execute(
+                """
+                INSERT INTO feed_refresh_state (id, last_attempt_at, last_source, last_refreshed, last_errors)
+                VALUES (1, ?, ?, 0, 0)
+                ON CONFLICT(id) DO UPDATE SET last_attempt_at = excluded.last_attempt_at, last_source = excluded.last_source
+                """,
+                [.int(startedAt), .text(source.rawValue)]
+            )
+        } catch {
+            PodsLog("Pods refresh attempt record failed: \(error)")
+        }
+    }
+
+    private func recordRefreshCompletion(source: RefreshSource, startedAt: Int64, finishedAt: Int64, result: RefreshResult) {
+        do {
+            try database.withTransaction {
+                try database.execute(
+                    """
+                    UPDATE feed_refresh_state
+                    SET last_success_at = CASE WHEN ? = 0 THEN ? ELSE last_success_at END,
+                        last_source = ?, last_refreshed = ?, last_errors = ?
+                    WHERE id = 1
+                    """,
+                    [.int(Int64(result.errors)), .int(finishedAt), .text(source.rawValue), .int(Int64(result.refreshed)), .int(Int64(result.errors))]
+                )
+                try database.execute(
+                    "INSERT INTO feed_refresh_runs (source, started_at, finished_at, refreshed, errors) VALUES (?, ?, ?, ?, ?)",
+                    [.text(source.rawValue), .int(startedAt), .int(finishedAt), .int(Int64(result.refreshed)), .int(Int64(result.errors))]
+                )
+            }
+        } catch {
+            PodsLog("Pods refresh completion record failed: \(error)")
+        }
+    }
+
     private func refreshOne(podcastID: Int64, feedURL: String) async throws {
         guard let url = URL(string: feedURL) else {
             throw PodsBackendError.invalid("feed_url must be an http(s) URL")
         }
         PodsDebugLog("Refresh starting podcastID=\(podcastID) url=\(url.absoluteString)")
-        let feed = try RSSParser.parse(try await feedFetcher.data(for: url))
-        try database.withTransaction {
-            try upsertPodcastMeta(podcastID: podcastID, feed: feed)
-            let newCount = try upsertEpisodes(podcastID: podcastID, feed: feed)
-            PodsDebugLog("Refresh stored podcastID=\(podcastID) newEpisodes=\(newCount)")
+        let validators = try feedValidators(podcastID: podcastID)
+        switch try await fetchFeed(url, validators: validators) {
+        case .notModified(let updatedValidators):
+            try database.withTransaction {
+                try markFeedFetched(podcastID: podcastID)
+                try saveFeedValidators(podcastID: podcastID, validators: updatedValidators)
+            }
+            PodsDebugLog("Refresh not modified podcastID=\(podcastID)")
+        case .data(let data, let updatedValidators):
+            let feed = try RSSParser.parse(data)
+            try database.withTransaction {
+                try upsertPodcastMeta(podcastID: podcastID, feed: feed)
+                let newCount = try upsertEpisodes(podcastID: podcastID, feed: feed)
+                try saveFeedValidators(podcastID: podcastID, validators: updatedValidators)
+                PodsDebugLog("Refresh stored podcastID=\(podcastID) newEpisodes=\(newCount)")
+            }
         }
+    }
+
+    private func fetchFeed(_ url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
+        if let conditionalFetcher = feedFetcher as? ConditionalFeedFetching {
+            return try await conditionalFetcher.response(for: url, validators: validators)
+        }
+        return .data(try await feedFetcher.data(for: url), validators)
+    }
+
+    private func feedValidators(podcastID: Int64) throws -> FeedValidators {
+        try database.query(
+            "SELECT etag, last_modified FROM feed_http_cache WHERE podcast_id = ?",
+            [.int(podcastID)]
+        ) { statement in
+            FeedValidators(
+                eTag: sqliteOptionalString(statement, 0),
+                lastModified: sqliteOptionalString(statement, 1)
+            )
+        }.first ?? FeedValidators()
+    }
+
+    private func saveFeedValidators(podcastID: Int64, validators: FeedValidators) throws {
+        try database.execute(
+            """
+            INSERT INTO feed_http_cache (podcast_id, etag, last_modified) VALUES (?, ?, ?)
+            ON CONFLICT(podcast_id) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified
+            """,
+            [
+                .int(podcastID),
+                validators.eTag.map(SQLiteValue.text) ?? .null,
+                validators.lastModified.map(SQLiteValue.text) ?? .null
+            ]
+        )
+    }
+
+    private func markFeedFetched(podcastID: Int64) throws {
+        try database.execute(
+            "UPDATE podcasts SET last_fetched_at = ? WHERE id = ?",
+            [.int(nowUnix()), .int(podcastID)]
+        )
     }
 
     private func search(query rawQuery: String) async throws -> SearchResults {

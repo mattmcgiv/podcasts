@@ -184,6 +184,32 @@ final class PodsDatabase {
         value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS feed_refresh_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_attempt_at INTEGER,
+        last_success_at INTEGER,
+        last_source TEXT,
+        last_refreshed INTEGER NOT NULL DEFAULT 0,
+        last_errors INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS feed_refresh_runs (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER NOT NULL,
+        refreshed INTEGER NOT NULL,
+        errors INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feed_refresh_runs_finished ON feed_refresh_runs(finished_at DESC);
+
+    CREATE TABLE IF NOT EXISTS feed_http_cache (
+        podcast_id INTEGER PRIMARY KEY REFERENCES podcasts(id) ON DELETE CASCADE,
+        etag TEXT,
+        last_modified TEXT
+    );
+
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);
     """
 }

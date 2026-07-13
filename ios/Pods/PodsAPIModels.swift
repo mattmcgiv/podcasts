@@ -78,6 +78,22 @@ struct RefreshResult: Codable, Equatable {
     let errors: Int
 }
 
+struct RefreshStatus: Codable, Equatable {
+    let last_attempt_at: Int64?
+    let last_success_at: Int64?
+    let last_source: String?
+    let last_refreshed: Int
+    let last_errors: Int
+
+    static let empty = RefreshStatus(
+        last_attempt_at: nil,
+        last_success_at: nil,
+        last_source: nil,
+        last_refreshed: 0,
+        last_errors: 0
+    )
+}
+
 struct OPMLImportResult: Codable, Equatable {
     let imported: Int
     let skipped: Int
@@ -117,4 +133,3 @@ enum PodsBackendError: Error, CustomStringConvertible {
 func nowUnix() -> Int64 {
     Int64(Date().timeIntervalSince1970)
 }
-

@@ -53,6 +53,14 @@ export interface Settings {
   autoplay: boolean;
 }
 
+export interface RefreshStatus {
+  last_attempt_at: number | null;
+  last_success_at: number | null;
+  last_source: "manual" | "foreground" | "background" | null;
+  last_refreshed: number;
+  last_errors: number;
+}
+
 export interface ShowDetailResponse {
   show: Show;
   episodes: Page<EpisodeItem>;

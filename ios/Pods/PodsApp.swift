@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftUI
 import UIKit
 
@@ -14,12 +15,15 @@ struct PodsApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    private static let refreshTaskIdentifier = "dev.mcgiv.pods.feed-refresh"
     private var localServer: PodsLocalServer?
+    private var refreshCoordinator: FeedRefreshCoordinator?
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        registerBackgroundRefreshTask()
         PodsDebugLog("App launch bundle=\(Bundle.main.bundleIdentifier ?? "unknown") version=\(Self.bundleVersionSummary())")
         AudioBridge.shared.configureSession()
         do {
@@ -28,15 +32,79 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let database = try PodsDatabase(url: databaseURL)
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let backend = PodsBackend(database: database)
+            let coordinator = FeedRefreshCoordinator(backend: backend)
+            backend.setRefreshRequestHandler { source in
+                await coordinator.refreshNow(source: source)
+            }
             AudioBridge.shared.progressRecorder = backend
             let server = PodsLocalServer(backend: backend)
             try server.start()
             localServer = server
+            refreshCoordinator = coordinator
+            scheduleBackgroundRefresh()
             PodsDebugLog("Local backend start requested")
         } catch {
             PodsLog("Pods local backend startup failed: \(error)")
         }
         return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        guard let refreshCoordinator else {
+            return
+        }
+        Task { [weak self, refreshCoordinator] in
+            _ = await refreshCoordinator.refreshIfDue()
+            self?.scheduleBackgroundRefresh()
+        }
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        scheduleBackgroundRefresh()
+    }
+
+    private func registerBackgroundRefreshTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskIdentifier, using: nil) { [weak self] task in
+            guard let refreshTask = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            self?.handleBackgroundRefresh(refreshTask)
+        }
+    }
+
+    private func scheduleBackgroundRefresh() {
+        guard let refreshCoordinator else {
+            return
+        }
+        Task { [refreshCoordinator] in
+            let request = BGAppRefreshTaskRequest(identifier: Self.refreshTaskIdentifier)
+            request.earliestBeginDate = await refreshCoordinator.nextBackgroundRefreshDate()
+            do {
+                try BGTaskScheduler.shared.submit(request)
+                PodsDebugLog("Pods background feed refresh requested for \(request.earliestBeginDate?.description ?? "now")")
+            } catch {
+                PodsLog("Pods background feed refresh request failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func handleBackgroundRefresh(_ task: BGAppRefreshTask) {
+        guard let refreshCoordinator else {
+            task.setTaskCompleted(success: false)
+            return
+        }
+
+        var work: Task<Void, Never>?
+        task.expirationHandler = {
+            PodsLog("Pods background feed refresh expired")
+            work?.cancel()
+        }
+        work = Task { [weak self, refreshCoordinator] in
+            let result = await refreshCoordinator.refreshNow(source: .background)
+            task.setTaskCompleted(success: !Task.isCancelled && result.errors == 0)
+            self?.scheduleBackgroundRefresh()
+        }
     }
 
     private static func bundleVersionSummary() -> String {

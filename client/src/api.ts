@@ -3,6 +3,7 @@ import type {
   EpisodeItem,
   Page,
   PlayContext,
+  RefreshStatus,
   SearchResults,
   Settings,
   Show,
@@ -74,6 +75,7 @@ export const Api = {
       method: "POST",
       signal: init.signal,
     }),
+  refreshStatus: () => request<RefreshStatus>("/refresh-status"),
   opmlExport: () => request<string>("/opml", {}, true),
   opmlImport: (xml: string) =>
     request<{ imported: number; skipped: number; failed: number }>("/opml", {

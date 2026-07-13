@@ -138,6 +138,12 @@ final class PodsWebViewController: UIViewController {
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(feedRefreshCompleted),
+            name: .podsFeedRefreshCompleted,
+            object: nil
+        )
         loadBundledWebApp()
     }
 
@@ -149,6 +155,15 @@ final class PodsWebViewController: UIViewController {
     @objc private func applicationWillEnterForeground() {
         PodsDebugLog("Pods webview foreground health check requested")
         recovery.reloadIfContentMissing(webView)
+    }
+
+    @objc private func feedRefreshCompleted() {
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new Event('pods-episodes-changed'));",
+                completionHandler: nil
+            )
+        }
     }
 
     private func redirectRetiredRemoteHostIfNeeded(_ url: URL) -> Bool {

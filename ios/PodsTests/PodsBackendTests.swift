@@ -4,14 +4,30 @@ import WebKit
 @testable import Pods
 
 final class PodsBackendTests: XCTestCase {
-    private final class MockFeedFetcher: FeedFetching {
+    private final class MockFeedFetcher: ConditionalFeedFetching {
         var responses: [String: Data] = [:]
+        var responseValidators: [String: FeedValidators] = [:]
+        var notModifiedURLs: Set<String> = []
+        private(set) var requestedURLs: [String] = []
+        private(set) var requestedValidators: [FeedValidators] = []
 
         func data(for url: URL) async throws -> Data {
+            requestedURLs.append(url.absoluteString)
             guard let data = responses[url.absoluteString] else {
                 throw PodsBackendError.upstream("missing mock feed")
             }
             return data
+        }
+
+        func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
+            requestedValidators.append(validators)
+            if notModifiedURLs.contains(url.absoluteString) {
+                return .notModified(responseValidators[url.absoluteString] ?? validators)
+            }
+            return .data(
+                try await data(for: url),
+                responseValidators[url.absoluteString] ?? FeedValidators()
+            )
         }
     }
 
@@ -234,6 +250,110 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(afterDelete.items.contains { $0.podcast_title == "Alpha" })
         let deleteAgain = try await call(harness.backend, "DELETE", "/api/shows/\(alpha.id)")
         XCTAssertEqual(deleteAgain.statusCode, 404)
+    }
+
+    func testNativeCoordinatorRefreshesAStaleQueueOnceAndRecordsTheForegroundRun() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/a.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(show: "Alpha", items: [
+            ("Episode", "g1", "https://h.example/1.mp3", Self.d1)
+        ]).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let coordinator = FeedRefreshCoordinator(backend: harness.backend)
+        harness.backend.setRefreshRequestHandler { source in
+            await coordinator.refreshNow(source: source)
+        }
+
+        let refreshed = await coordinator.refreshIfDue()
+        XCTAssertEqual(refreshed, RefreshResult(refreshed: 1, errors: 0))
+        XCTAssertEqual(harness.fetcher.requestedURLs.count, 2)
+
+        let status = try decode(RefreshStatus.self, from: try await call(harness.backend, "GET", "/api/refresh-status"))
+        XCTAssertEqual(status.last_source, "foreground")
+        XCTAssertNotNil(status.last_attempt_at)
+        XCTAssertNotNil(status.last_success_at)
+        XCTAssertEqual(status.last_refreshed, 1)
+        XCTAssertEqual(status.last_errors, 0)
+
+        let freshResult = await coordinator.refreshIfDue()
+        XCTAssertNil(freshResult)
+        XCTAssertEqual(harness.fetcher.requestedURLs.count, 2)
+    }
+
+    func testManualRefreshUsesTheNativeCoordinatorAndOverridesTheFreshnessWindow() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/a.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(show: "Alpha", items: [
+            ("Episode", "g1", "https://h.example/1.mp3", Self.d1)
+        ]).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let coordinator = FeedRefreshCoordinator(backend: harness.backend)
+        harness.backend.setRefreshRequestHandler { source in
+            await coordinator.refreshNow(source: source)
+        }
+        _ = await coordinator.refreshIfDue()
+
+        let response = try decode(RefreshResult.self, from: try await call(harness.backend, "POST", "/api/refresh"))
+        XCTAssertEqual(response, RefreshResult(refreshed: 1, errors: 0))
+        XCTAssertEqual(harness.fetcher.requestedURLs.count, 3)
+
+        let status = try decode(RefreshStatus.self, from: try await call(harness.backend, "GET", "/api/refresh-status"))
+        XCTAssertEqual(status.last_source, "manual")
+    }
+
+    func testRefreshPolicyRequestsAtMostOneAutomaticPassEveryTwelveHours() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let lastSuccess = Int64(now.addingTimeInterval(-5 * 60 * 60).timeIntervalSince1970)
+        let status = RefreshStatus(
+            last_attempt_at: lastSuccess,
+            last_success_at: lastSuccess,
+            last_source: "foreground",
+            last_refreshed: 1,
+            last_errors: 0
+        )
+
+        XCTAssertFalse(FeedRefreshPolicy.isForegroundRefreshDue(status: status, now: now))
+        XCTAssertEqual(
+            FeedRefreshPolicy.nextBackgroundRefreshDate(status: status, now: now),
+            Date(timeIntervalSince1970: TimeInterval(lastSuccess) + FeedRefreshPolicy.automaticInterval)
+        )
+    }
+
+    func testRefreshPolicyBacksOffForTwoHoursAfterAnAutomaticFailure() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let lastAttempt = Int64(now.addingTimeInterval(-30 * 60).timeIntervalSince1970)
+        let status = RefreshStatus(
+            last_attempt_at: lastAttempt,
+            last_success_at: Int64(now.addingTimeInterval(-13 * 60 * 60).timeIntervalSince1970),
+            last_source: "foreground",
+            last_refreshed: 2,
+            last_errors: 1
+        )
+
+        XCTAssertFalse(FeedRefreshPolicy.isForegroundRefreshDue(status: status, now: now))
+        XCTAssertEqual(
+            FeedRefreshPolicy.nextBackgroundRefreshDate(status: status, now: now),
+            Date(timeIntervalSince1970: TimeInterval(lastAttempt) + FeedRefreshPolicy.retryInterval)
+        )
+    }
+
+    func testRefreshUsesStoredHTTPValidatorsAndCountsNotModifiedAsAHealthyFeed() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/a.xml"
+        let validators = FeedValidators(eTag: "\"version-1\"", lastModified: "Wed, 01 Jul 2026 00:00:00 GMT")
+        harness.fetcher.responses[feedURL] = Data(Self.rss(show: "Alpha", items: [
+            ("Episode", "g1", "https://h.example/1.mp3", Self.d1)
+        ]).utf8)
+        harness.fetcher.responseValidators[feedURL] = validators
+
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        harness.fetcher.notModifiedURLs.insert(feedURL)
+
+        let refreshed = try decode(RefreshResult.self, from: try await call(harness.backend, "POST", "/api/refresh"))
+        XCTAssertEqual(refreshed, RefreshResult(refreshed: 1, errors: 0))
+        XCTAssertEqual(harness.fetcher.requestedValidators.last, validators)
     }
 
     func testSearchIncludesConfiguredDirectoryResults() async throws {

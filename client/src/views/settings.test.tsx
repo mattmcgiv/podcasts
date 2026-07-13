@@ -6,6 +6,22 @@ import { episode, HttpError, installApi } from "../test/mockApi";
 import { SettingsSheet } from "./SettingsSheet";
 
 describe("SettingsSheet", () => {
+  it("shows the most recent native automatic refresh", async () => {
+    installApi({
+      "GET /api/refresh-status": {
+        last_attempt_at: 1_784_071_800,
+        last_success_at: 1_784_071_800,
+        last_source: "foreground",
+        last_refreshed: 3,
+        last_errors: 1,
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByText(/Last feed refresh:/)).toHaveTextContent("Automatic");
+    expect(screen.getByText(/1 feed failed/)).toBeInTheDocument();
+  });
+
   it("adds a feed by URL", async () => {
     const { calls } = installApi({
       "POST /api/shows": {
@@ -19,7 +35,8 @@ describe("SettingsSheet", () => {
     await user.type(screen.getByLabelText("Feed URL"), "https://x.example/f");
     await user.click(screen.getByRole("button", { name: "Add" }));
     await screen.findByText("Subscribed to Added Show");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ feed_url: "https://x.example/f" });
+    const subscribeCall = calls.find((call) => call.key === "POST /api/shows");
+    expect(JSON.parse(String(subscribeCall?.init.body))).toEqual({ feed_url: "https://x.example/f" });
   });
 
   it("imports an OPML file and reports counts", async () => {

@@ -1,12 +1,44 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
+import type { RefreshStatus } from "../types";
+
+function formatRefreshStatus(refreshStatus: RefreshStatus): string {
+  if (refreshStatus.last_success_at == null) {
+    return "No successful feed refresh yet.";
+  }
+
+  const when = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(refreshStatus.last_success_at * 1000));
+  const source = refreshStatus.last_source === "manual" ? "Manual" : "Automatic";
+  const failures = refreshStatus.last_errors
+    ? ` · ${refreshStatus.last_errors} feed${refreshStatus.last_errors === 1 ? "" : "s"} failed`
+    : "";
+  return `Last feed refresh: ${when} (${source})${failures}`;
+}
 
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [feedUrl, setFeedUrl] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    void Api.refreshStatus()
+      .then((nextStatus) => {
+        if (active) setRefreshStatus(nextStatus);
+      })
+      .catch(() => {
+        // Refresh status is informational; it must not block Settings if unavailable.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function run(label: string, fn: () => Promise<string>) {
     setStatus(`${label}…`);
@@ -55,8 +87,12 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       const r = await refreshFeeds();
       // Always reload after an explicit user-initiated refresh so the UI
       // reflects current state (even if no feeds were pulled this pass).
-      // Auto-refresh only emits when refreshed > 0 to avoid periodic no-op reloads.
       emitEpisodesChanged();
+      try {
+        setRefreshStatus(await Api.refreshStatus());
+      } catch {
+        // The manual refresh succeeded; leave the previous audit status in place.
+      }
       return `Refreshed ${r.refreshed} feeds${r.errors ? `, ${r.errors} failed` : ""}`;
     });
   }
@@ -110,6 +146,8 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
         <button className="ghost-btn" onClick={() => void refreshAll()}>
           Refresh all feeds
         </button>
+
+        {refreshStatus && <p className="muted">{formatRefreshStatus(refreshStatus)}</p>}
 
         {status && <p className="status">{status}</p>}
       </div>

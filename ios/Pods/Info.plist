@@ -32,6 +32,11 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>dev.mcgiv.pods.feed-refresh</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Pods finds your Mac running Pods Speaker so episodes can play on the computer while you keep using it.</string>

@@ -22,13 +22,59 @@ protocol FeedFetching {
     func data(for url: URL) async throws -> Data
 }
 
-struct URLSessionFeedFetcher: FeedFetching {
+struct FeedValidators: Equatable {
+    let eTag: String?
+    let lastModified: String?
+
+    init(eTag: String? = nil, lastModified: String? = nil) {
+        self.eTag = eTag
+        self.lastModified = lastModified
+    }
+}
+
+enum FeedFetchResponse {
+    case data(Data, FeedValidators)
+    case notModified(FeedValidators)
+}
+
+protocol ConditionalFeedFetching: FeedFetching {
+    func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse
+}
+
+struct URLSessionFeedFetcher: ConditionalFeedFetching {
     func data(for url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+        switch try await response(for: url, validators: FeedValidators()) {
+        case .data(let data, _):
+            return data
+        case .notModified:
+            throw PodsBackendError.upstream("feed returned HTTP 304 without cache validators")
+        }
+    }
+
+    func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
+        var request = URLRequest(url: url)
+        if let eTag = validators.eTag {
+            request.setValue(eTag, forHTTPHeaderField: "If-None-Match")
+        }
+        if let lastModified = validators.lastModified {
+            request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            return .data(data, validators)
+        }
+        let responseValidators = FeedValidators(
+            eTag: http.value(forHTTPHeaderField: "ETag") ?? validators.eTag,
+            lastModified: http.value(forHTTPHeaderField: "Last-Modified") ?? validators.lastModified
+        )
+        if http.statusCode == 304 {
+            return .notModified(responseValidators)
+        }
+        if !(200...299).contains(http.statusCode) {
             throw PodsBackendError.upstream("feed returned HTTP \(http.statusCode)")
         }
-        return data
+        return .data(data, responseValidators)
     }
 }
 

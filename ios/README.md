@@ -112,6 +112,16 @@ The iOS app runs a native Swift backend inside the app process. It opens the rei
 
 The old Rust backend has been removed. Backend behavior for the app belongs in `ios/Pods/PodsBackend.swift` and adjacent Swift files.
 
+## Feed refresh
+
+The iPhone app owns automatic feed refresh natively; the React WebView does not run a refresh timer.
+
+- On foreground activation, Pods refreshes only when the last successful complete pass is at least 12 hours old.
+- It also submits an iOS `BGAppRefreshTask` for that cadence. iOS runs background tasks opportunistically, so foreground activation remains the reliable catch-up path.
+- A failed automatic pass waits at least two hours before trying again. Manual **Refresh all feeds** always bypasses the window.
+- RSS requests retain `ETag` and `Last-Modified` values. A `304 Not Modified` response is counted as a healthy feed check without reparsing or rewriting episodes.
+- The backend persists the last attempt, success time, source, counts, and an audit row for every completed pass. Settings shows the most recent result, and the device log includes `Pods feed refresh source=... refreshed=... errors=...`.
+
 ## iOS Tests
 
 Run the ported iOS backend contract tests with:
