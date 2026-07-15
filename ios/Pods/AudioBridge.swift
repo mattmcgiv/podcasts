@@ -289,6 +289,17 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
         // Progress / transport from Mac only while Mac is the chosen sink.
         guard preferredOutput == .mac else { return }
+
+        // Reject explicitly tagged events for a different episode *before* mutating
+        // transport or re-emitting — never relabel a stale Mac event as the new load.
+        let eventEpisodeID = Self.int64Value(event["episodeId"]) ?? Self.int64Value(event["episode_id"])
+        guard PlaybackProgressPolicy.shouldAcceptEpisodeTaggedEvent(
+            eventEpisodeID: eventEpisodeID,
+            currentEpisodeID: currentEpisodeID
+        ) else {
+            return
+        }
+
         output = .mac
         // Exclusive sink: ignore any residual episode player (keep-alive is separate).
         stopLocalPlayer(record: false)
@@ -387,20 +398,35 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             output = .mac
             stopLocalPlayer(record: false)
             updateCastKeepAlive()
-            if !CastSession.shared.currentStatus.connected {
-                pendingPlayAfterCastConnect = !nowPlayingPaused
+            let wasPlaying = !nowPlayingPaused
+            let connected = CastSession.shared.currentStatus.connected
+            // Assign (not only set-true) so a connected replacement clears a stale reconnect flag.
+            pendingPlayAfterCastConnect = PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: wasPlaying,
+                connected: connected,
+                playRequested: false
+            )
+            if !connected {
                 CastSession.shared.connectToFirstAvailable()
             }
-            // pushLoadToMac owns the Mac load + optional autoplay and exclusive local stop.
-            pushLoadToMac(position: position, rate: rate, autoplay: false)
-            updateNowPlaying(position: position, rate: rate, paused: true)
+            // Preserve play intent on Mac: autoplay when still connected; else pend for reconnect.
+            let autoplay = PlaybackProgressPolicy.shouldAutoplayMacSourceReplacement(
+                wasPlaying: wasPlaying,
+                connected: connected
+            )
+            pushLoadToMac(position: position, rate: rate, autoplay: autoplay)
+            let paused = PlaybackProgressPolicy.macSourceReplacementPaused(
+                wasPlaying: wasPlaying,
+                pendingPlayAfterConnect: pendingPlayAfterCastConnect
+            )
+            updateNowPlaying(position: position, rate: rate, paused: paused)
             emit(
                 type: "loadedmetadata",
                 id: id,
                 position: position,
                 duration: Self.positiveDuration(nowPlayingDuration),
                 playbackRate: rate,
-                paused: true
+                paused: paused
             )
             return
         }
@@ -433,11 +459,19 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             output = .mac
             stopLocalPlayer(record: false)
             updateCastKeepAlive()
-            if !CastSession.shared.currentStatus.connected {
+            let connected = CastSession.shared.currentStatus.connected
+            if PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: false,
+                connected: connected,
+                playRequested: true
+            ) {
                 pendingPlayAfterCastConnect = true
+                // Keep logical play intent while the cast link comes back.
+                updateNowPlaying(rate: requestedRate, paused: false)
                 CastSession.shared.connectToFirstAvailable()
                 return
             }
+            pendingPlayAfterCastConnect = false
             CastSession.shared.sendCommand(["cmd": "play"])
             updateNowPlaying(rate: requestedRate, paused: false)
             emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
@@ -589,6 +623,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     @objc private func playerItemEnded(_ notification: Notification) {
         guard output == .local else { return }
+        // Only the *current* AVPlayer item may complete — a replaced item's end
+        // notification must not mark/skip the newly loaded episode.
+        let endedItem = notification.object as AnyObject?
+        let currentItem = player?.currentItem as AnyObject?
+        guard PlaybackProgressPolicy.isSameObject(endedItem, currentItem) else { return }
         recordCurrentProgress(force: true)
         emit(type: "ended", id: currentId, paused: true)
     }
@@ -850,6 +889,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         if let duration = Self.positiveDuration(duration) { payload["duration"] = duration }
         if let playbackRate, playbackRate.isFinite { payload["playbackRate"] = playbackRate }
         if let paused { payload["paused"] = paused }
+        // Carry loaded episode identity so JS can drop stale transport/ended after switch.
+        if let currentEpisodeID {
+            payload["episodeId"] = currentEpisodeID
+        }
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else {

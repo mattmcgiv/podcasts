@@ -40,6 +40,52 @@ enum PlaybackProgressPolicy {
         available || connected
     }
 
+    /// When replacing the loaded source while Mac is preferred, autoplay immediately if
+    /// playback was active and the cast link is up. Avoids a paused Mac load that can
+    /// lose play intent if the follow-up `play` races a reconnect.
+    static func shouldAutoplayMacSourceReplacement(wasPlaying: Bool, connected: Bool) -> Bool {
+        wasPlaying && connected
+    }
+
+    /// Remember play intent across Mac reconnect after a source replacement (or an
+    /// explicit play while still disconnected).
+    static func shouldPendMacPlayAfterConnect(
+        wasPlaying: Bool,
+        connected: Bool,
+        playRequested: Bool
+    ) -> Bool {
+        if connected { return false }
+        return wasPlaying || playRequested
+    }
+
+    /// nowPlaying / transport paused flag after a Mac source replacement.
+    /// False (i.e. intending to play) when we were playing or we already pended play.
+    static func macSourceReplacementPaused(
+        wasPlaying: Bool,
+        pendingPlayAfterConnect: Bool
+    ) -> Bool {
+        !(wasPlaying || pendingPlayAfterConnect)
+    }
+
+    /// Accept untagged transport/ended events; reject an explicit episode tag that does
+    /// not match the currently loaded episode. Prevents a late Mac completion for episode
+    /// N from mutating transport or auto-advancing after load has moved to N+1.
+    static func shouldAcceptEpisodeTaggedEvent(
+        eventEpisodeID: Int64?,
+        currentEpisodeID: Int64?
+    ) -> Bool {
+        guard let eventEpisodeID else { return true }
+        guard let currentEpisodeID else { return false }
+        return eventEpisodeID == currentEpisodeID
+    }
+
+    /// Local AVPlayerItemDidPlayToEndTime must belong to the current player item
+    /// (reference identity), not a replaced/stale item.
+    static func isSameObject(_ lhs: AnyObject?, _ rhs: AnyObject?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        return lhs === rhs
+    }
+
     /// Prefer a known-good position over invalid / zero clocks when we already advanced.
     static func resolvedTransportPosition(candidate: Double, lastKnown: Double) -> Double {
         let known = lastKnown.isFinite ? max(0, lastKnown) : 0

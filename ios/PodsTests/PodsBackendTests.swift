@@ -587,11 +587,125 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: false))
     }
 
+    func testMacSourceReplacementPreservesPlayIntent() {
+        // While Mac is preferred and playback is active, replacing the episode must
+        // autoplay on Mac when connected — not fall idle waiting for a second command
+        // that can be lost across reconnect.
+        XCTAssertTrue(
+            PlaybackProgressPolicy.shouldAutoplayMacSourceReplacement(
+                wasPlaying: true,
+                connected: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldAutoplayMacSourceReplacement(
+                wasPlaying: true,
+                connected: false
+            )
+        )
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldAutoplayMacSourceReplacement(
+                wasPlaying: false,
+                connected: true
+            )
+        )
+        // Disconnected + was playing: remember play intent for the reconnect path.
+        XCTAssertTrue(
+            PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: true,
+                connected: false,
+                playRequested: false
+            )
+        )
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: false,
+                connected: false,
+                playRequested: false
+            )
+        )
+        XCTAssertTrue(
+            PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: false,
+                connected: false,
+                playRequested: true
+            )
+        )
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldPendMacPlayAfterConnect(
+                wasPlaying: true,
+                connected: true,
+                playRequested: false
+            )
+        )
+        // nowPlaying paused flag must reflect intended play across replacement.
+        XCTAssertFalse(
+            PlaybackProgressPolicy.macSourceReplacementPaused(
+                wasPlaying: true,
+                pendingPlayAfterConnect: false
+            )
+        )
+        XCTAssertFalse(
+            PlaybackProgressPolicy.macSourceReplacementPaused(
+                wasPlaying: false,
+                pendingPlayAfterConnect: true
+            )
+        )
+        XCTAssertTrue(
+            PlaybackProgressPolicy.macSourceReplacementPaused(
+                wasPlaying: false,
+                pendingPlayAfterConnect: false
+            )
+        )
+    }
+
     func testMacCastIsSelectableWhenDiscoveredOrConnected() {
         XCTAssertFalse(PlaybackProgressPolicy.isMacCastSelectable(available: false, connected: false))
         XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: true, connected: false))
         XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: false, connected: true))
         XCTAssertTrue(PlaybackProgressPolicy.isMacCastSelectable(available: true, connected: true))
+    }
+
+    func testEpisodeTaggedTransportRejectsStaleIdentity() {
+        // Untagged events stay accepted (browser / legacy Mac payloads).
+        XCTAssertTrue(
+            PlaybackProgressPolicy.shouldAcceptEpisodeTaggedEvent(
+                eventEpisodeID: nil,
+                currentEpisodeID: 2
+            )
+        )
+        // Matching tag applies to the loaded episode.
+        XCTAssertTrue(
+            PlaybackProgressPolicy.shouldAcceptEpisodeTaggedEvent(
+                eventEpisodeID: 2,
+                currentEpisodeID: 2
+            )
+        )
+        // Explicit tag for a prior episode must not mutate transport or emit ended.
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldAcceptEpisodeTaggedEvent(
+                eventEpisodeID: 1,
+                currentEpisodeID: 2
+            )
+        )
+        // Tagged event with no loaded episode is not attributable — reject.
+        XCTAssertFalse(
+            PlaybackProgressPolicy.shouldAcceptEpisodeTaggedEvent(
+                eventEpisodeID: 1,
+                currentEpisodeID: nil
+            )
+        )
+    }
+
+    func testLocalPlayerItemEndedRequiresCurrentItemIdentity() {
+        // Two distinct objects: a replaced item must not count as the current item.
+        let previous = NSObject()
+        let current = NSObject()
+        XCTAssertTrue(PlaybackProgressPolicy.isSameObject(current, current))
+        XCTAssertFalse(PlaybackProgressPolicy.isSameObject(previous, current))
+        XCTAssertFalse(PlaybackProgressPolicy.isSameObject(nil, current))
+        XCTAssertFalse(PlaybackProgressPolicy.isSameObject(current, nil))
+        XCTAssertFalse(PlaybackProgressPolicy.isSameObject(nil, nil))
     }
 
     func testTransportPositionPrefersLastKnownOverInvalidClock() {
@@ -736,7 +850,50 @@ final class PodsWebViewRecoveryTests: XCTestCase {
         }
     }
 
+    /// Deterministic delayed-work seam: captures scheduled closures so tests can run them without real time.
+    private final class ManualScheduler {
+        private(set) var scheduledCount = 0
+        private(set) var cancelCount = 0
+        private var pending: [() -> Void] = []
+
+        func schedule(_ work: @escaping () -> Void) -> () -> Void {
+            scheduledCount += 1
+            let index = pending.count
+            pending.append(work)
+            return { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.cancelCount += 1
+                if index < self.pending.count {
+                    self.pending[index] = {}
+                }
+            }
+        }
+
+        func runAllPending() {
+            let works = pending
+            pending.removeAll()
+            for work in works {
+                work()
+            }
+        }
+    }
+
     private let localRootURL = URL(string: "http://127.0.0.1:18180/")!
+
+    private func makeRecovery(
+        scheduler: ManualScheduler
+    ) -> PodsWebViewRecovery {
+        PodsWebViewRecovery(rootURL: localRootURL, scheduleDelayedWork: scheduler.schedule)
+    }
+
+    private func makeRenderedWebView() -> FakeWebView {
+        let webView = FakeWebView()
+        webView.url = localRootURL
+        webView.nextEvaluationResult = true
+        return webView
+    }
 
     func testWebContentTerminationReloadsLocalRoot() {
         let recovery = PodsWebViewRecovery(rootURL: localRootURL)
@@ -769,5 +926,169 @@ final class PodsWebViewRecoveryTests: XCTestCase {
 
         XCTAssertTrue(webView.loadedURLs.isEmpty)
         XCTAssertEqual(webView.evaluatedScripts.count, 1)
+    }
+
+    func testActivationChecksRootImmediatelyAndSchedulesOneDelayedRecheck() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let webView = makeRenderedWebView()
+
+        recovery.handleActivation(webView)
+
+        XCTAssertEqual(webView.evaluatedScripts.count, 1, "activation must health-check immediately")
+        XCTAssertEqual(scheduler.scheduledCount, 1, "activation must schedule exactly one delayed recheck")
+
+        scheduler.runAllPending()
+
+        XCTAssertEqual(webView.evaluatedScripts.count, 2, "delayed recheck must run a second health check")
+        XCTAssertTrue(webView.loadedURLs.isEmpty)
+    }
+
+    func testRepeatedActivationCancelsPriorDelayedWork() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let webView = makeRenderedWebView()
+
+        recovery.handleActivation(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+        XCTAssertEqual(scheduler.scheduledCount, 1)
+
+        recovery.handleActivation(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 2, "second activation checks immediately again")
+        XCTAssertEqual(scheduler.scheduledCount, 2, "second activation schedules a replacement delayed recheck")
+        XCTAssertEqual(scheduler.cancelCount, 1, "prior delayed work must be cancelled before rescheduling")
+
+        scheduler.runAllPending()
+
+        // Only the replacement delayed work should perform a health check (cancelled work is a no-op).
+        XCTAssertEqual(webView.evaluatedScripts.count, 3)
+    }
+
+    /// Models the production race: DispatchWorkItem has already fired and enqueued its
+    /// MainActor Task, so cancel only records intent and cannot suppress the captured callback.
+    private final class NonCooperativeScheduler {
+        private(set) var scheduledCount = 0
+        private(set) var cancelCount = 0
+        private var pending: [() -> Void] = []
+
+        func schedule(_ work: @escaping () -> Void) -> () -> Void {
+            scheduledCount += 1
+            pending.append(work)
+            return { [weak self] in
+                self?.cancelCount += 1
+                // Intentionally do not suppress the captured callback — race already lost.
+            }
+        }
+
+        func runAllPending() {
+            let works = pending
+            pending.removeAll()
+            for work in works {
+                work()
+            }
+        }
+    }
+
+    func testReplacedActivationIgnoresStaleDelayedCallbackAfterLostCancelRace() {
+        let scheduler = NonCooperativeScheduler()
+        let recovery = PodsWebViewRecovery(
+            rootURL: localRootURL,
+            scheduleDelayedWork: scheduler.schedule
+        )
+        let webView = makeRenderedWebView()
+
+        recovery.handleActivation(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+        XCTAssertEqual(scheduler.scheduledCount, 1)
+
+        recovery.handleActivation(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 2, "second activation checks immediately again")
+        XCTAssertEqual(scheduler.scheduledCount, 2, "second activation schedules a replacement delayed recheck")
+        XCTAssertEqual(scheduler.cancelCount, 1, "prior delayed work must still be cancelled for cleanup")
+
+        // Both callbacks fire (cancel lost the race). Only the newest recovery may health-check.
+        scheduler.runAllPending()
+
+        XCTAssertEqual(
+            webView.evaluatedScripts.count,
+            3,
+            "stale delayed recovery must no-op even when scheduler cancel loses the race"
+        )
+    }
+
+    func testCancelPendingRecoveryPreventsDelayedWork() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let webView = makeRenderedWebView()
+
+        recovery.handleActivation(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+        XCTAssertEqual(scheduler.scheduledCount, 1)
+
+        recovery.cancelPendingRecovery()
+        XCTAssertEqual(scheduler.cancelCount, 1)
+
+        scheduler.runAllPending()
+
+        XCTAssertEqual(
+            webView.evaluatedScripts.count,
+            1,
+            "cancelled delayed recheck must not perform another health check"
+        )
+    }
+
+    func testLifecycleAppearActivatesRecovery() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let lifecycle = PodsWebViewRecoveryLifecycle(recovery: recovery)
+        let webView = makeRenderedWebView()
+
+        lifecycle.handleAppear(webView)
+
+        XCTAssertEqual(webView.evaluatedScripts.count, 1, "appear must activate an immediate health check")
+        XCTAssertEqual(scheduler.scheduledCount, 1, "appear must schedule one delayed recheck")
+
+        scheduler.runAllPending()
+
+        XCTAssertEqual(webView.evaluatedScripts.count, 2, "appear-scheduled delayed recheck must run")
+    }
+
+    func testLifecycleDisappearCancelsPendingRecovery() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let lifecycle = PodsWebViewRecoveryLifecycle(recovery: recovery)
+        let webView = makeRenderedWebView()
+
+        lifecycle.handleAppear(webView)
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+        XCTAssertEqual(scheduler.scheduledCount, 1)
+
+        lifecycle.handleDisappear()
+        XCTAssertEqual(scheduler.cancelCount, 1, "disappear must cancel pending delayed recovery")
+
+        scheduler.runAllPending()
+
+        XCTAssertEqual(
+            webView.evaluatedScripts.count,
+            1,
+            "cancelled delayed recheck after disappear must not run"
+        )
+    }
+
+    func testLifecycleBecomeActiveActivatesRecoveryAfterDisappear() {
+        let scheduler = ManualScheduler()
+        let recovery = makeRecovery(scheduler: scheduler)
+        let lifecycle = PodsWebViewRecoveryLifecycle(recovery: recovery)
+        let webView = makeRenderedWebView()
+
+        lifecycle.handleAppear(webView)
+        lifecycle.handleDisappear()
+        XCTAssertEqual(webView.evaluatedScripts.count, 1)
+        XCTAssertEqual(scheduler.cancelCount, 1)
+
+        lifecycle.handleBecomeActive(webView)
+
+        XCTAssertEqual(webView.evaluatedScripts.count, 2, "become-active must re-activate recovery")
+        XCTAssertEqual(scheduler.scheduledCount, 2, "become-active must schedule a fresh delayed recheck")
     }
 }

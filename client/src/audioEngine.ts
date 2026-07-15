@@ -38,6 +38,8 @@ type NativeAudioEvent = {
   duration?: number;
   playbackRate?: number;
   paused?: boolean;
+  /** Episode identity from native/Mac transport. Untagged browser events omit this. */
+  episodeId?: number;
   available?: boolean;
   connected?: boolean;
   name?: string;
@@ -95,6 +97,8 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
   private _duration = NaN;
   private _playbackRate = 1;
   private _paused = true;
+  /** Last episode id passed to loadSource; used to drop stale tagged transport/ended. */
+  private _episodeId: number | undefined;
   private _cast: CastInfo = { available: false, connected: false, output: "local" };
 
   constructor() {
@@ -118,6 +122,7 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this._currentTime = initialPosition;
     this._duration = NaN;
     this._paused = true;
+    this._episodeId = episodeId;
     this.post({ command: "load", src, position: initialPosition, rate: this._playbackRate, episodeId });
   }
 
@@ -168,7 +173,13 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
 
   load(): void {
     if (this._src) {
-      this.post({ command: "load", src: this._src, position: this._currentTime, rate: this._playbackRate });
+      this.post({
+        command: "load",
+        src: this._src,
+        position: this._currentTime,
+        rate: this._playbackRate,
+        episodeId: this._episodeId,
+      });
     }
   }
 
@@ -178,6 +189,7 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this._currentTime = 0;
     this._duration = NaN;
     this._paused = true;
+    this._episodeId = undefined;
     this.post({ command: "stop" });
   }
 
@@ -217,6 +229,15 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
       return;
     }
     if (event.id != null && event.id !== this.id) return;
+    // Drop transport/ended tagged for a different episode. Untagged events (browser
+    // HTMLAudioElement path, or native events without identity) still apply.
+    if (
+      event.episodeId != null &&
+      this._episodeId != null &&
+      event.episodeId !== this._episodeId
+    ) {
+      return;
+    }
     if (event.position != null && Number.isFinite(event.position)) {
       this._currentTime = Math.max(0, event.position);
     }

@@ -22,10 +22,50 @@ extension WKWebView: PodsWebViewLoading {}
 
 @MainActor
 final class PodsWebViewRecovery {
-    private let rootURL: URL
+    /// Delay before the post-activation recheck so WebKit/React can settle.
+    static let activationRecheckDelay: TimeInterval = 0.75
 
-    init(rootURL: URL) {
+    /// Schedules delayed work and returns a cancel closure. Injected for deterministic tests.
+    typealias ScheduleDelayedWork = (_ work: @escaping @MainActor () -> Void) -> (() -> Void)
+
+    private let rootURL: URL
+    private let scheduleDelayedWork: ScheduleDelayedWork
+    private var cancelPendingWork: (() -> Void)?
+    /// Bumped on every activation/cancel so delayed callbacks that lost a cancel race no-op.
+    private var delayedWorkGeneration: UInt = 0
+
+    init(
+        rootURL: URL,
+        scheduleDelayedWork: ScheduleDelayedWork? = nil
+    ) {
         self.rootURL = rootURL
+        self.scheduleDelayedWork = scheduleDelayedWork ?? Self.defaultScheduleDelayedWork
+    }
+
+    /// Immediate health check plus one delayed recheck. Replaces any prior delayed work.
+    func handleActivation(_ webView: PodsWebViewLoading) {
+        cancelPendingRecovery()
+        PodsDebugLog("Pods webview activation health check requested")
+        reloadIfContentMissing(webView)
+        let generation = delayedWorkGeneration
+        cancelPendingWork = scheduleDelayedWork { [weak self, weak webView] in
+            guard let self, let webView else {
+                return
+            }
+            guard self.delayedWorkGeneration == generation else {
+                return
+            }
+            self.cancelPendingWork = nil
+            PodsDebugLog("Pods webview delayed activation recheck requested")
+            self.reloadIfContentMissing(webView)
+        }
+    }
+
+    /// Cancels any scheduled delayed recheck (teardown / replacement).
+    func cancelPendingRecovery() {
+        delayedWorkGeneration &+= 1
+        cancelPendingWork?()
+        cancelPendingWork = nil
     }
 
     func loadRoot(_ webView: PodsWebViewLoading) {
@@ -71,6 +111,18 @@ final class PodsWebViewRecovery {
             && url.port == rootURL.port
     }
 
+    private static let defaultScheduleDelayedWork: ScheduleDelayedWork = { work in
+        let item = DispatchWorkItem {
+            Task { @MainActor in
+                work()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + activationRecheckDelay, execute: item)
+        return {
+            item.cancel()
+        }
+    }
+
     private static let renderedContentCheckScript = """
     (function() {
       var root = document.getElementById("root");
@@ -83,6 +135,28 @@ final class PodsWebViewRecovery {
       return Boolean((root.textContent || "").trim());
     })();
     """
+}
+
+/// Maps UIKit/app lifecycle events onto recovery activation and cancellation.
+@MainActor
+final class PodsWebViewRecoveryLifecycle {
+    private let recovery: PodsWebViewRecovery
+
+    init(recovery: PodsWebViewRecovery) {
+        self.recovery = recovery
+    }
+
+    func handleAppear(_ webView: PodsWebViewLoading) {
+        recovery.handleActivation(webView)
+    }
+
+    func handleDisappear() {
+        recovery.cancelPendingRecovery()
+    }
+
+    func handleBecomeActive(_ webView: PodsWebViewLoading) {
+        recovery.handleActivation(webView)
+    }
 }
 
 struct PodsWebView: UIViewControllerRepresentable {
@@ -99,6 +173,7 @@ final class PodsWebViewController: UIViewController {
 
     private var webView: WKWebView!
     private let recovery = PodsWebViewRecovery(rootURL: localRootURL)
+    private lazy var recoveryLifecycle = PodsWebViewRecoveryLifecycle(recovery: recovery)
 
     deinit {
         NotificationCenter.default.removeObserver(self)
@@ -134,8 +209,8 @@ final class PodsWebViewController: UIViewController {
         PodsDebugLog("Webview viewDidLoad")
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(applicationWillEnterForeground),
-            name: UIApplication.willEnterForegroundNotification,
+            selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -147,14 +222,23 @@ final class PodsWebViewController: UIViewController {
         loadBundledWebApp()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        recoveryLifecycle.handleAppear(webView)
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        recoveryLifecycle.handleDisappear()
+    }
+
     private func loadBundledWebApp() {
         PodsLog("Pods webview loading \(Self.localRootURL.absoluteString)")
         recovery.loadRoot(webView)
     }
 
-    @objc private func applicationWillEnterForeground() {
-        PodsDebugLog("Pods webview foreground health check requested")
-        recovery.reloadIfContentMissing(webView)
+    @objc private func applicationDidBecomeActive() {
+        recoveryLifecycle.handleBecomeActive(webView)
     }
 
     @objc private func feedRefreshCompleted() {

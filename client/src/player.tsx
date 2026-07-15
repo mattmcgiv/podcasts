@@ -67,6 +67,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const speedRef = useRef(1);
   const autoplayRef = useRef(true);
   const resumeAtRef = useRef(0);
+  /** True while mark-played → next is in flight for one asynchronous completion. */
+  const endInFlightRef = useRef(false);
 
   currentRef.current = current;
 
@@ -129,22 +131,34 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   const handleEnded = useCallback(async () => {
+    // In-flight guard only: duplicate ended during one async completion transition.
+    // Stale cross-episode ended is filtered by NativeAudioEngine episode identity.
+    if (endInFlightRef.current) return;
     const cur = currentRef.current;
     if (!cur) return;
+    endInFlightRef.current = true;
+    const completedId = cur.id;
     try {
-      await Api.markPlayed(cur.id);
-      emitEpisodesChanged();
-    } catch {
-      // offline mark failure shouldn't wedge the player
-    }
-    if (autoplayRef.current) {
-      const next = await Api.next(cur.id, contextRef.current).catch(() => null);
-      if (next) {
-        playEpisode(next, contextRef.current);
-        return;
+      try {
+        await Api.markPlayed(completedId);
+        emitEpisodesChanged();
+      } catch {
+        // offline mark failure shouldn't wedge the player
       }
+      // User (or a prior completion) already moved on — do not chain from a stale end.
+      if (currentRef.current?.id !== completedId) return;
+      if (autoplayRef.current) {
+        const next = await Api.next(completedId, contextRef.current).catch(() => null);
+        if (currentRef.current?.id !== completedId) return;
+        if (next) {
+          playEpisode(next, contextRef.current);
+          return;
+        }
+      }
+      close();
+    } finally {
+      endInFlightRef.current = false;
     }
-    close();
   }, [close, playEpisode]);
 
   const endedRef = useRef(handleEnded);

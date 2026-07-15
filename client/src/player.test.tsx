@@ -355,6 +355,191 @@ describe("PlayerProvider", () => {
     expect(FakeAudio.last().src).toBe("https://h.example/next.mp3");
   });
 
+  it("native Mac output: replacing episode keeps Mac selected and continues with load+play only", async () => {
+    const messages: Array<Record<string, unknown>> = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message as Record<string, unknown>);
+          },
+        },
+      },
+    };
+
+    function CastProbe() {
+      const p = usePlayer();
+      return (
+        <div>
+          <button
+            onClick={() =>
+              p.playEpisode(
+                episode({ id: 1, audio_url: "https://h.example/ep1.mp3", position_secs: 0 }),
+                "recent",
+              )
+            }
+          >
+            play1
+          </button>
+          <button
+            onClick={() =>
+              p.playEpisode(
+                episode({ id: 2, title: "Next", audio_url: "https://h.example/ep2.mp3", position_secs: 0 }),
+                "recent",
+              )
+            }
+          >
+            play2
+          </button>
+          <button onClick={() => p.setCastOutput("mac")}>cast-mac</button>
+          <span data-testid="state">
+            {p.current
+              ? `${p.current.id}:${p.playing ? "playing" : "paused"}`
+              : "none"}
+          </span>
+          <span data-testid="cast">
+            {`${p.cast.output}:${p.cast.connected ? "up" : "down"}`}
+          </span>
+        </div>
+      );
+    }
+
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/1": { ...episode({ id: 1 }), notes_html: "", archived_at: null },
+      "GET /api/episodes/2": {
+        ...episode({ id: 2, title: "Next", audio_url: "https://h.example/ep2.mp3" }),
+        notes_html: "",
+        archived_at: null,
+      },
+      "PUT /api/episodes/1/position": null,
+      "PUT /api/episodes/2/position": null,
+    });
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <CastProbe />
+      </PlayerProvider>,
+    );
+
+    await user.click(screen.getByText("play1"));
+    await user.click(screen.getByText("cast-mac"));
+    act(() => {
+      window.PodsAudioBridge?.emit({
+        type: "cast",
+        available: true,
+        connected: true,
+        name: "Pods Speaker",
+        output: "mac",
+      });
+      window.PodsAudioBridge?.emit({ type: "play", paused: false, position: 10 });
+    });
+    await waitFor(() => expect(screen.getByTestId("cast")).toHaveTextContent("mac:up"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+
+    const before = messages.length;
+    await user.click(screen.getByText("play2"));
+
+    const after = messages.slice(before);
+    expect(after.some((m) => m.command === "castDisconnect")).toBe(false);
+    expect(after.some((m) => m.command === "stop")).toBe(false);
+    expect(after).toContainEqual(
+      expect.objectContaining({
+        command: "load",
+        src: "https://h.example/ep2.mp3",
+        episodeId: 2,
+      }),
+    );
+    expect(after).toContainEqual(expect.objectContaining({ command: "play" }));
+    // Must not flip the user-selected sink back to local on the command stream.
+    expect(after.filter((m) => m.command === "castConnect").length).toBeLessThanOrEqual(1);
+    expect(screen.getByTestId("cast")).toHaveTextContent("mac:up");
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("2:playing"));
+  });
+
+  it("native bridge ended: marks played, loads next, ignores late ended for prior episodeId", async () => {
+    const messages: Array<Record<string, unknown>> = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message as Record<string, unknown>);
+          },
+        },
+      },
+    };
+
+    const next = episode({ id: 2, title: "Next", audio_url: "https://h.example/next.mp3" });
+    const third = episode({ id: 3, title: "Third", audio_url: "https://h.example/third.mp3" });
+    const { calls, user } = await setup({
+      "GET /api/next": (url: URL) => {
+        const after = url.searchParams.get("after");
+        if (after === "1") return next;
+        if (after === "2") return third;
+        return null;
+      },
+      "GET /api/episodes/2": { ...next, notes_html: "", archived_at: null },
+      "GET /api/episodes/3": { ...third, notes_html: "", archived_at: null },
+      "PUT /api/episodes/2/position": null,
+      "PUT /api/episodes/3/position": null,
+      "POST /api/episodes/2/played": null,
+      "POST /api/episodes/3/played": null,
+    });
+
+    await user.click(screen.getByText("play1"));
+    const engineId = messages.find((m) => m.command === "load")?.id as number;
+
+    // Episode 1 completes with an identity-tagged ended event.
+    await act(async () => {
+      window.PodsAudioBridge?.emit({ id: engineId, type: "ended", paused: true, episodeId: 1 });
+    });
+
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("2:playing"));
+    expect(calls.filter((c) => c.key === "POST /api/episodes/1/played")).toHaveLength(1);
+    expect(calls.filter((c) => c.key === "GET /api/next")).toHaveLength(1);
+    expect(calls.find((c) => c.key === "GET /api/next")?.url.searchParams.get("after")).toBe("1");
+
+    const loadNext = messages.filter(
+      (m) => m.command === "load" && m.src === "https://h.example/next.mp3",
+    );
+    expect(loadNext).toHaveLength(1);
+    expect(loadNext[0]).toEqual(expect.objectContaining({ episodeId: 2 }));
+    const playAfterNextLoad = messages
+      .map((m, i) => ({ m, i }))
+      .filter(({ m }) => m.command === "play" && m.id === engineId);
+    expect(playAfterNextLoad.length).toBeGreaterThan(0);
+
+    // New episode produces at least one timeupdate — the old suppressEndedRef heuristic
+    // clears here, which is the race the identity filter must close.
+    await act(async () => {
+      window.PodsAudioBridge?.emit({
+        id: engineId,
+        type: "timeupdate",
+        position: 1,
+        duration: 300,
+        episodeId: 2,
+        paused: false,
+      });
+    });
+    await waitFor(() => expect(screen.getByTestId("pos")).toHaveTextContent("1"));
+
+    // Late ended tagged for the *previous* episode must not mark/skip the new one.
+    const playedBeforeStale = calls.filter((c) => c.key.startsWith("POST /api/episodes/")).length;
+    const nextBeforeStale = calls.filter((c) => c.key === "GET /api/next").length;
+    await act(async () => {
+      window.PodsAudioBridge?.emit({ id: engineId, type: "ended", paused: true, episodeId: 1 });
+    });
+
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("2:playing"));
+    expect(calls.filter((c) => c.key.startsWith("POST /api/episodes/")).length).toBe(playedBeforeStale);
+    expect(calls.filter((c) => c.key === "GET /api/next").length).toBe(nextBeforeStale);
+    expect(calls.some((c) => c.key === "POST /api/episodes/2/played")).toBe(false);
+    expect(messages.filter((m) => m.command === "load" && m.src === "https://h.example/third.mp3")).toHaveLength(
+      0,
+    );
+  });
+
   it("on ended with autoplay off: marks played and closes", async () => {
     const { calls, user } = await setup();
     await user.click(screen.getByText("autoplay-off"));

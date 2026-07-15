@@ -99,6 +99,44 @@ describe("native audio bridge", () => {
     );
   });
 
+  it("does not dispatch events tagged for a previously loaded episode after loadSource switches", () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+
+    const audio = createAudioEngine();
+    const seen: string[] = [];
+    audio.addEventListener("timeupdate", () => seen.push(`time:${audio.currentTime}`));
+    audio.addEventListener("ended", () => seen.push("ended"));
+    audio.addEventListener("play", () => seen.push("play"));
+
+    audio.loadSource?.("https://h.example/one.mp3", 0, 1);
+    audio.loadSource?.("https://h.example/two.mp3", 0, 2);
+
+    // Stale transport / completion for episode 1 must not mutate or fire after switch to 2.
+    window.PodsAudioBridge?.emit({ type: "timeupdate", position: 99, duration: 180, episodeId: 1 });
+    window.PodsAudioBridge?.emit({ type: "ended", episodeId: 1 });
+    window.PodsAudioBridge?.emit({ type: "play", paused: false, episodeId: 1 });
+    expect(seen).toEqual([]);
+    expect(audio.currentTime).toBe(0);
+    expect(audio.paused).toBe(true);
+
+    // Matching identity still applies.
+    window.PodsAudioBridge?.emit({ type: "timeupdate", position: 3, duration: 200, episodeId: 2 });
+    expect(seen).toEqual(["time:3"]);
+    expect(audio.currentTime).toBe(3);
+    expect(audio.duration).toBe(200);
+
+    // Untagged browser-style events remain accepted.
+    window.PodsAudioBridge?.emit({ type: "ended" });
+    expect(seen).toEqual(["time:3", "ended"]);
+    expect(audio.paused).toBe(true);
+  });
+
   it("ignores non-positive duration events so early native zeros do not stick", () => {
     window.webkit = {
       messageHandlers: {
