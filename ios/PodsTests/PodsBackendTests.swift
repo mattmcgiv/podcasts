@@ -783,6 +783,113 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(paused[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 0)
     }
 
+    // MARK: - Remote command forward skip (car Next Track / Skip Forward)
+
+    /// Fakes only the forward MediaPlayer command-registration boundary.
+    private final class FakeRemoteForwardCommandRegistrar: RemoteForwardCommandRegistering {
+        private(set) var nextTrackHandler: (() -> MPRemoteCommandHandlerStatus)?
+        private(set) var skipForwardHandler: ((TimeInterval) -> MPRemoteCommandHandlerStatus)?
+        private(set) var skipForwardPreferredIntervals: [NSNumber]?
+
+        func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
+            nextTrackHandler = handler
+        }
+
+        func registerSkipForwardCommand(
+            preferredIntervals: [NSNumber],
+            handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+        ) {
+            skipForwardPreferredIntervals = preferredIntervals
+            skipForwardHandler = handler
+        }
+    }
+
+    // MARK: RemoteForwardSkipHandler (pure command-handler seam)
+
+    func testRemoteForwardSkipSeeksAbsoluteTarget() {
+        var seekTargets: [Double] = []
+
+        let status = RemoteForwardSkipHandler.handle(
+            hasActiveContent: true,
+            currentPosition: 100,
+            knownDuration: 1_000,
+            interval: 30,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(seekTargets, [130])
+    }
+
+    func testRemoteForwardSkipWithNoActiveContentReturnsNoActionableItem() {
+        var seekTargets: [Double] = []
+
+        let status = RemoteForwardSkipHandler.handle(
+            hasActiveContent: false,
+            currentPosition: 100,
+            knownDuration: 1_000,
+            interval: 30,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+
+        XCTAssertEqual(status, .noActionableNowPlayingItem)
+        XCTAssertEqual(seekTargets, [])
+    }
+
+    func testRemoteForwardSkipClampsToKnownDuration() {
+        var seekTargets: [Double] = []
+
+        let status = RemoteForwardSkipHandler.handle(
+            hasActiveContent: true,
+            currentPosition: 590,
+            knownDuration: 600,
+            interval: 30,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(seekTargets, [600])
+    }
+
+    // MARK: RemoteForwardCommandBinding (forward-only registrar installation seam)
+
+    func testRemoteCommandBindingNextTrackPassesThirtySecondInterval() throws {
+        let registrar = FakeRemoteForwardCommandRegistrar()
+        var capturedIntervals: [TimeInterval] = []
+
+        RemoteForwardCommandBinding.install(
+            on: registrar,
+            forwardSkip: { interval in
+                capturedIntervals.append(interval)
+                return .success
+            }
+        )
+
+        let status = try XCTUnwrap(registrar.nextTrackHandler)()
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(capturedIntervals, [30])
+    }
+
+    func testRemoteCommandBindingSkipForwardAdvertisesIntervalAndPassesEventInterval() throws {
+        let registrar = FakeRemoteForwardCommandRegistrar()
+        var capturedIntervals: [TimeInterval] = []
+
+        RemoteForwardCommandBinding.install(
+            on: registrar,
+            forwardSkip: { interval in
+                capturedIntervals.append(interval)
+                return .success
+            }
+        )
+
+        XCTAssertEqual(registrar.skipForwardPreferredIntervals, [NSNumber(value: 30)])
+        let status = try XCTUnwrap(registrar.skipForwardHandler)(45)
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(capturedIntervals, [45])
+    }
+
     private static let d1 = "Mon, 06 Jan 2025 00:00:00 GMT"
     private static let d2 = "Tue, 07 Jan 2025 00:00:00 GMT"
     private static let d3 = "Wed, 08 Jan 2025 00:00:00 GMT"

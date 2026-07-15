@@ -15,6 +15,84 @@ enum PlaybackOutput: String {
     case mac
 }
 
+/// Package-internal seam for forward-only MediaPlayer remote-command registration
+/// (Next Track / Skip Forward). Production uses `SystemRemoteForwardCommandRegistrar`;
+/// tests inject a fake that captures handlers. Play/Pause/Toggle stay on
+/// `MPRemoteCommandCenter` directly.
+protocol RemoteForwardCommandRegistering: AnyObject {
+    func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus)
+    func registerSkipForwardCommand(
+        preferredIntervals: [NSNumber],
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    )
+}
+
+final class SystemRemoteForwardCommandRegistrar: RemoteForwardCommandRegistering {
+    private let center = MPRemoteCommandCenter.shared()
+
+    func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
+        center.nextTrackCommand.isEnabled = true
+        center.nextTrackCommand.addTarget { _ in handler() }
+    }
+
+    func registerSkipForwardCommand(
+        preferredIntervals: [NSNumber],
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    ) {
+        center.skipForwardCommand.isEnabled = true
+        center.skipForwardCommand.preferredIntervals = preferredIntervals
+        center.skipForwardCommand.addTarget { event in
+            guard let skipEvent = event as? MPSkipIntervalCommandEvent else {
+                return .commandFailed
+            }
+            return handler(skipEvent.interval)
+        }
+    }
+}
+
+/// Pure forward-skip policy for car/accessory remote commands.
+/// Does only the injected absolute-seek effect (preserves play/pause).
+enum RemoteForwardSkipHandler {
+    static func handle(
+        hasActiveContent: Bool,
+        currentPosition: Double,
+        knownDuration: Double?,
+        interval: TimeInterval,
+        absoluteSeek: (Double) -> Void
+    ) -> MPRemoteCommandHandlerStatus {
+        guard hasActiveContent else {
+            return .noActionableNowPlayingItem
+        }
+
+        var target = currentPosition + interval
+        if let duration = knownDuration, duration.isFinite, duration > 0 {
+            target = min(target, duration)
+        }
+        target = max(0, target)
+        absoluteSeek(target)
+        return .success
+    }
+}
+
+/// Installs forward-only handlers (Next Track / Skip Forward) onto a registrar.
+enum RemoteForwardCommandBinding {
+    static let forwardSkipPreferredInterval: TimeInterval = 30
+
+    static func install(
+        on registrar: RemoteForwardCommandRegistering,
+        forwardSkip: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    ) {
+        registrar.registerNextTrackCommand {
+            forwardSkip(forwardSkipPreferredInterval)
+        }
+        registrar.registerSkipForwardCommand(
+            preferredIntervals: [NSNumber(value: forwardSkipPreferredInterval)]
+        ) { interval in
+            forwardSkip(interval)
+        }
+    }
+}
+
 final class AudioBridge: NSObject, WKScriptMessageHandler {
     static let shared = AudioBridge()
 
@@ -718,6 +796,47 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
             return .success
         }
+        configureForwardRemoteCommands(using: SystemRemoteForwardCommandRegistrar())
+    }
+
+    /// Install Next Track / Skip Forward through the forward-only registrar seam.
+    private func configureForwardRemoteCommands(using registrar: RemoteForwardCommandRegistering) {
+        RemoteForwardCommandBinding.install(
+            on: registrar,
+            forwardSkip: { [weak self] interval in
+                guard let self else { return .noSuchContent }
+                return self.handleRemoteForwardSkip(interval: interval)
+            }
+        )
+    }
+
+    /// Car/accessory forward skip: snapshot live state, then pure absolute-seek policy.
+    @discardableResult
+    private func handleRemoteForwardSkip(interval: TimeInterval) -> MPRemoteCommandHandlerStatus {
+        let hasActiveContent = currentEpisodeID != nil
+
+        let currentPosition: Double
+        if preferredOutput == .mac || output == .mac {
+            currentPosition = nowPlayingPosition
+        } else if let live = player?.currentTime().seconds, live.isFinite {
+            currentPosition = max(0, live)
+        } else {
+            currentPosition = nowPlayingPosition
+        }
+
+        let liveDuration = (output == .local) ? player?.currentItem?.duration.seconds : nil
+        let knownDuration = Self.positiveDuration(liveDuration) ?? Self.positiveDuration(nowPlayingDuration)
+
+        return RemoteForwardSkipHandler.handle(
+            hasActiveContent: hasActiveContent,
+            currentPosition: currentPosition,
+            knownDuration: knownDuration,
+            interval: interval,
+            absoluteSeek: { [weak self] target in
+                guard let self else { return }
+                self.seek(id: self.currentId, seconds: target)
+            }
+        )
     }
 
     private func recordCurrentProgress(force: Bool = false) {

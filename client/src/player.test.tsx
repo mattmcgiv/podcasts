@@ -44,11 +44,13 @@ function Probe() {
       <button onClick={() => void p.markPlayedAndClose()}>done</button>
       <button onClick={p.skipForward}>fwd</button>
       <button onClick={p.skipBack}>back</button>
+      <button onClick={() => p.setExpanded(false)}>collapse</button>
       <span data-testid="state">
         {p.current
           ? `${p.current.id}:${p.playing ? "playing" : "paused"}:${p.speed}:${p.autoplay ? "auto" : "manual"}`
           : "none"}
       </span>
+      <span data-testid="expanded">{p.expanded ? "open" : "closed"}</span>
       <span data-testid="dur">{p.duration}</span>
       <span data-testid="pos">{Math.floor(p.position)}</span>
     </div>
@@ -165,6 +167,45 @@ describe("PlayerProvider", () => {
         position: 30,
       }),
     );
+  });
+
+  it("reopens the active native episode without reloading stale list progress", async () => {
+    const messages: Array<Record<string, unknown>> = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message as Record<string, unknown>);
+          },
+        },
+      },
+    };
+    const { user } = await setup();
+
+    await user.click(screen.getByText("play1"));
+    const firstLoad = messages.find((message) => message.command === "load");
+    expect(firstLoad).toBeDefined();
+    const engineId = firstLoad!.id as number;
+    act(() => {
+      window.PodsAudioBridge?.emit({
+        id: engineId,
+        type: "timeupdate",
+        position: 100,
+        duration: 1_800,
+        paused: false,
+      });
+    });
+    await user.click(screen.getByText("collapse"));
+    expect(screen.getByTestId("expanded")).toHaveTextContent("closed");
+
+    // The Listen row still carries its old persisted position (30), but reopening
+    // the same active episode must keep the live native position (100).
+    await user.click(screen.getByText("play1"));
+
+    expect(screen.getByTestId("expanded")).toHaveTextContent("open");
+    expect(screen.getByTestId("pos")).toHaveTextContent("100");
+    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    expect(messages.filter((message) => message.command === "load")).toEqual([firstLoad]);
   });
 
   it("does not carry a previous native playback position into a fresh episode", async () => {

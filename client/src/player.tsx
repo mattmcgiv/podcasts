@@ -97,6 +97,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const playEpisode = useCallback(
     (item: EpisodeItem, context: PlayContext) => {
+      if (currentRef.current?.id === item.id) {
+        contextRef.current = context;
+        setExpanded(true);
+        return;
+      }
       flushPosition();
       const a = ensureAudio();
       contextRef.current = context;
