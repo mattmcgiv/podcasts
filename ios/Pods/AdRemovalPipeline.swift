@@ -12,17 +12,20 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
     private let jobStore: AdRemovalJobStore
     private let artifactStore: AdRemovalArtifactStore
     private let audioDownloader: AdRemovalAudioDownloading
+    private let transcriber: AdTranscribing?
 
     init(
         database: PodsDatabase,
         jobStore: AdRemovalJobStore,
         artifactStore: AdRemovalArtifactStore,
-        audioDownloader: AdRemovalAudioDownloading
+        audioDownloader: AdRemovalAudioDownloading,
+        transcriber: AdTranscribing? = nil
     ) {
         self.database = database
         self.jobStore = jobStore
         self.artifactStore = artifactStore
         self.audioDownloader = audioDownloader
+        self.transcriber = transcriber
     }
 
     func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
@@ -43,7 +46,24 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                 throw AdRemovalPipelineError.invalidDownloadedArtifact
             }
             _ = try jobStore.recordAudioArtifact(jobID: job.id, artifact: artifact)
-        case .transcribing, .classifying:
+        case .transcribing:
+            guard let transcriber else {
+                throw AdRemovalPipelineError.stageNotConfigured(stage)
+            }
+            guard let artifact = job.audioArtifact,
+                  try artifactStore.validate(artifact) else {
+                throw AdRemovalPipelineError.invalidDownloadedArtifact
+            }
+            let segments = try await transcriber.transcribe(
+                audioURL: artifactStore.url(for: artifact.relativePath),
+                episodeID: job.episodeID
+            )
+            _ = try jobStore.recordTranscript(
+                jobID: job.id,
+                segments: segments,
+                transcriberVersion: transcriber.version
+            )
+        case .classifying:
             throw AdRemovalPipelineError.stageNotConfigured(stage)
         case .queued, .downloaded, .ready, .failed, .cancelled:
             throw AdRemovalPipelineError.unsupportedStage(stage)

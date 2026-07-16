@@ -37,6 +37,8 @@
 		110000000000000000000002 /* AdRemovalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000012 /* AdRemovalStorage.swift */; };
 		110000000000000000000003 /* AdRemovalDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000013 /* AdRemovalDownload.swift */; };
 		110000000000000000000004 /* AdRemovalPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000014 /* AdRemovalPipeline.swift */; };
+		111000000000000000000001 /* AdRemovalTranscriptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111000000000000000000011 /* AdRemovalTranscriptionTests.swift */; };
+		111000000000000000000002 /* AdRemovalTranscription.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111000000000000000000012 /* AdRemovalTranscription.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -83,6 +85,8 @@
 		110000000000000000000012 /* AdRemovalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalStorage.swift; sourceTree = "<group>"; };
 		110000000000000000000013 /* AdRemovalDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalDownload.swift; sourceTree = "<group>"; };
 		110000000000000000000014 /* AdRemovalPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPipeline.swift; sourceTree = "<group>"; };
+		111000000000000000000011 /* AdRemovalTranscriptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalTranscriptionTests.swift; sourceTree = "<group>"; };
+		111000000000000000000012 /* AdRemovalTranscription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalTranscription.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -122,6 +126,7 @@
 				110000000000000000000012 /* AdRemovalStorage.swift */,
 				110000000000000000000013 /* AdRemovalDownload.swift */,
 				110000000000000000000014 /* AdRemovalPipeline.swift */,
+				111000000000000000000012 /* AdRemovalTranscription.swift */,
 				10A000000000000000000011 /* PodsApp.swift */,
 				10A000000000000000000012 /* PodsWebView.swift */,
 				10A000000000000000000013 /* AudioBridge.swift */,
@@ -171,6 +176,7 @@
 				10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */,
 				10F000000000000000000011 /* AdRemovalPersistenceTests.swift */,
 				110000000000000000000011 /* AdRemovalStorageTests.swift */,
+				111000000000000000000011 /* AdRemovalTranscriptionTests.swift */,
 			);
 			path = PodsTests;
 			sourceTree = "<group>";
@@ -298,6 +304,7 @@
 				110000000000000000000002 /* AdRemovalStorage.swift in Sources */,
 				110000000000000000000003 /* AdRemovalDownload.swift in Sources */,
 				110000000000000000000004 /* AdRemovalPipeline.swift in Sources */,
+				111000000000000000000002 /* AdRemovalTranscription.swift in Sources */,
 				10A000000000000000000001 /* PodsApp.swift in Sources */,
 				10A000000000000000000002 /* PodsWebView.swift in Sources */,
 				10A000000000000000000003 /* AudioBridge.swift in Sources */,
@@ -326,6 +333,7 @@
 				10E000000000000000000001 /* AdRemovalDiagnosticsTests.swift in Sources */,
 				10F000000000000000000001 /* AdRemovalPersistenceTests.swift in Sources */,
 				110000000000000000000001 /* AdRemovalStorageTests.swift in Sources */,
+				111000000000000000000001 /* AdRemovalTranscriptionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -389,7 +397,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -442,7 +450,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
@@ -459,7 +467,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Pods/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -485,7 +493,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = "";
 				INFOPLIST_FILE = Pods/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -509,7 +517,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -533,7 +541,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

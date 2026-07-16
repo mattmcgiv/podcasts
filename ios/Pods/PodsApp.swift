@@ -64,7 +64,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 database: database,
                 jobStore: jobStore,
                 artifactStore: artifactStore,
-                audioDownloader: downloader
+                audioDownloader: downloader,
+                transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics)
             )
             adRemovalDownloader = downloader
             adRemovalCoordinator = AdRemovalCoordinator(

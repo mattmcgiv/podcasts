@@ -37,6 +37,8 @@ struct AdRemovalJob: Equatable {
     let audioArtifact: AdRemovalAudioArtifact?
     let downloadedAt: Int64?
     let downloadResumeRelativePath: String?
+    let transcriberVersion: String?
+    let transcribedAt: Int64?
 }
 
 struct AdTranscriptSegment: Equatable, Codable {
@@ -133,7 +135,7 @@ final class AdRemovalJobStore {
                    attempt_count, enrolled_at, updated_at, failed_stage,
                    last_error_code, last_error_message, retry_eligible, next_retry_at,
                    audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
-                   download_resume_relative_path
+                   download_resume_relative_path, transcriber_version, transcribed_at
             FROM ad_removal_jobs WHERE id = ?
             """,
             [.text(id)],
@@ -148,7 +150,7 @@ final class AdRemovalJobStore {
                    attempt_count, enrolled_at, updated_at, failed_stage,
                    last_error_code, last_error_message, retry_eligible, next_retry_at,
                    audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
-                   download_resume_relative_path
+                   download_resume_relative_path, transcriber_version, transcribed_at
             FROM ad_removal_jobs WHERE episode_id = ?
             """,
             [.int(episodeID)],
@@ -260,7 +262,7 @@ final class AdRemovalJobStore {
                    j.attempt_count, j.enrolled_at, j.updated_at, j.failed_stage,
                    j.last_error_code, j.last_error_message, j.retry_eligible, j.next_retry_at,
                    j.audio_relative_path, j.audio_sha256, j.audio_byte_count, j.downloaded_at,
-                   j.download_resume_relative_path
+                   j.download_resume_relative_path, j.transcriber_version, j.transcribed_at
             FROM ad_removal_jobs j
             JOIN episodes e ON e.id = j.episode_id
             LEFT JOIN episode_state s ON s.episode_id = e.id
@@ -334,28 +336,35 @@ final class AdRemovalJobStore {
 
     func replaceTranscriptSegments(episodeID: Int64, segments: [AdTranscriptSegment]) throws {
         try database.withTransaction {
-            try database.execute(
-                "DELETE FROM ad_transcript_segments WHERE episode_id = ?",
-                [.int(episodeID)]
+            try Self.replaceTranscriptSegments(in: database, episodeID: episodeID, segments: segments)
+        }
+    }
+
+    func recordTranscript(
+        jobID: String,
+        segments: [AdTranscriptSegment],
+        transcriberVersion: String
+    ) throws -> AdRemovalJob {
+        guard !transcriberVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AdRemovalJobStoreError.corruptState("missing transcriber version")
+        }
+        return try database.withTransaction {
+            let job = try requiredJob(id: jobID)
+            try Self.replaceTranscriptSegments(
+                in: database,
+                episodeID: job.episodeID,
+                segments: segments
             )
-            for segment in segments {
-                try database.execute(
-                    """
-                    INSERT INTO ad_transcript_segments
-                        (episode_id, segment_id, segment_index, language, start_time, end_time, text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        .int(episodeID),
-                        .text(segment.id),
-                        .int(Int64(segment.index)),
-                        .text(segment.language),
-                        .double(segment.startTime),
-                        .double(segment.endTime),
-                        .text(segment.text)
-                    ]
-                )
-            }
+            let timestamp = now()
+            try database.execute(
+                """
+                UPDATE ad_removal_jobs
+                SET transcriber_version = ?, transcribed_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                [.text(transcriberVersion), .int(timestamp), .int(timestamp), .text(jobID)]
+            )
+            return try requiredJob(id: jobID)
         }
     }
 
@@ -375,6 +384,53 @@ final class AdRemovalJobStore {
                 startTime: sqlite3_column_double(statement, 3),
                 endTime: sqlite3_column_double(statement, 4),
                 text: sqliteString(statement, 5)
+            )
+        }
+    }
+
+    private static func replaceTranscriptSegments(
+        in database: PodsDatabase,
+        episodeID: Int64,
+        segments: [AdTranscriptSegment]
+    ) throws {
+        guard !segments.isEmpty else {
+            throw AdRemovalJobStoreError.corruptState("transcript has no finalized segments")
+        }
+        var priorEnd = -Double.infinity
+        for (expectedIndex, segment) in segments.enumerated() {
+            guard segment.index == expectedIndex,
+                  !segment.id.isEmpty,
+                  !segment.language.isEmpty,
+                  segment.startTime.isFinite,
+                  segment.endTime.isFinite,
+                  segment.startTime >= 0,
+                  segment.endTime > segment.startTime,
+                  segment.startTime >= priorEnd,
+                  !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AdRemovalJobStoreError.corruptState("invalid transcript segment sequence")
+            }
+            priorEnd = segment.endTime
+        }
+        try database.execute(
+            "DELETE FROM ad_transcript_segments WHERE episode_id = ?",
+            [.int(episodeID)]
+        )
+        for segment in segments {
+            try database.execute(
+                """
+                INSERT INTO ad_transcript_segments
+                    (episode_id, segment_id, segment_index, language, start_time, end_time, text)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .int(episodeID),
+                    .text(segment.id),
+                    .int(Int64(segment.index)),
+                    .text(segment.language),
+                    .double(segment.startTime),
+                    .double(segment.endTime),
+                    .text(segment.text)
+                ]
             )
         }
     }
@@ -636,7 +692,9 @@ final class AdRemovalJobStore {
             nextRetryAt: sqliteOptionalInt64(statement, 12),
             audioArtifact: audioArtifact,
             downloadedAt: sqliteOptionalInt64(statement, 16),
-            downloadResumeRelativePath: sqliteOptionalString(statement, 17)
+            downloadResumeRelativePath: sqliteOptionalString(statement, 17),
+            transcriberVersion: sqliteOptionalString(statement, 18),
+            transcribedAt: sqliteOptionalInt64(statement, 19)
         )
     }
 
@@ -713,6 +771,9 @@ actor AdRemovalCoordinator {
             let completed = try store.transition(jobID: job.id, to: completionStage)
             record(eventName: "job_state_transition", severity: .notice, job: completed)
             return completed
+        } catch is CancellationError {
+            record(eventName: "job_stage_cancelled_at_safe_boundary", severity: .notice, job: job)
+            throw CancellationError()
         } catch let pause as AdRemovalPipelinePause {
             let blocked = try store.setBlockingReason(jobID: job.id, reason: pause.reason)
             record(

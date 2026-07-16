@@ -38,6 +38,8 @@ final class PodsDatabase {
         try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_byte_count", definition: "INTEGER")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "downloaded_at", definition: "INTEGER")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "download_resume_relative_path", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "transcriber_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "transcribed_at", definition: "INTEGER")
     }
 
     func withTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -240,6 +242,8 @@ final class PodsDatabase {
         audio_byte_count INTEGER,
         downloaded_at INTEGER,
         download_resume_relative_path TEXT,
+        transcriber_version TEXT,
+        transcribed_at INTEGER,
         enrolled_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );
