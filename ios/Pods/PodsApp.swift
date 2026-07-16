@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let database = try PodsDatabase(url: databaseURL)
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let artifactStore = try AdRemovalArtifactStore.applicationDefault()
+            let modelStore = try AdModelAssetStore(artifactStore: artifactStore)
             let cleanup = AdRemovalFileCleanup(
                 database: database,
                 artifactStore: artifactStore,
@@ -65,7 +66,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 jobStore: jobStore,
                 artifactStore: artifactStore,
                 audioDownloader: downloader,
-                transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics)
+                transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
+                classifier: MLXQwenAdClassifier(
+                    assetStore: modelStore,
+                    diagnostics: adRemovalDiagnostics
+                ),
+                diagnostics: adRemovalDiagnostics
             )
             adRemovalDownloader = downloader
             adRemovalCoordinator = AdRemovalCoordinator(

@@ -40,6 +40,11 @@ final class PodsDatabase {
         try addColumnIfMissing(table: "ad_removal_jobs", column: "download_resume_relative_path", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "transcriber_version", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "transcribed_at", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classification_run_id", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classifier_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "prompt_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classifier_quantization", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classified_at", definition: "INTEGER")
     }
 
     func withTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -244,6 +249,11 @@ final class PodsDatabase {
         download_resume_relative_path TEXT,
         transcriber_version TEXT,
         transcribed_at INTEGER,
+        classification_run_id TEXT,
+        classifier_version TEXT,
+        prompt_version TEXT,
+        classifier_quantization TEXT,
+        classified_at INTEGER,
         enrolled_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );
@@ -284,6 +294,32 @@ final class PodsDatabase {
 
     CREATE INDEX IF NOT EXISTS idx_ad_skip_ranges_episode_time
         ON ad_skip_ranges(episode_id, start_time, end_time);
+
+    CREATE TABLE IF NOT EXISTS ad_classification_windows (
+        run_id TEXT NOT NULL,
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        window_index INTEGER NOT NULL,
+        segment_ids_json TEXT NOT NULL,
+        correction_ids_json TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        raw_output TEXT NOT NULL,
+        schema_valid INTEGER NOT NULL,
+        validation_error TEXT,
+        labels_json TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        model_revision TEXT NOT NULL,
+        quantization TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        max_context_tokens INTEGER NOT NULL,
+        max_output_tokens INTEGER NOT NULL,
+        temperature REAL NOT NULL,
+        top_p REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, window_index)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_classification_windows_episode
+        ON ad_classification_windows(episode_id, created_at, window_index);
 
     CREATE TABLE IF NOT EXISTS ad_corrections (
         id TEXT PRIMARY KEY,

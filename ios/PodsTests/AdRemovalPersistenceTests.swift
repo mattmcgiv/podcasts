@@ -234,6 +234,34 @@ final class AdRemovalPersistenceTests: XCTestCase {
             )
         ]
         try store.replaceSkipRanges(episodeID: harness.episodeID, ranges: ranges)
+        try store.recordClassificationEvidence(AdClassificationEvidence(
+            runID: "run-1",
+            episodeID: harness.episodeID,
+            windowIndex: 0,
+            segmentIDs: ["segment-0"],
+            correctionIDs: [],
+            prompt: "classify segment-0",
+            rawOutput: #"{"labels":[]}"#,
+            schemaValid: true,
+            validationError: nil,
+            labels: [AdClassifierLabel(
+                segmentID: "segment-0",
+                classification: .advertisement,
+                confidence: 0.97,
+                reason: "host-read promotion"
+            )],
+            descriptor: AdClassifierDescriptor(
+                modelID: "test/model",
+                modelRevision: "revision-1",
+                quantization: "4-bit",
+                promptRevision: "prompt-1",
+                maximumContextTokens: 8_192,
+                maximumOutputTokens: 1_024,
+                temperature: 0,
+                topP: 1
+            ),
+            createdAt: 1_000
+        ))
         let podcastID = try XCTUnwrap(harness.database.scalarInt64(
             "SELECT podcast_id FROM episodes WHERE id = ?",
             [.int(harness.episodeID)]
@@ -249,6 +277,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
 
         XCTAssertEqual(try store.transcriptSegments(episodeID: harness.episodeID), segments)
         XCTAssertEqual(try store.skipRanges(episodeID: harness.episodeID), ranges)
+        XCTAssertEqual(try store.classificationEvidence(episodeID: harness.episodeID).count, 1)
         XCTAssertEqual(try store.corrections(podcastID: podcastID), [correction])
 
         try store.cleanupEpisode(episodeID: harness.episodeID)
@@ -256,6 +285,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertNil(try store.job(episodeID: harness.episodeID))
         XCTAssertTrue(try store.transcriptSegments(episodeID: harness.episodeID).isEmpty)
         XCTAssertTrue(try store.skipRanges(episodeID: harness.episodeID).isEmpty)
+        XCTAssertTrue(try store.classificationEvidence(episodeID: harness.episodeID).isEmpty)
         XCTAssertEqual(try store.corrections(podcastID: podcastID), [correction])
 
         try store.cleanupPodcast(podcastID: podcastID)

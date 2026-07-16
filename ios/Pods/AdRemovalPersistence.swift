@@ -39,6 +39,11 @@ struct AdRemovalJob: Equatable {
     let downloadResumeRelativePath: String?
     let transcriberVersion: String?
     let transcribedAt: Int64?
+    let classificationRunID: String?
+    let classifierVersion: String?
+    let promptVersion: String?
+    let classifierQuantization: String?
+    let classifiedAt: Int64?
 }
 
 struct AdTranscriptSegment: Equatable, Codable {
@@ -135,7 +140,9 @@ final class AdRemovalJobStore {
                    attempt_count, enrolled_at, updated_at, failed_stage,
                    last_error_code, last_error_message, retry_eligible, next_retry_at,
                    audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
-                   download_resume_relative_path, transcriber_version, transcribed_at
+                   download_resume_relative_path, transcriber_version, transcribed_at,
+                   classification_run_id, classifier_version, prompt_version,
+                   classifier_quantization, classified_at
             FROM ad_removal_jobs WHERE id = ?
             """,
             [.text(id)],
@@ -150,7 +157,9 @@ final class AdRemovalJobStore {
                    attempt_count, enrolled_at, updated_at, failed_stage,
                    last_error_code, last_error_message, retry_eligible, next_retry_at,
                    audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
-                   download_resume_relative_path, transcriber_version, transcribed_at
+                   download_resume_relative_path, transcriber_version, transcribed_at,
+                   classification_run_id, classifier_version, prompt_version,
+                   classifier_quantization, classified_at
             FROM ad_removal_jobs WHERE episode_id = ?
             """,
             [.int(episodeID)],
@@ -262,7 +271,9 @@ final class AdRemovalJobStore {
                    j.attempt_count, j.enrolled_at, j.updated_at, j.failed_stage,
                    j.last_error_code, j.last_error_message, j.retry_eligible, j.next_retry_at,
                    j.audio_relative_path, j.audio_sha256, j.audio_byte_count, j.downloaded_at,
-                   j.download_resume_relative_path, j.transcriber_version, j.transcribed_at
+                   j.download_resume_relative_path, j.transcriber_version, j.transcribed_at,
+                   j.classification_run_id, j.classifier_version, j.prompt_version,
+                   j.classifier_quantization, j.classified_at
             FROM ad_removal_jobs j
             JOIN episodes e ON e.id = j.episode_id
             LEFT JOIN episode_state s ON s.episode_id = e.id
@@ -437,31 +448,49 @@ final class AdRemovalJobStore {
 
     func replaceSkipRanges(episodeID: Int64, ranges: [AdSkipRange]) throws {
         try database.withTransaction {
-            try database.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", [.int(episodeID)])
-            for range in ranges {
-                try database.execute(
-                    """
-                    INSERT INTO ad_skip_ranges
-                        (id, episode_id, start_segment_id, end_segment_id, start_time, end_time,
-                         confidence, reason, classifier_version, prompt_version, created_at, disabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        .text(range.id),
-                        .int(episodeID),
-                        .text(range.startSegmentID),
-                        .text(range.endSegmentID),
-                        .double(range.startTime),
-                        .double(range.endTime),
-                        .double(range.confidence),
-                        .text(range.reason),
-                        .text(range.classifierVersion),
-                        .text(range.promptVersion),
-                        .int(range.createdAt),
-                        .int(range.disabled ? 1 : 0)
-                    ]
-                )
+            try Self.replaceSkipRanges(in: database, episodeID: episodeID, ranges: ranges)
+        }
+    }
+
+    private static func replaceSkipRanges(
+        in database: PodsDatabase,
+        episodeID: Int64,
+        ranges: [AdSkipRange]
+    ) throws {
+        try database.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", [.int(episodeID)])
+        for range in ranges {
+            guard !range.id.isEmpty,
+                  range.startTime.isFinite,
+                  range.endTime.isFinite,
+                  range.startTime >= 0,
+                  range.endTime > range.startTime,
+                  range.confidence.isFinite,
+                  (0...1).contains(range.confidence),
+                  !range.reason.isEmpty else {
+                throw AdRemovalJobStoreError.corruptState("invalid skip range")
             }
+            try database.execute(
+                """
+                INSERT INTO ad_skip_ranges
+                    (id, episode_id, start_segment_id, end_segment_id, start_time, end_time,
+                     confidence, reason, classifier_version, prompt_version, created_at, disabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .text(range.id),
+                    .int(episodeID),
+                    .text(range.startSegmentID),
+                    .text(range.endSegmentID),
+                    .double(range.startTime),
+                    .double(range.endTime),
+                    .double(range.confidence),
+                    .text(range.reason),
+                    .text(range.classifierVersion),
+                    .text(range.promptVersion),
+                    .int(range.createdAt),
+                    .int(range.disabled ? 1 : 0)
+                ]
+            )
         }
     }
 
@@ -488,6 +517,141 @@ final class AdRemovalJobStore {
                 createdAt: sqlite3_column_int64(statement, 9),
                 disabled: sqlite3_column_int64(statement, 10) != 0
             )
+        }
+    }
+
+    func recordClassificationEvidence(_ evidence: AdClassificationEvidence) throws {
+        guard !evidence.runID.isEmpty,
+              evidence.windowIndex >= 0,
+              !evidence.segmentIDs.isEmpty,
+              !evidence.prompt.isEmpty,
+              evidence.prompt.utf8.count <= evidence.descriptor.maximumContextTokens,
+              evidence.rawOutput.utf8.count <= 64 * 1_024,
+              evidence.schemaValid == (evidence.validationError == nil),
+              evidence.schemaValid || evidence.labels.isEmpty else {
+            throw AdRemovalJobStoreError.corruptState("invalid classification evidence")
+        }
+        let encoder = JSONEncoder()
+        let segmentIDs = String(decoding: try encoder.encode(evidence.segmentIDs), as: UTF8.self)
+        let correctionIDs = String(decoding: try encoder.encode(evidence.correctionIDs), as: UTF8.self)
+        let labels = String(decoding: try encoder.encode(evidence.labels), as: UTF8.self)
+        try database.execute(
+            """
+            INSERT INTO ad_classification_windows
+                (run_id, episode_id, window_index, segment_ids_json, correction_ids_json,
+                 prompt, raw_output, schema_valid, validation_error, labels_json,
+                 model_id, model_revision, quantization, prompt_version,
+                 max_context_tokens, max_output_tokens, temperature, top_p, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(evidence.runID),
+                .int(evidence.episodeID),
+                .int(Int64(evidence.windowIndex)),
+                .text(segmentIDs),
+                .text(correctionIDs),
+                .text(evidence.prompt),
+                .text(evidence.rawOutput),
+                .int(evidence.schemaValid ? 1 : 0),
+                evidence.validationError.map(SQLiteValue.text) ?? .null,
+                .text(labels),
+                .text(evidence.descriptor.modelID),
+                .text(evidence.descriptor.modelRevision),
+                .text(evidence.descriptor.quantization),
+                .text(evidence.descriptor.promptRevision),
+                .int(Int64(evidence.descriptor.maximumContextTokens)),
+                .int(Int64(evidence.descriptor.maximumOutputTokens)),
+                .double(evidence.descriptor.temperature),
+                .double(evidence.descriptor.topP),
+                .int(evidence.createdAt)
+            ]
+        )
+    }
+
+    func classificationEvidence(episodeID: Int64) throws -> [AdClassificationEvidence] {
+        let decoder = JSONDecoder()
+        return try database.query(
+            """
+            SELECT run_id, episode_id, window_index, segment_ids_json, correction_ids_json,
+                   prompt, raw_output, schema_valid, validation_error, labels_json,
+                   model_id, model_revision, quantization, prompt_version,
+                   max_context_tokens, max_output_tokens, temperature, top_p, created_at
+            FROM ad_classification_windows WHERE episode_id = ?
+            ORDER BY created_at, run_id, window_index
+            """,
+            [.int(episodeID)]
+        ) { statement in
+            func decode<T: Decodable>(_ type: T.Type, _ index: Int32) throws -> T {
+                guard let data = sqliteString(statement, index).data(using: .utf8) else {
+                    throw AdRemovalJobStoreError.corruptState("invalid classification JSON")
+                }
+                return try decoder.decode(type, from: data)
+            }
+            return AdClassificationEvidence(
+                runID: sqliteString(statement, 0),
+                episodeID: sqlite3_column_int64(statement, 1),
+                windowIndex: Int(sqlite3_column_int64(statement, 2)),
+                segmentIDs: try decode([String].self, 3),
+                correctionIDs: try decode([String].self, 4),
+                prompt: sqliteString(statement, 5),
+                rawOutput: sqliteString(statement, 6),
+                schemaValid: sqlite3_column_int64(statement, 7) != 0,
+                validationError: sqliteOptionalString(statement, 8),
+                labels: try decode([AdClassifierLabel].self, 9),
+                descriptor: AdClassifierDescriptor(
+                    modelID: sqliteString(statement, 10),
+                    modelRevision: sqliteString(statement, 11),
+                    quantization: sqliteString(statement, 12),
+                    promptRevision: sqliteString(statement, 13),
+                    maximumContextTokens: Int(sqlite3_column_int64(statement, 14)),
+                    maximumOutputTokens: Int(sqlite3_column_int64(statement, 15)),
+                    temperature: sqlite3_column_double(statement, 16),
+                    topP: sqlite3_column_double(statement, 17)
+                ),
+                createdAt: sqlite3_column_int64(statement, 18)
+            )
+        }
+    }
+
+    func completeClassification(
+        jobID: String,
+        runID: String,
+        descriptor: AdClassifierDescriptor,
+        ranges: [AdSkipRange]
+    ) throws -> AdRemovalJob {
+        try database.withTransaction {
+            let job = try requiredJob(id: jobID)
+            let invalidCount = try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_classification_windows WHERE run_id = ? AND schema_valid = 0",
+                [.text(runID)]
+            ) ?? 0
+            let windowCount = try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_classification_windows WHERE run_id = ? AND episode_id = ?",
+                [.text(runID), .int(job.episodeID)]
+            ) ?? 0
+            guard invalidCount == 0, windowCount > 0 else {
+                throw AdRemovalJobStoreError.corruptState("classification run is incomplete")
+            }
+            try Self.replaceSkipRanges(in: database, episodeID: job.episodeID, ranges: ranges)
+            let timestamp = now()
+            try database.execute(
+                """
+                UPDATE ad_removal_jobs
+                SET classification_run_id = ?, classifier_version = ?, prompt_version = ?,
+                    classifier_quantization = ?, classified_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                [
+                    .text(runID),
+                    .text("\(descriptor.modelID)@\(descriptor.modelRevision)"),
+                    .text(descriptor.promptRevision),
+                    .text(descriptor.quantization),
+                    .int(timestamp),
+                    .int(timestamp),
+                    .text(jobID)
+                ]
+            )
+            return try requiredJob(id: jobID)
         }
     }
 
@@ -575,6 +739,7 @@ final class AdRemovalJobStore {
         }.flatMap { $0 }
         try enqueueArtifactCleanup(paths: paths, reason: "episode_cleanup", now: now, database: database)
         try database.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", [.int(episodeID)])
+        try database.execute("DELETE FROM ad_classification_windows WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_transcript_segments WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_removal_jobs WHERE episode_id = ?", [.int(episodeID)])
     }
@@ -589,6 +754,10 @@ final class AdRemovalJobStore {
             try database.execute("DELETE FROM ad_corrections WHERE podcast_id = ?", [.int(podcastID)])
             try database.execute(
                 "DELETE FROM ad_skip_ranges WHERE episode_id IN (SELECT id FROM episodes WHERE podcast_id = ?)",
+                [.int(podcastID)]
+            )
+            try database.execute(
+                "DELETE FROM ad_classification_windows WHERE episode_id IN (SELECT id FROM episodes WHERE podcast_id = ?)",
                 [.int(podcastID)]
             )
             try database.execute(
@@ -694,7 +863,12 @@ final class AdRemovalJobStore {
             downloadedAt: sqliteOptionalInt64(statement, 16),
             downloadResumeRelativePath: sqliteOptionalString(statement, 17),
             transcriberVersion: sqliteOptionalString(statement, 18),
-            transcribedAt: sqliteOptionalInt64(statement, 19)
+            transcribedAt: sqliteOptionalInt64(statement, 19),
+            classificationRunID: sqliteOptionalString(statement, 20),
+            classifierVersion: sqliteOptionalString(statement, 21),
+            promptVersion: sqliteOptionalString(statement, 22),
+            classifierQuantization: sqliteOptionalString(statement, 23),
+            classifiedAt: sqliteOptionalInt64(statement, 24)
         )
     }
 
