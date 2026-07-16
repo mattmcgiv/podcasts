@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import Pods
 
 final class AdRemovalPersistenceTests: XCTestCase {
@@ -41,6 +42,12 @@ final class AdRemovalPersistenceTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
 
             activeCalls -= 1
+        }
+    }
+
+    private final class PausingStageExecutor: AdRemovalStageExecuting {
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            throw AdRemovalPipelinePause(reason: .storageLimit)
         }
     }
 
@@ -88,6 +95,68 @@ final class AdRemovalPersistenceTests: XCTestCase {
         let unblocked = try store.setBlockingReason(jobID: older.id, reason: nil)
         XCTAssertNil(unblocked.blockingReason)
         XCTAssertEqual(try store.nextRunnableJob()?.id, older.id)
+    }
+
+    func testAudioArtifactMetadataIsDurableAndRejectsUnauditedPaths() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let artifact = AdRemovalAudioArtifact(
+            relativePath: "episodes/\(harness.episodeID)/audio.mp3",
+            sha256: String(repeating: "a", count: 64),
+            byteCount: 12_345
+        )
+
+        let recorded = try store.recordAudioArtifact(jobID: queued.id, artifact: artifact)
+        XCTAssertEqual(recorded.audioArtifact, artifact)
+        XCTAssertEqual(recorded.downloadedAt, 1_000)
+        XCTAssertEqual(try AdRemovalJobStore(database: harness.database).job(id: queued.id)?.audioArtifact, artifact)
+
+        XCTAssertThrowsError(try store.recordAudioArtifact(
+            jobID: queued.id,
+            artifact: AdRemovalAudioArtifact(
+                relativePath: "/tmp/untrusted.mp3",
+                sha256: artifact.sha256,
+                byteCount: artifact.byteCount
+            )
+        ))
+    }
+
+    func testSchemaMigrationAddsAudioMetadataColumnsToExistingJobTable() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalMigrationTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let databaseURL = directory.appendingPathComponent("test.sqlite")
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        let legacySQL = """
+        CREATE TABLE ad_removal_jobs (
+            id TEXT PRIMARY KEY,
+            episode_id INTEGER NOT NULL UNIQUE,
+            podcast_id INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            blocking_reason TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            failed_stage TEXT,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            retry_eligible INTEGER NOT NULL DEFAULT 1,
+            next_retry_at INTEGER,
+            enrolled_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        """
+        XCTAssertEqual(sqlite3_exec(handle, legacySQL, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(handle)
+
+        let database = try PodsDatabase(url: databaseURL)
+        let columns = try database.query("PRAGMA table_info(ad_removal_jobs)") { statement in
+            sqliteString(statement, 1)
+        }
+        XCTAssertTrue(columns.contains("audio_relative_path"))
+        XCTAssertTrue(columns.contains("audio_sha256"))
+        XCTAssertTrue(columns.contains("audio_byte_count"))
+        XCTAssertTrue(columns.contains("downloaded_at"))
     }
 
     func testFailuresRetryThreeTimesWithStableMetadataAndResumeFailedStage() throws {
@@ -260,6 +329,22 @@ final class AdRemovalPersistenceTests: XCTestCase {
 
         let maximumConcurrentCalls = await executor.maximumConcurrentCalls
         XCTAssertEqual(maximumConcurrentCalls, 1)
+    }
+
+    func testCoordinatorRecordsPolicyPauseWithoutConsumingFailureRetry() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let coordinator = AdRemovalCoordinator(store: store, executor: PausingStageExecutor())
+
+        let paused = try await coordinator.runNextStage()
+
+        XCTAssertEqual(paused?.stage, .downloading)
+        XCTAssertEqual(paused?.blockingReason, .storageLimit)
+        XCTAssertEqual(paused?.attemptCount, 0)
+        XCTAssertNil(paused?.lastErrorCode)
+        XCTAssertEqual(try store.job(id: queued.id), paused)
+        XCTAssertNil(try store.nextRunnableJob())
     }
 
     private struct Harness {

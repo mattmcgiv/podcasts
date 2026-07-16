@@ -34,6 +34,9 @@ struct AdRemovalJob: Equatable {
     let lastErrorMessage: String?
     let retryEligible: Bool
     let nextRetryAt: Int64?
+    let audioArtifact: AdRemovalAudioArtifact?
+    let downloadedAt: Int64?
+    let downloadResumeRelativePath: String?
 }
 
 struct AdTranscriptSegment: Equatable, Codable {
@@ -128,7 +131,9 @@ final class AdRemovalJobStore {
             """
             SELECT id, episode_id, podcast_id, stage, blocking_reason,
                    attempt_count, enrolled_at, updated_at, failed_stage,
-                   last_error_code, last_error_message, retry_eligible, next_retry_at
+                   last_error_code, last_error_message, retry_eligible, next_retry_at,
+                   audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
+                   download_resume_relative_path
             FROM ad_removal_jobs WHERE id = ?
             """,
             [.text(id)],
@@ -141,7 +146,9 @@ final class AdRemovalJobStore {
             """
             SELECT id, episode_id, podcast_id, stage, blocking_reason,
                    attempt_count, enrolled_at, updated_at, failed_stage,
-                   last_error_code, last_error_message, retry_eligible, next_retry_at
+                   last_error_code, last_error_message, retry_eligible, next_retry_at,
+                   audio_relative_path, audio_sha256, audio_byte_count, downloaded_at,
+                   download_resume_relative_path
             FROM ad_removal_jobs WHERE episode_id = ?
             """,
             [.int(episodeID)],
@@ -190,6 +197,55 @@ final class AdRemovalJobStore {
         }
     }
 
+    func recordAudioArtifact(jobID: String, artifact: AdRemovalAudioArtifact) throws -> AdRemovalJob {
+        guard AdRemovalArtifactStore.isValid(relativePath: artifact.relativePath),
+              artifact.byteCount >= 0,
+              artifact.sha256.count == 64,
+              artifact.sha256.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }) else {
+            throw AdRemovalJobStoreError.corruptState("invalid audio artifact metadata")
+        }
+        return try database.withTransaction {
+            _ = try requiredJob(id: jobID)
+            let timestamp = now()
+            try database.execute(
+                """
+                UPDATE ad_removal_jobs
+                SET audio_relative_path = ?, audio_sha256 = ?, audio_byte_count = ?,
+                    downloaded_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                [
+                    .text(artifact.relativePath),
+                    .text(artifact.sha256),
+                    .int(artifact.byteCount),
+                    .int(timestamp),
+                    .int(timestamp),
+                    .text(jobID)
+                ]
+            )
+            return try requiredJob(id: jobID)
+        }
+    }
+
+    func recordDownloadResumePath(jobID: String, relativePath: String?) throws -> AdRemovalJob {
+        if let relativePath,
+           (!AdRemovalArtifactStore.isValid(relativePath: relativePath) || !relativePath.hasPrefix("resume/")) {
+            throw AdRemovalJobStoreError.corruptState("invalid resume-data path")
+        }
+        return try database.withTransaction {
+            _ = try requiredJob(id: jobID)
+            try database.execute(
+                "UPDATE ad_removal_jobs SET download_resume_relative_path = ?, updated_at = ? WHERE id = ?",
+                [
+                    relativePath.map(SQLiteValue.text) ?? .null,
+                    .int(now()),
+                    .text(jobID)
+                ]
+            )
+            return try requiredJob(id: jobID)
+        }
+    }
+
     func nextRunnableJob() throws -> AdRemovalJob? {
         let activeStages = [
             AdRemovalJobStage.queued,
@@ -202,7 +258,9 @@ final class AdRemovalJobStore {
             """
             SELECT j.id, j.episode_id, j.podcast_id, j.stage, j.blocking_reason,
                    j.attempt_count, j.enrolled_at, j.updated_at, j.failed_stage,
-                   j.last_error_code, j.last_error_message, j.retry_eligible, j.next_retry_at
+                   j.last_error_code, j.last_error_message, j.retry_eligible, j.next_retry_at,
+                   j.audio_relative_path, j.audio_sha256, j.audio_byte_count, j.downloaded_at,
+                   j.download_resume_relative_path
             FROM ad_removal_jobs j
             JOIN episodes e ON e.id = j.episode_id
             LEFT JOIN episode_state s ON s.episode_id = e.id
@@ -444,11 +502,22 @@ final class AdRemovalJobStore {
 
     func cleanupEpisode(episodeID: Int64) throws {
         try database.withTransaction {
-            try Self.cleanupEpisodeMetadata(in: database, episodeID: episodeID)
+            try Self.cleanupEpisodeMetadata(in: database, episodeID: episodeID, now: now())
         }
     }
 
-    static func cleanupEpisodeMetadata(in database: PodsDatabase, episodeID: Int64) throws {
+    static func cleanupEpisodeMetadata(
+        in database: PodsDatabase,
+        episodeID: Int64,
+        now: Int64 = Int64(Date().timeIntervalSince1970)
+    ) throws {
+        let paths = try database.query(
+            "SELECT audio_relative_path, download_resume_relative_path FROM ad_removal_jobs WHERE episode_id = ?",
+            [.int(episodeID)]
+        ) { statement in
+            [sqliteOptionalString(statement, 0), sqliteOptionalString(statement, 1)].compactMap { $0 }
+        }.flatMap { $0 }
+        try enqueueArtifactCleanup(paths: paths, reason: "episode_cleanup", now: now, database: database)
         try database.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_transcript_segments WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_removal_jobs WHERE episode_id = ?", [.int(episodeID)])
@@ -456,6 +525,11 @@ final class AdRemovalJobStore {
 
     func cleanupPodcast(podcastID: Int64) throws {
         try database.withTransaction {
+            try Self.enqueuePodcastArtifactCleanup(
+                in: database,
+                podcastID: podcastID,
+                now: now()
+            )
             try database.execute("DELETE FROM ad_corrections WHERE podcast_id = ?", [.int(podcastID)])
             try database.execute(
                 "DELETE FROM ad_skip_ranges WHERE episode_id IN (SELECT id FROM episodes WHERE podcast_id = ?)",
@@ -466,6 +540,38 @@ final class AdRemovalJobStore {
                 [.int(podcastID)]
             )
             try database.execute("DELETE FROM ad_removal_jobs WHERE podcast_id = ?", [.int(podcastID)])
+        }
+    }
+
+    static func enqueuePodcastArtifactCleanup(
+        in database: PodsDatabase,
+        podcastID: Int64,
+        now: Int64 = Int64(Date().timeIntervalSince1970)
+    ) throws {
+        let paths = try database.query(
+            "SELECT audio_relative_path, download_resume_relative_path FROM ad_removal_jobs WHERE podcast_id = ?",
+            [.int(podcastID)]
+        ) { statement in
+            [sqliteOptionalString(statement, 0), sqliteOptionalString(statement, 1)].compactMap { $0 }
+        }.flatMap { $0 }
+        try enqueueArtifactCleanup(paths: paths, reason: "podcast_cleanup", now: now, database: database)
+    }
+
+    private static func enqueueArtifactCleanup(
+        paths: [String],
+        reason: String,
+        now: Int64,
+        database: PodsDatabase
+    ) throws {
+        for path in paths where AdRemovalArtifactStore.isValid(relativePath: path) {
+            try database.execute(
+                """
+                INSERT INTO ad_artifact_cleanup (relative_path, reason, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(relative_path) DO NOTHING
+                """,
+                [.text(path), .text(reason), .int(now)]
+            )
         }
     }
 
@@ -497,6 +603,23 @@ final class AdRemovalJobStore {
         } else {
             failedStage = nil
         }
+        let audioArtifact: AdRemovalAudioArtifact?
+        let audioPath = sqliteOptionalString(statement, 13)
+        let audioChecksum = sqliteOptionalString(statement, 14)
+        let audioByteCount = sqliteOptionalInt64(statement, 15)
+        if audioPath == nil, audioChecksum == nil, audioByteCount == nil {
+            audioArtifact = nil
+        } else if let audioPath, let audioChecksum, let audioByteCount,
+                  AdRemovalArtifactStore.isValid(relativePath: audioPath),
+                  audioByteCount >= 0 {
+            audioArtifact = AdRemovalAudioArtifact(
+                relativePath: audioPath,
+                sha256: audioChecksum,
+                byteCount: audioByteCount
+            )
+        } else {
+            throw AdRemovalJobStoreError.corruptState("partial audio artifact metadata")
+        }
         return AdRemovalJob(
             id: sqliteString(statement, 0),
             episodeID: sqlite3_column_int64(statement, 1),
@@ -510,7 +633,10 @@ final class AdRemovalJobStore {
             lastErrorCode: sqliteOptionalString(statement, 9),
             lastErrorMessage: sqliteOptionalString(statement, 10),
             retryEligible: sqlite3_column_int64(statement, 11) != 0,
-            nextRetryAt: sqliteOptionalInt64(statement, 12)
+            nextRetryAt: sqliteOptionalInt64(statement, 12),
+            audioArtifact: audioArtifact,
+            downloadedAt: sqliteOptionalInt64(statement, 16),
+            downloadResumeRelativePath: sqliteOptionalString(statement, 17)
         )
     }
 
@@ -528,6 +654,10 @@ final class AdRemovalJobStore {
 
 protocol AdRemovalStageExecuting: AnyObject {
     func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws
+}
+
+struct AdRemovalPipelinePause: Error, Equatable {
+    let reason: AdRemovalBlockingReason
 }
 
 actor AdRemovalCoordinator {
@@ -583,6 +713,15 @@ actor AdRemovalCoordinator {
             let completed = try store.transition(jobID: job.id, to: completionStage)
             record(eventName: "job_state_transition", severity: .notice, job: completed)
             return completed
+        } catch let pause as AdRemovalPipelinePause {
+            let blocked = try store.setBlockingReason(jobID: job.id, reason: pause.reason)
+            record(
+                eventName: "scheduler_policy_pause",
+                severity: .notice,
+                job: blocked,
+                fields: ["blocking_reason": pause.reason.rawValue]
+            )
+            return blocked
         } catch {
             let nsError = error as NSError
             let failed = try store.recordFailure(

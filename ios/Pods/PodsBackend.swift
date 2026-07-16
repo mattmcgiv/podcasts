@@ -72,16 +72,21 @@ final class PodsBackend: PlaybackProgressRecording {
     private let database: PodsDatabase
     private let feedFetcher: FeedFetching
     private let directorySearcher: PodcastDirectorySearching
+    private let adRemovalFileCleanup: AdRemovalFileCleanup?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
 
     init(
         database: PodsDatabase,
         feedFetcher: FeedFetching = URLSessionFeedFetcher(),
-        directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher()
+        directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
+        adRemovalArtifactStore: AdRemovalArtifactStore? = nil
     ) {
         self.database = database
         self.feedFetcher = feedFetcher
         self.directorySearcher = directorySearcher
+        self.adRemovalFileCleanup = adRemovalArtifactStore.map {
+            AdRemovalFileCleanup(database: database, artifactStore: $0)
+        }
     }
 
     func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
@@ -354,9 +359,11 @@ final class PodsBackend: PlaybackProgressRecording {
     private func unsubscribe(id: Int64) throws {
         _ = try fetchShow(id: id)
         try database.withTransaction {
+            try AdRemovalJobStore.enqueuePodcastArtifactCleanup(in: database, podcastID: id)
             try database.execute("DELETE FROM episodes_fts WHERE rowid IN (SELECT id FROM episodes WHERE podcast_id = ?)", [.int(id)])
             try database.execute("DELETE FROM podcasts WHERE id = ?", [.int(id)])
         }
+        try adRemovalFileCleanup?.drain()
     }
 
     private func episodeDetail(id: Int64) throws -> EpisodeDetail {
@@ -393,6 +400,7 @@ final class PodsBackend: PlaybackProgressRecording {
             )
             try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
         }
+        try adRemovalFileCleanup?.drain()
     }
 
     private func clearPlayed(id: Int64) throws {

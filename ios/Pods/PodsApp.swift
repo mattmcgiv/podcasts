@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var localServer: PodsLocalServer?
     private var refreshCoordinator: FeedRefreshCoordinator?
     private var adRemovalDiagnostics: AdRemovalDiagnostics?
+    private var adRemovalDownloader: AdRemovalBackgroundDownloader?
+    private var adRemovalCoordinator: AdRemovalCoordinator?
+    private var pendingAdRemovalBackgroundEvents: [(String, () -> Void)] = []
 
     func application(
         _ application: UIApplication,
@@ -39,7 +42,49 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             PodsDebugLog("Database prepared at \(databaseURL.path)")
             let database = try PodsDatabase(url: databaseURL)
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
-            let backend = PodsBackend(database: database)
+            let artifactStore = try AdRemovalArtifactStore.applicationDefault()
+            let cleanup = AdRemovalFileCleanup(
+                database: database,
+                artifactStore: artifactStore,
+                diagnostics: adRemovalDiagnostics
+            )
+            _ = try cleanup.drain()
+            let jobStore = AdRemovalJobStore(database: database)
+            let storagePolicy = AdRemovalStoragePolicy(
+                usedBytes: { try artifactStore.episodeArtifactBytes() },
+                availableBytes: { try artifactStore.availableCapacity() }
+            )
+            let downloader = AdRemovalBackgroundDownloader(
+                jobStore: jobStore,
+                artifactStore: artifactStore,
+                storagePolicy: storagePolicy,
+                diagnostics: adRemovalDiagnostics
+            )
+            let pipeline = AdRemovalPipelineExecutor(
+                database: database,
+                jobStore: jobStore,
+                artifactStore: artifactStore,
+                audioDownloader: downloader
+            )
+            adRemovalDownloader = downloader
+            adRemovalCoordinator = AdRemovalCoordinator(
+                store: jobStore,
+                executor: pipeline,
+                diagnostics: adRemovalDiagnostics
+            )
+            for (identifier, completion) in pendingAdRemovalBackgroundEvents {
+                if !downloader.handleBackgroundEvents(
+                    identifier: identifier,
+                    completionHandler: completion
+                ) {
+                    completion()
+                }
+            }
+            pendingAdRemovalBackgroundEvents.removeAll()
+            let backend = PodsBackend(
+                database: database,
+                adRemovalArtifactStore: artifactStore
+            )
             let coordinator = FeedRefreshCoordinator(backend: backend)
             backend.setRefreshRequestHandler { source in
                 await coordinator.refreshNow(source: source)
@@ -69,6 +114,23 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         scheduleBackgroundRefresh()
+    }
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        if let adRemovalDownloader {
+            if !adRemovalDownloader.handleBackgroundEvents(
+                identifier: identifier,
+                completionHandler: completionHandler
+            ) {
+                completionHandler()
+            }
+        } else {
+            pendingAdRemovalBackgroundEvents.append((identifier, completionHandler))
+        }
     }
 
     private func registerBackgroundRefreshTask() {

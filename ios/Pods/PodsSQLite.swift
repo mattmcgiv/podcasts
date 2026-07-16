@@ -33,6 +33,11 @@ final class PodsDatabase {
 
     func installSchemaIfNeeded() throws {
         try executeScript(Self.schemaSQL)
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_relative_path", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_sha256", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_byte_count", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "downloaded_at", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "download_resume_relative_path", definition: "TEXT")
     }
 
     func withTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -114,6 +119,14 @@ final class PodsDatabase {
         guard code == SQLITE_DONE || code == SQLITE_ROW else {
             throw PodsBackendError.database(lastErrorMessage())
         }
+    }
+
+    private func addColumnIfMissing(table: String, column: String, definition: String) throws {
+        let columns = try query("PRAGMA table_info(\(table))") { statement in
+            sqliteString(statement, 1)
+        }
+        guard !columns.contains(column) else { return }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
     }
 
     private func bind(_ values: [SQLiteValue], to statement: OpaquePointer?) throws {
@@ -222,6 +235,11 @@ final class PodsDatabase {
         last_error_message TEXT,
         retry_eligible INTEGER NOT NULL DEFAULT 1,
         next_retry_at INTEGER,
+        audio_relative_path TEXT,
+        audio_sha256 TEXT,
+        audio_byte_count INTEGER,
+        downloaded_at INTEGER,
+        download_resume_relative_path TEXT,
         enrolled_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     );
@@ -277,6 +295,14 @@ final class PodsDatabase {
 
     CREATE INDEX IF NOT EXISTS idx_ad_corrections_podcast_active
         ON ad_corrections(podcast_id, active, created_at);
+
+    CREATE TABLE IF NOT EXISTS ad_artifact_cleanup (
+        relative_path TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+    );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);
     """

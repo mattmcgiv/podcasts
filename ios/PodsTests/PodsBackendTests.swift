@@ -48,6 +48,7 @@ final class PodsBackendTests: XCTestCase {
         let fetcher: MockFeedFetcher
         let directory: URL
         let database: PodsDatabase
+        let adRemovalArtifactStore: AdRemovalArtifactStore
     }
 
     private func makeHarness(directorySearcher: PodcastDirectorySearching? = nil) throws -> Harness {
@@ -55,13 +56,23 @@ final class PodsBackendTests: XCTestCase {
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        let adRemovalArtifactStore = try AdRemovalArtifactStore(
+            rootURL: directory.appendingPathComponent("AdRemoval", isDirectory: true)
+        )
         let fetcher = MockFeedFetcher()
         let backend = PodsBackend(
             database: database,
             feedFetcher: fetcher,
-            directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher()
+            directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: adRemovalArtifactStore
         )
-        return Harness(backend: backend, fetcher: fetcher, directory: directory, database: database)
+        return Harness(
+            backend: backend,
+            fetcher: fetcher,
+            directory: directory,
+            database: database,
+            adRemovalArtifactStore: adRemovalArtifactStore
+        )
     }
 
     private func call(
@@ -194,7 +205,17 @@ final class PodsBackendTests: XCTestCase {
         let episode = try XCTUnwrap(recent.items.first)
         let podcastID = episode.podcast_id
         let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
-        _ = try store.enqueue(episodeID: episode.id)
+        let job = try store.enqueue(episodeID: episode.id)
+        let temporaryAudio = harness.directory.appendingPathComponent("downloaded-audio.tmp")
+        try Data("downloaded audio".utf8).write(to: temporaryAudio)
+        let audioArtifact = try harness.adRemovalArtifactStore.installDownloadedAudio(
+            from: temporaryAudio,
+            episodeID: episode.id,
+            fileExtension: "mp3"
+        )
+        _ = try store.recordAudioArtifact(jobID: job.id, artifact: audioArtifact)
+        let resumePath = try harness.adRemovalArtifactStore.writeResumeData(Data("resume".utf8), jobID: job.id)
+        _ = try store.recordDownloadResumePath(jobID: job.id, relativePath: resumePath)
         try store.replaceTranscriptSegments(episodeID: episode.id, segments: [
             AdTranscriptSegment(
                 id: "segment-0",
@@ -231,6 +252,13 @@ final class PodsBackendTests: XCTestCase {
 
         let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
         XCTAssertEqual(played.statusCode, 204)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: try harness.adRemovalArtifactStore.url(for: audioArtifact.relativePath).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: try harness.adRemovalArtifactStore.url(for: resumePath).path
+        ))
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM ad_artifact_cleanup"), 0)
         XCTAssertNil(try store.job(episodeID: episode.id))
         XCTAssertTrue(try store.transcriptSegments(episodeID: episode.id).isEmpty)
         XCTAssertTrue(try store.skipRanges(episodeID: episode.id).isEmpty)
