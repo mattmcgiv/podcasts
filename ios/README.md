@@ -76,23 +76,33 @@ IOS_TEAM_ID=<team-id> IOS_DEVICE_ID=<device-id> ios/refresh-device.sh
 IOS_DEVICE_ID=<devicectl-id> IOS_XCODE_DESTINATION='platform=iOS,id=<xcode-device-id>' ios/refresh-device.sh
 ```
 
-The script builds with Xcode automatic signing and installs over the existing app. It never uninstalls the app.
+The script first verifies that CoreDevice reports the iPhone connected, then builds with Xcode automatic signing and installs over the existing app. It never uninstalls the app and will not create new signing material when the phone is already unreachable.
 
 ## Automated Refresh
 
-Free Personal Team installs expire after 7 days. Install the launchd job to refresh every 5 days:
+Free Personal Team installs expire after 7 days. Install the launchd job to keep at least a five-day safety margin:
 
 ```sh
 IOS_DEVICE_ID=<device-id> IOS_TEAM_ID=<team-id> ios/install-refresh-agent.sh
 ```
 
+The agent runs at login and checks every 15 minutes. A recent successful install is skipped until it is 48 hours old. Once a refresh is due, the agent actively opens a CoreDevice tunnel before invoking Xcode; an unavailable or briefly disconnected phone is retried at the next check instead of waiting another 48 hours. The installer must also launch the newly installed app successfully before manual or automatic runs update:
+
+```text
+~/Library/Application Support/PodsRefresh/last-success-epoch
+```
+
+The Mac must be awake with the user logged in, and the iPhone must be reachable over USB or the same local network. A Personal Team app cannot be re-signed over the internet while the phone is away; the retry loop installs it automatically after the phone becomes reachable again.
+
 Logs:
 
 ```sh
 tail -f ~/Library/Logs/Pods/ios-refresh.log
+tail -f ios/build/launchd.err.log
+launchctl print gui/$(id -u)/dev.mcgiv.pods.refresh
 ```
 
-Failures show a macOS notification titled `Pods Refresh Failed`.
+Build or install failures show a macOS notification titled `Pods Refresh Failed`. An expected unavailable-phone retry is recorded by launchd without creating signing material or sending repeated notifications.
 
 ## Reinstall Acceptance Test
 

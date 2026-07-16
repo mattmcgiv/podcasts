@@ -6,7 +6,7 @@
 	<string>dev.mcgiv.pods.refresh</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>__ROOT__/ios/refresh-device.sh</string>
+		<string>__ROOT__/ios/refresh-if-due.sh</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
@@ -16,11 +16,13 @@
 		<string>__XCODE_DESTINATION__</string>
 		<key>IOS_TEAM_ID</key>
 		<string>__TEAM_ID__</string>
+		<key>IOS_REFRESH_SUCCESS_INTERVAL_SECONDS</key>
+		<string>172800</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>StartInterval</key>
-	<integer>172800</integer>
+	<integer>900</integer>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>

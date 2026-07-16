@@ -61,7 +61,7 @@ PODCASTINDEX_BASE_URL=https://api.podcastindex.org/api/1.0
 The private iPhone target lives under `ios/`.
 
 - Full Xcode is required; Command Line Tools are not enough.
-- Free Personal Team installs expire after 7 days, so `ios/refresh-device.sh` and a launchd template automate reinstall-over-existing every 5 days.
+- Free Personal Team installs expire after 7 days. The launchd agent checks every 15 minutes, reinstalls after 48 hours since the last success, and retries when the phone is temporarily unavailable.
 - Reinstall-over-existing must preserve the live SQLite DB in Application Support; uninstalling the app deletes that state.
 - Generated web assets and seed DBs are ignored by Git.
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install a launchd job that refreshes the free Personal Team install every 5 days.
+# Install a launchd job that checks every 15 minutes and refreshes after 48 hours.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,4 +31,5 @@ launchctl bootout "$DOMAIN" "$PLIST_OUT" >/dev/null 2>&1 || true
 launchctl bootstrap "$DOMAIN" "$PLIST_OUT"
 launchctl enable "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
 echo "Installed launchd job at $PLIST_OUT"
-echo "It runs at login and every 48 hours, and logs to ~/Library/Logs/Pods/ios-refresh.log."
+echo "It checks at login and every 15 minutes, refreshes after 48 hours, and retries while the phone is unavailable."
+echo "Install logs: ~/Library/Logs/Pods/ios-refresh.log"

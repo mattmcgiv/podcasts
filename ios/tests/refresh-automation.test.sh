@@ -23,12 +23,66 @@ assert_file_exists() {
   [ -e "$1" ] || fail "expected file to exist: $1"
 }
 
-make_stub_bin() {
-  dir="$1"
-  mkdir -p "$dir"
+assert_file_equals() {
+  file="$1"
+  expected="$2"
+  actual="$(cat "$file")"
+  [ "$actual" = "$expected" ] || fail "expected $file to contain '$expected', got '$actual'"
 }
 
-test_install_agent_generates_restart_safe_48_hour_plist() {
+write_xcrun_device_stub() {
+  bin_dir="$1"
+  cat > "$bin_dir/xcrun" <<'STUB'
+#!/bin/sh
+command="$*"
+if [ -n "${XCRUN_LOG:-}" ]; then
+  printf '%s\n' "$command" >> "$XCRUN_LOG"
+fi
+json_output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--json-output" ]; then
+    shift
+    json_output="$1"
+    break
+  fi
+  shift
+done
+if [ -n "$json_output" ]; then
+  case "$command" in
+    *"device info details"*)
+      cat > "$json_output" <<JSON
+{
+  "result": {
+    "connectionProperties": { "tunnelState": "${DEVICE_DETAILS_TUNNEL_STATE:-${DEVICE_TUNNEL_STATE:-unavailable}}" }
+  }
+}
+JSON
+      ;;
+    *)
+      cat > "$json_output" <<JSON
+{
+  "result": {
+    "devices": [
+      {
+        "identifier": "device-id",
+        "connectionProperties": { "tunnelState": "${DEVICE_LIST_TUNNEL_STATE:-${DEVICE_TUNNEL_STATE:-unavailable}}" }
+      }
+    ]
+  }
+}
+JSON
+      ;;
+  esac
+fi
+case "$command" in
+  *"device process launch"*) exit "${XCRUN_LAUNCH_EXIT:-0}" ;;
+esac
+exit 0
+STUB
+  chmod +x "$bin_dir/xcrun"
+}
+
+test_install_agent_generates_retrying_48_hour_refresh_plist() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
   cp "$ROOT/ios/install-refresh-agent.sh" "$tmp/repo/ios/install-refresh-agent.sh"
@@ -52,12 +106,288 @@ STUB
 
   plist="$tmp/home/Library/LaunchAgents/dev.mcgiv.pods.refresh.plist"
   assert_file_exists "$plist"
-  assert_file_contains "$plist" "<integer>172800</integer>"
+  assert_file_contains "$plist" "refresh-if-due.sh"
+  assert_file_contains "$plist" "<integer>900</integer>"
+  assert_file_contains "$plist" "<key>IOS_REFRESH_SUCCESS_INTERVAL_SECONDS</key>"
+  assert_file_contains "$plist" "<string>172800</string>"
   assert_file_contains "$plist" "<key>RunAtLoad</key>"
   assert_file_contains "$plist" "<true/>"
   assert_file_contains "$plist" "<key>PATH</key>"
   assert_file_contains "$plist" "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   assert_file_contains "$tmp/launchctl.log" "bootstrap gui/"
+}
+
+test_successful_refresh_records_success_time() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin" "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$XCODEBUILD_LOG"
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_REFRESH_NOW_EPOCH=12345 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  DEVICE_LIST_TUNNEL_STATE=disconnected \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCODEBUILD_LOG="$tmp/xcodebuild.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-device.sh"
+
+  assert_file_equals "$tmp/last-success" "12345"
+  assert_file_contains "$tmp/xcrun.log" "devicectl device install app --device device-id"
+}
+
+test_unlaunchable_install_does_not_record_success() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin" "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LAUNCH_EXIT=1 \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-device.sh"
+  refresh_status=$?
+  set -e
+
+  [ "$refresh_status" -ne 0 ] || fail "a refresh whose installed app cannot launch must fail"
+  if [ -e "$tmp/last-success" ]; then
+    fail "an unlaunchable install must not advance the success marker"
+  fi
+  assert_file_contains "$tmp/xcrun.log" "devicectl device process launch"
+}
+
+test_manual_refresh_checks_device_before_signing() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+printf 'called\n' > "$XCODEBUILD_CALLED_FILE"
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  DEVICE_TUNNEL_STATE=unavailable \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCODEBUILD_CALLED_FILE="$tmp/xcodebuild-called" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-device.sh"
+  status=$?
+  set -e
+
+  [ "$status" -eq 75 ] || fail "an unavailable manual target should return temporary failure 75, got $status"
+  if [ -e "$tmp/xcodebuild-called" ]; then
+    fail "manual refresh must not sign while the phone is unavailable"
+  fi
+}
+
+test_due_refresh_invokes_installer() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+printf 'called\n' > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=200000 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+  DEVICE_TUNNEL_STATE=connected \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+
+  assert_file_contains "$tmp/refresh-called" "called"
+}
+
+test_due_refresh_opens_available_device_tunnel() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+printf 'called\n' > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  cat > "$tmp/bin/xcrun" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$XCRUN_LOG"
+json_output=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--json-output" ]; then
+    shift
+    json_output="$1"
+    break
+  fi
+  shift
+done
+case "$(cat "$XCRUN_LOG")" in
+  *"device info details"*)
+    cat > "$json_output" <<'JSON'
+{ "result": { "connectionProperties": { "tunnelState": "connected" } } }
+JSON
+    ;;
+  *)
+    cat > "$json_output" <<'JSON'
+{ "result": { "devices": [{ "connectionProperties": { "tunnelState": "disconnected" } }] } }
+JSON
+    ;;
+esac
+STUB
+  chmod +x "$tmp/bin/xcrun"
+
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=300000 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+
+  assert_file_contains "$tmp/refresh-called" "called"
+  assert_file_contains "$tmp/xcrun.log" "devicectl device info details"
+}
+
+test_recent_success_skips_refresh() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+  printf '100000\n' > "$tmp/last-success"
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+printf 'called\n' > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=100100 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+
+  if [ -e "$tmp/refresh-called" ]; then
+    fail "a successful refresh less than 48 hours ago should not reinstall"
+  fi
+}
+
+test_due_refresh_waits_for_connected_device_before_signing() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+  printf '100000\n' > "$tmp/last-success"
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+printf 'called\n' > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=300000 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+  DEVICE_TUNNEL_STATE=unavailable \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+  status=$?
+  set -e
+
+  [ "$status" -eq 75 ] || fail "an unavailable due device should return temporary failure 75, got $status"
+  if [ -e "$tmp/refresh-called" ]; then
+    fail "an unavailable device must not trigger a build/sign/install"
+  fi
+  assert_file_contains "$tmp/xcrun.log" "devicectl device info details"
 }
 
 test_prepare_web_assets_starts_existing_stopped_container() {
@@ -321,7 +651,14 @@ STUB
   fi
 }
 
-test_install_agent_generates_restart_safe_48_hour_plist
+test_install_agent_generates_retrying_48_hour_refresh_plist
+test_successful_refresh_records_success_time
+test_unlaunchable_install_does_not_record_success
+test_manual_refresh_checks_device_before_signing
+test_due_refresh_invokes_installer
+test_due_refresh_opens_available_device_tunnel
+test_recent_success_skips_refresh
+test_due_refresh_waits_for_connected_device_before_signing
 test_prepare_web_assets_starts_existing_stopped_container
 test_prepare_web_assets_recreates_stale_container_mounts
 test_dev_up_starts_existing_stopped_container
