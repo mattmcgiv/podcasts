@@ -238,6 +238,7 @@ final class AdRemovalClassificationTests: XCTestCase {
     func testPinnedQwenManifestHasExactRevisionChecksumsAndConsentSize() {
         let manifest = AdModelManifest.qwen35FourBitV1
 
+        XCTAssertEqual(AdClassifierDescriptor.qwen35FourBitV1.modelRevision, manifest.revision)
         XCTAssertEqual(manifest.repository, "mlx-community/Qwen3.5-4B-MLX-4bit")
         XCTAssertEqual(manifest.revision, "32f3e8ecf65426fc3306969496342d504bfa13f3")
         XCTAssertEqual(manifest.files.count, 10)

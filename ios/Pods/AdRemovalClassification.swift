@@ -13,7 +13,7 @@ struct AdClassifierDescriptor: Equatable, Codable {
 
     static let qwen35FourBitV1 = AdClassifierDescriptor(
         modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
-        modelRevision: "unactivated",
+        modelRevision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
         quantization: "4-bit",
         promptRevision: "ad-classifier-v1",
         maximumContextTokens: 8_192,
