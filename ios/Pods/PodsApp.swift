@@ -18,13 +18,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private static let refreshTaskIdentifier = "dev.mcgiv.pods.feed-refresh"
     private var localServer: PodsLocalServer?
     private var refreshCoordinator: FeedRefreshCoordinator?
+    private var adRemovalDiagnostics: AdRemovalDiagnostics?
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         registerBackgroundRefreshTask()
+        adRemovalDiagnostics = try? AdRemovalDiagnostics.applicationDefault(component: .iphone)
+        try? adRemovalDiagnostics?.record(
+            eventName: "application_launch",
+            severity: .notice,
+            fields: ["launch_options_present": launchOptions == nil ? "false" : "true"]
+        )
         PodsDebugLog("App launch bundle=\(Bundle.main.bundleIdentifier ?? "unknown") version=\(Self.bundleVersionSummary())")
+        AudioBridge.shared.diagnostics = adRemovalDiagnostics
         AudioBridge.shared.configureSession()
         do {
             let databaseURL = try DatabaseBootstrap.prepare()

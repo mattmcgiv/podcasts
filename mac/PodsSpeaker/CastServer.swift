@@ -12,6 +12,7 @@ final class CastServer: ObservableObject {
     @Published private(set) var isListening = false
 
     private let player: SpeakerPlayer
+    private let diagnostics: AdRemovalDiagnostics?
     private let queue = DispatchQueue(label: "dev.mcgiv.pods.speaker.server")
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -21,8 +22,9 @@ final class CastServer: ObservableObject {
         Host.current().localizedName ?? "Mac"
     }
 
-    init(player: SpeakerPlayer) {
+    init(player: SpeakerPlayer, diagnostics: AdRemovalDiagnostics? = nil) {
         self.player = player
+        self.diagnostics = diagnostics
     }
 
     /// Wire player → phone event delivery. Call from the main actor after construction.
@@ -40,6 +42,7 @@ final class CastServer: ObservableObject {
     }
 
     func start() {
+        recordDiagnostic(eventName: "lan_listener_start", severity: .notice)
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
@@ -51,9 +54,15 @@ final class CastServer: ObservableObject {
                     guard let self else { return }
                     switch state {
                     case .ready:
+                        self.recordDiagnostic(eventName: "lan_listener_ready", severity: .notice)
                         self.isListening = true
                         self.statusText = "Listening as \(self.deviceName)"
                     case .failed(let error):
+                        self.recordDiagnostic(
+                            eventName: "lan_listener_failed",
+                            severity: .error,
+                            fields: ["error": error.localizedDescription]
+                        )
                         self.isListening = false
                         self.statusText = "Listener failed: \(error.localizedDescription)"
                     case .cancelled:
@@ -131,6 +140,7 @@ final class CastServer: ObservableObject {
     // MARK: - Connections
 
     private func handleNewConnection(_ newConnection: NWConnection) {
+        recordDiagnostic(eventName: "lan_connection_received", severity: .info)
         // Replace any existing client — personal use, one phone.
         if let existing = connection {
             existing.cancel()
@@ -169,7 +179,11 @@ final class CastServer: ObservableObject {
                 self.player.handle(command: ["cmd": "stop"])
             }
         }
-        _ = reason
+        recordDiagnostic(
+            eventName: "lan_connection_ended",
+            severity: .warning,
+            fields: ["reason": reason]
+        )
     }
 
     private func sendHello(to connection: NWConnection) {
@@ -206,6 +220,12 @@ final class CastServer: ObservableObject {
 
     private func handleMessage(_ body: [String: Any], from connection: NWConnection) {
         if let cmd = body["cmd"] as? String {
+            recordDiagnostic(
+                eventName: "lan_control_command",
+                severity: .debug,
+                playbackSessionID: AdRemovalPlaybackSession.sessionID(from: body),
+                fields: ["command": cmd]
+            )
             switch cmd {
             case "auth":
                 handleAuth(body, from: connection)
@@ -258,6 +278,7 @@ final class CastServer: ObservableObject {
     }
 
     private func completePairing(token: String, connection: NWConnection, label: String) {
+        recordDiagnostic(eventName: "pairing_allowed", severity: .notice)
         addAllowedToken(token)
         // Only authorize if this connection is still current.
         if self.connection === connection {
@@ -287,6 +308,7 @@ final class CastServer: ObservableObject {
                     self.completePairing(token: suggestedToken, connection: connection, label: "Phone paired")
                     self.notify(title: "Pods Speaker", body: "iPhone paired. Ready to play.")
                 } else {
+                    self.recordDiagnostic(eventName: "pairing_denied", severity: .warning)
                     self.send([
                         "v": CastProtocol.version,
                         "type": "error",
@@ -328,5 +350,19 @@ final class CastServer: ObservableObject {
         content.body = body
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+
+    private func recordDiagnostic(
+        eventName: String,
+        severity: AdRemovalDiagnosticSeverity,
+        playbackSessionID: String? = nil,
+        fields: [String: String] = [:]
+    ) {
+        try? diagnostics?.record(
+            eventName: eventName,
+            severity: severity,
+            context: .init(playbackSessionID: playbackSessionID),
+            fields: fields
+        )
     }
 }

@@ -97,12 +97,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     static let shared = AudioBridge()
 
     var progressRecorder: PlaybackProgressRecording?
+    var diagnostics: AdRemovalDiagnostics?
 
     private weak var webView: WKWebView?
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var currentId: Int = 0
     private var currentEpisodeID: Int64?
+    private var playbackSessionID: String?
     private var lastRecordedEpisodeID: Int64?
     private var lastRecordedPosition: Double?
     private var requestedRate: Float = 1
@@ -227,6 +229,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let position = nowPlayingPosition
         let wasPlaying = !nowPlayingPaused
         let rate = requestedRate
+        recordDiagnostic(
+            eventName: "playback_output_selected",
+            severity: .notice,
+            fields: ["output": next.rawValue, "resume": resume ? "true" : "false"]
+        )
 
         if next == .mac {
             // Exclusive sink: local must never keep playing while Mac is chosen.
@@ -331,7 +338,19 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         } else if nowPlayingDuration > 0 {
             body["duration"] = nowPlayingDuration
         }
+        if let playbackSessionID {
+            body = AdRemovalPlaybackSession.attaching(sessionID: playbackSessionID, to: body)
+        }
         CastSession.shared.sendCommand(body)
+        recordDiagnostic(
+            eventName: "mac_source_load_sent",
+            severity: .info,
+            fields: [
+                "request_url": lastSrc,
+                "position": "\(max(0, position))",
+                "autoplay": autoplay ? "true" : "false"
+            ]
+        )
         if autoplay {
             CastSession.shared.sendCommand(["cmd": "play"])
             updateNowPlaying(position: position, rate: rate, paused: false)
@@ -343,6 +362,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func handleCastEvent(_ event: [String: Any]) {
         let type = event["type"] as? String ?? ""
+        if let eventSessionID = AdRemovalPlaybackSession.sessionID(from: event),
+           eventSessionID != playbackSessionID {
+            recordDiagnostic(
+                eventName: "stale_mac_event_rejected",
+                severity: .warning,
+                fields: ["event_type": type]
+            )
+            return
+        }
         if type == "castDisconnected" {
             // Keep progress durable. Do NOT auto-start local while user still wants Mac —
             // that caused dual playback when Mac kept playing after a flaky TCP drop.
@@ -390,6 +418,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let duration = Self.doubleValue(event["duration"])
         let rate = Self.floatValue(event["playbackRate"]).map(Self.normalizedRate)
         let paused = event["paused"] as? Bool
+        recordDiagnostic(
+            eventName: "mac_transport_event",
+            severity: .debug,
+            fields: [
+                "event_type": type,
+                "position": position.map { String($0) } ?? "unknown",
+                "paused": paused.map { $0 ? "true" : "false" } ?? "unknown"
+            ]
+        )
 
         if let position {
             nowPlayingPosition = max(0, position)
@@ -464,12 +501,22 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Transport
 
     private func load(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
+        playbackSessionID = AdRemovalPlaybackSession.makeID()
         lastSrc = url.absoluteString
         currentEpisodeID = episodeID
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         requestedRate = rate
         nowPlayingPosition = max(0, position)
+        recordDiagnostic(
+            eventName: "playback_source_selection",
+            severity: .notice,
+            fields: [
+                "request_url": url.absoluteString,
+                "output": preferredOutput.rawValue,
+                "position": "\(max(0, position))"
+            ]
+        )
 
         if preferredOutput == .mac || output == .mac {
             preferredOutput = .mac
@@ -636,6 +683,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         updateCastKeepAlive()
         stopLocalPlayer(record: false)
         currentEpisodeID = nil
+        playbackSessionID = nil
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         lastSrc = nil
@@ -841,6 +889,22 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func recordCurrentProgress(force: Bool = false) {
         recordPlaybackProgress(position: nowPlayingPosition, force: force, allowRegress: false)
+    }
+
+    private func recordDiagnostic(
+        eventName: String,
+        severity: AdRemovalDiagnosticSeverity,
+        fields: [String: String] = [:]
+    ) {
+        try? diagnostics?.record(
+            eventName: eventName,
+            severity: severity,
+            context: .init(
+                episodeID: currentEpisodeID,
+                playbackSessionID: playbackSessionID
+            ),
+            fields: fields
+        )
     }
 
     private func recordPlaybackProgress(position: Double, force: Bool = false, allowRegress: Bool = false) {

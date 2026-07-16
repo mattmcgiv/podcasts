@@ -41,9 +41,11 @@ final class SpeakerBootstrap: ObservableObject {
     private var didStart = false
 
     init() {
-        let player = SpeakerPlayer()
+        let diagnostics = try? AdRemovalDiagnostics.applicationDefault(component: .mac)
+        try? diagnostics?.record(eventName: "speaker_application_launch", severity: .notice)
+        let player = SpeakerPlayer(diagnostics: diagnostics)
         self.player = player
-        let server = CastServer(player: player)
+        let server = CastServer(player: player, diagnostics: diagnostics)
         server.attachPlayerEvents()
         self.server = server
         SpeakerBootstrap.shared = self

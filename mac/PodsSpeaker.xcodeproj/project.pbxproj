@@ -11,6 +11,7 @@
 		20A000000000000000000002 /* CastServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000012 /* CastServer.swift */; };
 		20A000000000000000000003 /* SpeakerPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000013 /* SpeakerPlayer.swift */; };
 		20A000000000000000000004 /* CastProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000014 /* CastProtocol.swift */; };
+		20E000000000000000000001 /* AdRemovalDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20E000000000000000000011 /* AdRemovalDiagnostics.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,6 +21,7 @@
 		20A000000000000000000013 /* SpeakerPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakerPlayer.swift; sourceTree = "<group>"; };
 		20A000000000000000000014 /* CastProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastProtocol.swift; sourceTree = "<group>"; };
 		20A000000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		20E000000000000000000011 /* AdRemovalDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AdRemovalDiagnostics.swift; path = ../../shared/AdRemovalDiagnostics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -44,6 +46,7 @@
 		20A000000000000000000031 /* PodsSpeaker */ = {
 			isa = PBXGroup;
 			children = (
+				20E000000000000000000011 /* AdRemovalDiagnostics.swift */,
 				20A000000000000000000011 /* PodsSpeakerApp.swift */,
 				20A000000000000000000012 /* CastServer.swift */,
 				20A000000000000000000013 /* SpeakerPlayer.swift */,
@@ -119,6 +122,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				20E000000000000000000001 /* AdRemovalDiagnostics.swift in Sources */,
 				20A000000000000000000001 /* PodsSpeakerApp.swift in Sources */,
 				20A000000000000000000002 /* CastServer.swift in Sources */,
 				20A000000000000000000003 /* SpeakerPlayer.swift in Sources */,
