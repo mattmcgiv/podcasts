@@ -49,6 +49,7 @@
 		114000000000000000000002 /* AdRemovalPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114000000000000000000012 /* AdRemovalPlayback.swift */; };
 		115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000011 /* AdRemovalRangeServerTests.swift */; };
 		115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000012 /* AdRemovalRangeServer.swift */; };
+		116000000000000000000001 /* AdRemovalEvaluation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 116000000000000000000011 /* AdRemovalEvaluation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -105,6 +106,7 @@
 		114000000000000000000012 /* AdRemovalPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPlayback.swift; sourceTree = "<group>"; };
 		115000000000000000000011 /* AdRemovalRangeServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServerTests.swift; sourceTree = "<group>"; };
 		115000000000000000000012 /* AdRemovalRangeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServer.swift; sourceTree = "<group>"; };
+		116000000000000000000011 /* AdRemovalEvaluation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalEvaluation.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -152,6 +154,7 @@
 				113000000000000000000013 /* AdRemovalMLXClassifier.swift */,
 				114000000000000000000012 /* AdRemovalPlayback.swift */,
 				115000000000000000000012 /* AdRemovalRangeServer.swift */,
+				116000000000000000000011 /* AdRemovalEvaluation.swift */,
 				10A000000000000000000011 /* PodsApp.swift */,
 				10A000000000000000000012 /* PodsWebView.swift */,
 				10A000000000000000000013 /* AudioBridge.swift */,
@@ -345,6 +348,7 @@
 				113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */,
 				114000000000000000000002 /* AdRemovalPlayback.swift in Sources */,
 				115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */,
+				116000000000000000000001 /* AdRemovalEvaluation.swift in Sources */,
 				10A000000000000000000001 /* PodsApp.swift in Sources */,
 				10A000000000000000000002 /* PodsWebView.swift in Sources */,
 				10A000000000000000000003 /* AudioBridge.swift in Sources */,

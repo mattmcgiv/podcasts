@@ -447,6 +447,146 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertFalse(classifier.enablesThinking)
     }
 
+    func testGoldenCorpusEvaluatorEnforcesSecondBasedAccuracyAndSafetyGates() throws {
+        let episodes = makeGoldenCorpusEpisodes()
+
+        let report = try AdRemovalGoldenCorpusEvaluator().evaluate(episodes: episodes)
+
+        XCTAssertEqual(report.episodeCount, 10)
+        XCTAssertEqual(report.subscriptionCount, 5)
+        XCTAssertEqual(report.labeledAdSeconds, 200, accuracy: 0.001)
+        XCTAssertEqual(report.skippedAdSeconds, 190, accuracy: 0.001)
+        XCTAssertEqual(report.adSecondsRecall, 0.95, accuracy: 0.000_001)
+        XCTAssertEqual(report.labeledContentSeconds, 800, accuracy: 0.001)
+        XCTAssertEqual(report.incorrectlySkippedContentSeconds, 8, accuracy: 0.001)
+        XCTAssertEqual(report.contentSecondsFalseSkipRate, 0.01, accuracy: 0.000_001)
+        XCTAssertTrue(report.allRangesTraceable)
+        XCTAssertTrue(report.allFalseSkipsReversible)
+        XCTAssertTrue(report.passes)
+    }
+
+    func testGoldenCorpusEvaluatorFailsUnknownEvidenceAndIrreversibleFalseSkip() throws {
+        var episodes = makeGoldenCorpusEpisodes()
+        let original = episodes[0]
+        episodes[0] = AdRemovalCorpusEpisodeEvaluation(
+            episodeID: original.episodeID,
+            subscriptionID: original.subscriptionID,
+            durationSeconds: original.durationSeconds,
+            transcriptSegmentIDs: original.transcriptSegmentIDs,
+            labels: original.labels,
+            predictedSkipRanges: [
+                AdRemovalCorpusPrediction(
+                    startTime: 0,
+                    endTime: 20.8,
+                    sourceSegmentIDs: ["invented-segment"],
+                    reversibleByUndo: false
+                )
+            ]
+        )
+
+        let report = try AdRemovalGoldenCorpusEvaluator().evaluate(episodes: episodes)
+
+        XCTAssertFalse(report.allRangesTraceable)
+        XCTAssertFalse(report.allFalseSkipsReversible)
+        XCTAssertFalse(report.passes)
+    }
+
+    func testGoldenCorpusLoaderRejectsPathsOutsideLocalCorpusRoot() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalCorpusLoaderTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let index = AdRemovalCorpusIndex(
+            schemaVersion: AdRemovalCorpusFormat.schemaVersion,
+            episodes: (0..<10).map { index in
+                AdRemovalCorpusIndexEpisode(
+                    episodeID: "episode-\(index)",
+                    subscriptionID: "subscription-\(index % 5)",
+                    audioFile: "../outside.mp3",
+                    labelsFile: "labels/episode-\(index).json",
+                    transcriptFile: "transcripts/episode-\(index).json",
+                    resultFile: "results/episode-\(index).json"
+                )
+            }
+        )
+        let indexURL = directory.appendingPathComponent("corpus.json")
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        try encoder.encode(index).write(to: indexURL)
+
+        XCTAssertThrowsError(try AdRemovalGoldenCorpusLoader().load(indexURL: indexURL)) { error in
+            guard let corpusError = error as? AdRemovalCorpusError else {
+                return XCTFail("Unexpected loader error: \(error)")
+            }
+            XCTAssertEqual(corpusError, .unsafeRelativePath("../outside.mp3"))
+        }
+    }
+
+    func testCommittedGoldenCorpusFixtureUsesVersionedRedactedFormat() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtureRoot = repositoryRoot.appendingPathComponent(
+            "dev/fixtures/ad-removal-corpus-v1",
+            isDirectory: true
+        )
+        let decoder = JSONDecoder()
+        let index = try decoder.decode(
+            AdRemovalCorpusIndex.self,
+            from: Data(contentsOf: fixtureRoot.appendingPathComponent("corpus.example.json"))
+        )
+        let labels = try decoder.decode(
+            AdRemovalCorpusLabelsFile.self,
+            from: Data(contentsOf: fixtureRoot.appendingPathComponent("labels/synthetic-episode.json"))
+        )
+        let transcript = try decoder.decode(
+            AdRemovalCorpusTranscriptFile.self,
+            from: Data(contentsOf: fixtureRoot.appendingPathComponent("transcripts/synthetic-episode.json"))
+        )
+        let result = try decoder.decode(
+            AdRemovalCorpusResultFile.self,
+            from: Data(contentsOf: fixtureRoot.appendingPathComponent("results/synthetic-episode.json"))
+        )
+
+        XCTAssertEqual(index.schemaVersion, AdRemovalCorpusFormat.schemaVersion)
+        XCTAssertEqual(index.episodes.count, 1)
+        XCTAssertEqual(index.episodes.first?.episodeID, "synthetic-episode")
+        XCTAssertEqual(labels.ranges.map(\.classification), [.content, .advertisement])
+        XCTAssertEqual(transcript.segmentIDs, ["segment-content", "segment-ad"])
+        XCTAssertEqual(result.ranges.count, 1)
+        XCTAssertEqual(result.ranges.first?.sourceSegmentIDs, ["segment-ad"])
+        XCTAssertTrue(result.ranges.first?.reversibleByUndo == true)
+    }
+
+    private func makeGoldenCorpusEpisodes() -> [AdRemovalCorpusEpisodeEvaluation] {
+        (0..<10).map { index in
+            AdRemovalCorpusEpisodeEvaluation(
+                episodeID: "episode-\(index)",
+                subscriptionID: "subscription-\(index % 5)",
+                durationSeconds: 100,
+                transcriptSegmentIDs: ["ad-\(index)", "content-\(index)"],
+                labels: [
+                    AdRemovalCorpusLabel(startTime: 0, endTime: 20, classification: .advertisement),
+                    AdRemovalCorpusLabel(startTime: 20, endTime: 100, classification: .content)
+                ],
+                predictedSkipRanges: [
+                    AdRemovalCorpusPrediction(
+                        startTime: 0,
+                        endTime: 19,
+                        sourceSegmentIDs: ["ad-\(index)"],
+                        reversibleByUndo: true
+                    ),
+                    AdRemovalCorpusPrediction(
+                        startTime: 20,
+                        endTime: 20.8,
+                        sourceSegmentIDs: ["content-\(index)"],
+                        reversibleByUndo: true
+                    )
+                ]
+            )
+        }
+    }
+
     private func correction(id: String, text: String, createdAt: Int64) -> AdCorrection {
         AdCorrection(
             id: id,

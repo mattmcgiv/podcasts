@@ -1,0 +1,16 @@
+{
+  "schema_version": "pods-ad-removal-corpus-v1",
+  "episode_id": "synthetic-episode",
+  "classifier_version": "synthetic-classifier@fixture",
+  "prompt_version": "ad-classifier-v1",
+  "ranges": [
+    {
+      "start_time": 30,
+      "end_time": 60,
+      "source_segment_ids": [
+        "segment-ad"
+      ],
+      "reversible_by_undo": true
+    }
+  ]
+}
