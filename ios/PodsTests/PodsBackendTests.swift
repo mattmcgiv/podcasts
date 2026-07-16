@@ -268,6 +268,23 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(settings.model_revision, AdModelManifest.qwen35FourBitV1.revision)
         XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen35FourBitV1.totalByteCount)
 
+        try harness.database.execute(
+            "INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'ready'), ('ad_removal_model_downloaded_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [.text(String(AdModelManifest.qwen35FourBitV1.totalByteCount))]
+        )
+        settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertEqual(settings.model_downloaded_bytes, 0, "ready state must reflect files actually present")
+        try harness.database.execute(
+            "UPDATE settings SET value = 'not_downloaded' WHERE key = 'ad_removal_model_download_state'"
+        )
+        try harness.database.execute(
+            "UPDATE settings SET value = '0' WHERE key = 'ad_removal_model_downloaded_bytes'"
+        )
+
         let wrongConsent = try await call(
             harness.backend,
             "POST",
@@ -312,6 +329,144 @@ final class PodsBackendTests: XCTestCase {
         let disabled = try await call(harness.backend, "POST", "/api/ad-removal/disable")
         XCTAssertEqual(disabled.statusCode, 200)
         XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
+    }
+
+    func testAdRemovalLifecycleHandlersWakeAndStopRuntimeWork() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/runtime-hooks.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Runtime Hooks",
+            items: [("Episode", "runtime-1", "https://h.example/runtime.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'runtime-1'"
+        ))
+        let modelRequested = expectation(description: "pinned model requested")
+        let pipelineRequested = expectation(description: "pipeline requested")
+        pipelineRequested.expectedFulfillmentCount = 2
+        let runtimeStopped = expectation(description: "runtime stopped")
+        harness.backend.setAdRemovalModelDownloadRequestHandler { manifest in
+            XCTAssertEqual(manifest, .qwen35FourBitV1)
+            modelRequested.fulfill()
+        }
+        harness.backend.setAdRemovalRunRequestHandler {
+            pipelineRequested.fulfill()
+        }
+        harness.backend.setAdRemovalStopRequestHandler {
+            runtimeStopped.fulfill()
+        }
+
+        _ = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": AdModelManifest.qwen35FourBitV1.totalByteCount]
+        )
+        _ = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episodeID)/ad-removal/prepare"
+        )
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Runtime Hooks",
+            items: [
+                ("Episode", "runtime-1", "https://h.example/runtime.mp3", Self.d1),
+                ("New Episode", "runtime-2", "https://h.example/runtime-2.mp3", Self.d2),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/refresh")
+        _ = try await call(harness.backend, "POST", "/api/ad-removal/disable")
+
+        await fulfillment(of: [modelRequested, pipelineRequested, runtimeStopped], timeout: 1)
+    }
+
+    func testAdRemovalSettingsCanResetCorrectionsExportDiagnosticsAndDeleteFeatureData() async throws {
+        let harness = try makeHarness()
+        let diagnostics = try AdRemovalDiagnostics(configuration: .init(
+            rootDirectory: harness.directory.appendingPathComponent("Diagnostics", isDirectory: true),
+            appVersion: "1.0",
+            buildVersion: "1"
+        ))
+        let backend = PodsBackend(
+            database: harness.database,
+            feedFetcher: harness.fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: harness.adRemovalArtifactStore,
+            adRemovalDiagnostics: diagnostics
+        )
+        let feedURL = "https://feeds.example/data-controls.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Data Controls",
+            items: [("Episode", "data-1", "https://h.example/data.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'data-1'"
+        ))
+        let podcastID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT podcast_id FROM episodes WHERE id = ?",
+            [.int(episodeID)]
+        ))
+        let store = AdRemovalJobStore(database: harness.database)
+        _ = try store.enqueue(episodeID: episodeID)
+        _ = try store.addCorrection(
+            podcastID: podcastID,
+            sourceEpisodeID: episodeID,
+            transcriptWindow: "Editorial segment",
+            classificationContext: "false positive",
+            classifierVersion: "test",
+            promptVersion: "test"
+        )
+        let episodeMarker = harness.adRemovalArtifactStore.rootURL
+            .appendingPathComponent("episodes/orphan/marker.bin")
+        let modelMarker = harness.adRemovalArtifactStore.rootURL
+            .appendingPathComponent("models/revision/marker.bin")
+        try FileManager.default.createDirectory(
+            at: episodeMarker.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: modelMarker.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("episode".utf8).write(to: episodeMarker)
+        try Data("model".utf8).write(to: modelMarker)
+        try diagnostics.record(eventName: "export_probe", severity: .notice)
+
+        let reset = try await call(
+            backend,
+            "POST",
+            "/api/ad-removal/corrections/\(podcastID)/reset"
+        )
+        XCTAssertEqual(reset.statusCode, 200)
+        XCTAssertTrue(try store.corrections(podcastID: podcastID).isEmpty)
+
+        let exported = try await call(backend, "GET", "/api/ad-removal/diagnostics/export")
+        XCTAssertEqual(exported.statusCode, 200)
+        XCTAssertEqual(exported.headers["content-type"], "application/zip")
+        XCTAssertEqual(Array(exported.body.prefix(4)), [0x50, 0x4b, 0x03, 0x04])
+
+        let cleared = try await call(backend, "POST", "/api/ad-removal/diagnostics/clear")
+        XCTAssertEqual(cleared.statusCode, 204)
+        XCTAssertTrue(try diagnostics.readPersistedEvents().isEmpty)
+
+        let unconfirmed = try await call(backend, "POST", "/api/ad-removal/cleanup", json: [:])
+        XCTAssertEqual(unconfirmed.statusCode, 422)
+        let cleaned = try await call(
+            backend,
+            "POST",
+            "/api/ad-removal/cleanup",
+            json: ["confirm": "DELETE_AD_REMOVAL_DATA"]
+        )
+        XCTAssertEqual(cleaned.statusCode, 200)
+        XCTAssertNil(try store.job(episodeID: episodeID))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: episodeMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelMarker.path))
+        let settings = try decode(AdRemovalSettingsPayload.self, from: cleaned)
+        XCTAssertFalse(settings.enabled)
+        XCTAssertEqual(settings.model_download_state, "not_downloaded")
+        XCTAssertEqual(settings.model_downloaded_bytes, 0)
     }
 
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
@@ -794,6 +949,21 @@ final class PodsBackendTests: XCTestCase {
     func testFailedMacStreamReloadsOnlyAfterFailure() {
         XCTAssertTrue(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: true))
         XCTAssertFalse(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: false))
+    }
+
+    func testAdRemovalPlaybackActivityRequiresAnEpisodeAndActivePlayIntent() {
+        XCTAssertTrue(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: 42,
+            paused: false
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: 42,
+            paused: true
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: nil,
+            paused: false
+        ))
     }
 
     func testCastKeepAliveRunsOnlyWhileMacIsPreferredOutput() {

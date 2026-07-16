@@ -92,8 +92,8 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(blocked.blockingReason, .lowPower)
         XCTAssertEqual(try store.nextRunnableJob()?.id, newer.id)
 
-        let unblocked = try store.setBlockingReason(jobID: older.id, reason: nil)
-        XCTAssertNil(unblocked.blockingReason)
+        try store.clearBlockingReasons([.lowPower])
+        XCTAssertNil(try store.job(id: older.id)?.blockingReason)
         XCTAssertEqual(try store.nextRunnableJob()?.id, older.id)
     }
 
@@ -375,6 +375,76 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertNil(paused?.lastErrorCode)
         XCTAssertEqual(try store.job(id: queued.id), paused)
         XCTAssertNil(try store.nextRunnableJob())
+    }
+
+    func testSchedulingPolicyOnlyPausesComputeStagesForPowerThermalOrPlayback() {
+        XCTAssertNil(AdRemovalSchedulingPolicy.blockingReason(
+            for: .downloading,
+            conditions: .init(lowPowerMode: true, seriousThermalPressure: true, playbackActive: true)
+        ))
+        XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
+            for: .transcribing,
+            conditions: .init(lowPowerMode: true, seriousThermalPressure: false, playbackActive: false)
+        ), .lowPower)
+        XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
+            for: .classifying,
+            conditions: .init(lowPowerMode: false, seriousThermalPressure: true, playbackActive: false)
+        ), .thermalPressure)
+        XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
+            for: .classifying,
+            conditions: .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: true)
+        ), .playbackActive)
+    }
+
+    func testSchedulerDownloadsDuringLowPowerThenResumesComputeUntilReady() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let executor = RecordingStageExecutor(store: store)
+        let coordinator = AdRemovalCoordinator(store: store, executor: executor)
+        var conditions = AdRemovalRuntimeConditions(
+            lowPowerMode: true,
+            seriousThermalPressure: false,
+            playbackActive: false
+        )
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: coordinator,
+            conditions: { conditions }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .downloaded)
+        XCTAssertEqual(try store.job(id: queued.id)?.blockingReason, .lowPower)
+        XCTAssertEqual(executor.executedStages, [.downloading])
+
+        conditions = .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false)
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
+        XCTAssertNil(try store.job(id: queued.id)?.blockingReason)
+        XCTAssertEqual(executor.executedStages, [.downloading, .transcribing, .classifying])
+    }
+
+    func testSchedulerDoesNoWorkWhileFeatureIsDisabled() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let executor = RecordingStageExecutor(store: store)
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            isEnabled: { false },
+            conditions: {
+                .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false)
+            }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .queued)
+        XCTAssertTrue(executor.executedStages.isEmpty)
     }
 
     private struct Harness {

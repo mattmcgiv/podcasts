@@ -42,6 +42,12 @@ export function installApi(routes: MockRoutes) {
     if (typeof value === "string") {
       return new Response(value, { status: 200, headers: { "content-type": "text/plain" } });
     }
+    if (value instanceof Blob) {
+      return new Response(await value.arrayBuffer(), {
+        status: 200,
+        headers: { "content-type": value.type },
+      });
+    }
     return new Response(JSON.stringify(value), {
       status: 200,
       headers: { "content-type": "application/json" },

@@ -6,6 +6,10 @@ import Foundation
 /// 1. Phone suspended while Mac played (no local audio → iOS suspends despite `audio` background mode).
 /// 2. Mac stop / pre-seek clocks reported `0`/`NaN`, which force-wrote over real progress.
 enum PlaybackProgressPolicy {
+    static func isEpisodePlaybackActive(episodeID: Int64?, paused: Bool) -> Bool {
+        episodeID != nil && !paused
+    }
+
     /// Whether a candidate position should be persisted for the current episode.
     static func shouldPersist(
         position: Double,

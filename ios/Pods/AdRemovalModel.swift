@@ -101,6 +101,49 @@ enum AdModelDownloadPolicy {
             throw AdModelAssetError.consentMismatch
         }
     }
+
+    static func remoteURL(for file: AdModelFile, manifest: AdModelManifest) throws -> URL {
+        let repositoryComponents = manifest.repository.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard repositoryComponents.count == 2,
+              repositoryComponents.allSatisfy({ AdModelAssetStore.isSafeComponent(String($0)) }),
+              AdModelAssetStore.isSafeComponent(manifest.revision),
+              AdModelAssetStore.isSafe(relativePath: file.relativePath),
+              manifest.files.contains(file),
+              var url = URL(string: "https://huggingface.co") else {
+            throw AdModelAssetError.invalidManifest
+        }
+        for component in repositoryComponents.map(String.init)
+            + ["resolve", manifest.revision]
+            + file.relativePath.split(separator: "/").map(String.init) {
+            url.appendPathComponent(component)
+        }
+        return url.appending(queryItems: [URLQueryItem(name: "download", value: "true")])
+    }
+}
+
+enum AdModelDownloadPlan {
+    static func pendingFiles(
+        manifest: AdModelManifest,
+        assetStore: AdModelAssetStore
+    ) throws -> [AdModelFile] {
+        try manifest.files.filter { try !assetStore.isValidated(file: $0, manifest: manifest) }
+    }
+}
+
+enum AdModelTaskCompletionPolicy {
+    static func shouldScheduleNext(fileValidated: Bool, completionError: Error?) -> Bool {
+        fileValidated && completionError == nil
+    }
+
+    static func shouldRecordFailure(error: Error, cancellationRequested: Bool) -> Bool {
+        let nsError = error as NSError
+        return !(cancellationRequested
+            && nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorCancelled)
+    }
 }
 
 final class AdModelAssetStore {
@@ -167,6 +210,17 @@ final class AdModelAssetStore {
         }
     }
 
+    func isValidated(file: AdModelFile, manifest: AdModelManifest) throws -> Bool {
+        guard manifest.files.contains(file) else {
+            throw AdModelAssetError.invalidPath(file.relativePath)
+        }
+        let url = try fileURL(for: file, manifest: manifest)
+        guard fileManager.fileExists(atPath: url.path) else { return false }
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? -1
+        guard size == file.byteCount else { return false }
+        return try sha256(of: url) == file.sha256
+    }
+
     @discardableResult
     func activate(manifest: AdModelManifest, database: PodsDatabase) throws -> URL {
         try verify(manifest: manifest)
@@ -203,6 +257,64 @@ final class AdModelAssetStore {
         try excludeFromBackup(url)
     }
 
+    @discardableResult
+    func installDownloadedFile(
+        from temporaryURL: URL,
+        file: AdModelFile,
+        manifest: AdModelManifest
+    ) throws -> URL {
+        guard manifest.files.contains(file) else {
+            throw AdModelAssetError.invalidPath(file.relativePath)
+        }
+        let sourceSize = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? -1
+        guard sourceSize == file.byteCount else {
+            throw AdModelAssetError.byteCountMismatch(file.relativePath)
+        }
+        guard try sha256(of: temporaryURL) == file.sha256 else {
+            throw AdModelAssetError.checksumMismatch(file.relativePath)
+        }
+
+        let destination = try fileURL(for: file, manifest: manifest)
+        let directory = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staging = directory.appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).incoming")
+        do {
+            try fileManager.copyItem(at: temporaryURL, to: staging)
+            try excludeFromBackup(staging)
+            if fileManager.fileExists(atPath: destination.path) {
+                _ = try fileManager.replaceItemAt(
+                    destination,
+                    withItemAt: staging,
+                    backupItemName: nil,
+                    options: .usingNewMetadataOnly
+                )
+            } else {
+                try fileManager.moveItem(at: staging, to: destination)
+            }
+            try excludeFromBackup(destination)
+            return destination
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw error
+        }
+    }
+
+    func downloadedByteCount(manifest: AdModelManifest) throws -> Int64 {
+        try manifest.files.reduce(Int64(0)) { total, file in
+            let url = try fileURL(for: file, manifest: manifest)
+            let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+            return total + Int64(size ?? 0)
+        }
+    }
+
+    func removeAll() throws {
+        if fileManager.fileExists(atPath: rootURL.path) {
+            try fileManager.removeItem(at: rootURL)
+        }
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        try excludeFromBackup(rootURL)
+    }
+
     private func sha256(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -215,7 +327,7 @@ final class AdModelAssetStore {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isSafe(relativePath: String) -> Bool {
+    static func isSafe(relativePath: String) -> Bool {
         guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), !relativePath.contains("\\") else {
             return false
         }
@@ -224,7 +336,7 @@ final class AdModelAssetStore {
         }
     }
 
-    private static func isSafeComponent(_ value: String) -> Bool {
+    static func isSafeComponent(_ value: String) -> Bool {
         !value.isEmpty && value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
         }
@@ -235,5 +347,293 @@ final class AdModelAssetStore {
         values.isExcludedFromBackup = true
         var mutableURL = url
         try mutableURL.setResourceValues(values)
+    }
+}
+
+enum AdModelBackgroundDownloadError: Error {
+    case unexpectedTask
+    case missingResponse
+    case httpStatus(Int)
+}
+
+final class AdModelBackgroundDownloader: NSObject {
+    static let sessionIdentifier = "dev.mcgiv.pods.ad-removal-model"
+
+    private let database: PodsDatabase
+    private let assetStore: AdModelAssetStore
+    private let manifest: AdModelManifest
+    private let diagnostics: AdRemovalDiagnostics?
+    private let stateLock = NSLock()
+    private var backgroundCompletionHandler: (() -> Void)?
+    private var scheduling = false
+    private var cancellationRequested = false
+    private var validatedTaskIdentifiers: Set<Int> = []
+    private var lastProgressBucket: [Int: Int] = [:]
+    var modelReadyHandler: (() -> Void)?
+
+    private lazy var session: URLSession = {
+        let queue = OperationQueue()
+        queue.name = "dev.mcgiv.pods.ad-removal-model-download"
+        queue.maxConcurrentOperationCount = 1
+        return URLSession(
+            configuration: AdModelDownloadPolicy.configuration(identifier: Self.sessionIdentifier),
+            delegate: self,
+            delegateQueue: queue
+        )
+    }()
+
+    init(
+        database: PodsDatabase,
+        assetStore: AdModelAssetStore,
+        manifest: AdModelManifest = .qwen35FourBitV1,
+        diagnostics: AdRemovalDiagnostics? = nil
+    ) {
+        self.database = database
+        self.assetStore = assetStore
+        self.manifest = manifest
+        self.diagnostics = diagnostics
+        super.init()
+        _ = session
+    }
+
+    func start(requestedManifest: AdModelManifest) async {
+        guard requestedManifest == manifest else {
+            record(
+                eventName: "model_download_manifest_rejected",
+                severity: .error,
+                fields: ["requested_revision": requestedManifest.revision]
+            )
+            return
+        }
+        stateLock.lock()
+        cancellationRequested = false
+        guard !scheduling else {
+            stateLock.unlock()
+            return
+        }
+        scheduling = true
+        stateLock.unlock()
+        defer {
+            stateLock.lock()
+            scheduling = false
+            stateLock.unlock()
+        }
+
+        do {
+            let pending = try AdModelDownloadPlan.pendingFiles(manifest: manifest, assetStore: assetStore)
+            if pending.isEmpty {
+                try assetStore.activate(manifest: manifest, database: database)
+                try setState("ready", downloadedBytes: manifest.totalByteCount, error: nil)
+                record(
+                    eventName: "model_download_ready",
+                    severity: .notice,
+                    fields: [
+                        "revision": manifest.revision,
+                        "byte_count": String(manifest.totalByteCount)
+                    ]
+                )
+                DispatchQueue.main.async { [weak self] in self?.modelReadyHandler?() }
+                return
+            }
+
+            let tasks = await session.allTasks
+            if tasks.contains(where: { $0.taskDescription.flatMap(fileForTaskDescription) != nil }) {
+                try setState(
+                    "downloading",
+                    downloadedBytes: try assetStore.downloadedByteCount(manifest: manifest),
+                    error: nil
+                )
+                return
+            }
+
+            let file = pending[0]
+            var request = URLRequest(url: try AdModelDownloadPolicy.remoteURL(for: file, manifest: manifest))
+            request.timeoutInterval = 60 * 60
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+            let task = session.downloadTask(with: request)
+            task.taskDescription = file.relativePath
+            try setState(
+                "downloading",
+                downloadedBytes: try assetStore.downloadedByteCount(manifest: manifest),
+                error: nil
+            )
+            record(
+                eventName: "model_download_started",
+                severity: .notice,
+                fields: [
+                    "relative_path": file.relativePath,
+                    "expected_bytes": String(file.byteCount),
+                    "revision": manifest.revision,
+                    "wifi_only": "true"
+                ]
+            )
+            task.resume()
+        } catch {
+            markFailed(error)
+        }
+    }
+
+    func cancel() async {
+        stateLock.lock()
+        cancellationRequested = true
+        stateLock.unlock()
+        for task in await session.allTasks {
+            task.cancel()
+        }
+        try? setState(
+            "consented",
+            downloadedBytes: try assetStore.downloadedByteCount(manifest: manifest),
+            error: nil
+        )
+        record(eventName: "model_download_cancelled", severity: .notice)
+    }
+
+    func handleBackgroundEvents(identifier: String, completionHandler: @escaping () -> Void) -> Bool {
+        guard identifier == Self.sessionIdentifier else { return false }
+        stateLock.lock()
+        backgroundCompletionHandler = completionHandler
+        stateLock.unlock()
+        _ = session
+        return true
+    }
+
+    private func fileForTaskDescription(_ description: String) -> AdModelFile? {
+        manifest.files.first { $0.relativePath == description }
+    }
+
+    private func setState(_ state: String, downloadedBytes: Int64, error: Error?) throws {
+        let nsError = error.map { $0 as NSError }
+        let values: [(String, String)] = [
+            ("ad_removal_model_download_state", state),
+            ("ad_removal_model_downloaded_bytes", String(downloadedBytes)),
+            ("ad_removal_model_download_error", nsError.map { "\($0.domain):\($0.code)" } ?? "")
+        ]
+        try database.withTransaction {
+            for (key, value) in values {
+                try database.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [.text(key), .text(value)]
+                )
+            }
+        }
+    }
+
+    private func markFailed(_ error: Error) {
+        let downloaded = (try? assetStore.downloadedByteCount(manifest: manifest)) ?? 0
+        try? setState("failed", downloadedBytes: downloaded, error: error)
+        let nsError = error as NSError
+        record(
+            eventName: "model_download_failed",
+            severity: .error,
+            fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
+        )
+    }
+
+    private func record(
+        eventName: String,
+        severity: AdRemovalDiagnosticSeverity,
+        fields: [String: String] = [:]
+    ) {
+        try? diagnostics?.record(eventName: eventName, severity: severity, fields: fields)
+    }
+}
+
+extension AdModelBackgroundDownloader: URLSessionDownloadDelegate {
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        guard let file = downloadTask.taskDescription.flatMap(fileForTaskDescription) else {
+            markFailed(AdModelBackgroundDownloadError.unexpectedTask)
+            return
+        }
+        guard let response = downloadTask.response as? HTTPURLResponse else {
+            markFailed(AdModelBackgroundDownloadError.missingResponse)
+            return
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            markFailed(AdModelBackgroundDownloadError.httpStatus(response.statusCode))
+            return
+        }
+        do {
+            _ = try assetStore.installDownloadedFile(from: location, file: file, manifest: manifest)
+            record(
+                eventName: "model_download_file_validated",
+                severity: .notice,
+                fields: ["relative_path": file.relativePath, "byte_count": String(file.byteCount)]
+            )
+            stateLock.lock()
+            validatedTaskIdentifiers.insert(downloadTask.taskIdentifier)
+            stateLock.unlock()
+        } catch {
+            markFailed(error)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesExpectedToWrite > 0,
+              let file = downloadTask.taskDescription.flatMap(fileForTaskDescription) else { return }
+        let percent = Int((Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)) * 100)
+        let bucket = min(100, max(0, percent / 5 * 5))
+        stateLock.lock()
+        let prior = lastProgressBucket[downloadTask.taskIdentifier]
+        if prior != bucket { lastProgressBucket[downloadTask.taskIdentifier] = bucket }
+        stateLock.unlock()
+        guard prior != bucket else { return }
+        let installedBytes = (try? assetStore.downloadedByteCount(manifest: manifest)) ?? 0
+        try? setState("downloading", downloadedBytes: installedBytes + totalBytesWritten, error: nil)
+        record(
+            eventName: "model_download_progress",
+            severity: .info,
+            fields: [
+                "relative_path": file.relativePath,
+                "percent": String(bucket),
+                "received_bytes": String(totalBytesWritten),
+                "expected_bytes": String(totalBytesExpectedToWrite)
+            ]
+        )
+    }
+}
+
+extension AdModelBackgroundDownloader: URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        stateLock.lock()
+        lastProgressBucket.removeValue(forKey: task.taskIdentifier)
+        let fileValidated = validatedTaskIdentifiers.remove(task.taskIdentifier) != nil
+        let wasCancellationRequested = cancellationRequested
+        stateLock.unlock()
+        if let error {
+            if AdModelTaskCompletionPolicy.shouldRecordFailure(
+                error: error,
+                cancellationRequested: wasCancellationRequested
+            ) {
+                markFailed(error)
+            }
+            return
+        }
+        if AdModelTaskCompletionPolicy.shouldScheduleNext(
+            fileValidated: fileValidated,
+            completionError: error
+        ) {
+            Task { [weak self] in
+                guard let self else { return }
+                await self.start(requestedManifest: self.manifest)
+            }
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        stateLock.lock()
+        let completion = backgroundCompletionHandler
+        backgroundCompletionHandler = nil
+        stateLock.unlock()
+        DispatchQueue.main.async { completion?() }
     }
 }

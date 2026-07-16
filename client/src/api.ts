@@ -1,4 +1,5 @@
 import type {
+  AdRemovalSettings,
   EpisodeDetail,
   EpisodeItem,
   Page,
@@ -44,6 +45,21 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
   return (raw ? res.text() : res.json()) as Promise<T>;
 }
 
+async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  const res = await fetch(`${window.PODS_API_BASE ?? ""}/api${path}`, init);
+  if (!res.ok) {
+    let message = res.statusText || `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      // non-JSON error body; keep the status text
+    }
+    throw new ApiError(res.status, message);
+  }
+  return res.blob();
+}
+
 export const Api = {
   recent: (offset = 0) => request<Page<EpisodeItem>>(`/recent?offset=${offset}`),
   played: (offset = 0) => request<Page<EpisodeItem>>(`/played?offset=${offset}`),
@@ -67,6 +83,24 @@ export const Api = {
     request<{ stage: string }>(`/episodes/${id}/ad-removal/prepare`, { method: "POST" }),
   retryAdRemoval: (id: number) =>
     request<{ stage: string }>(`/episodes/${id}/ad-removal/retry`, { method: "POST" }),
+  adRemovalSettings: () => request<AdRemovalSettings>("/ad-removal/settings"),
+  enableAdRemoval: (confirmedBytes: number) =>
+    request<AdRemovalSettings>("/ad-removal/enable", {
+      method: "POST",
+      body: JSON.stringify({ confirmed_bytes: confirmedBytes }),
+    }),
+  disableAdRemoval: () =>
+    request<AdRemovalSettings>("/ad-removal/disable", { method: "POST" }),
+  resetAdRemovalCorrections: (podcastId: number) =>
+    request<AdRemovalSettings>(`/ad-removal/corrections/${podcastId}/reset`, { method: "POST" }),
+  exportAdRemovalDiagnostics: () => requestBlob("/ad-removal/diagnostics/export"),
+  clearAdRemovalDiagnostics: () =>
+    request<void>("/ad-removal/diagnostics/clear", { method: "POST" }),
+  cleanupAdRemovalData: () =>
+    request<AdRemovalSettings>("/ad-removal/cleanup", {
+      method: "POST",
+      body: JSON.stringify({ confirm: "DELETE_AD_REMOVAL_DATA" }),
+    }),
   settings: () => request<Settings>("/settings"),
   saveSettings: (s: Settings) =>
     request<void>("/settings", { method: "PUT", body: JSON.stringify(s) }),

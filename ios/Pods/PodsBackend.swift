@@ -78,6 +78,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
     private var adRemovalRunRequestHandler: (() async -> Void)?
     private var adRemovalModelDownloadRequestHandler: ((AdModelManifest) async -> Void)?
+    private var adRemovalStopRequestHandler: (() async -> Void)?
 
     init(
         database: PodsDatabase,
@@ -120,6 +121,10 @@ final class PodsBackend: PlaybackProgressRecording {
         adRemovalModelDownloadRequestHandler = handler
     }
 
+    func setAdRemovalStopRequestHandler(_ handler: @escaping () async -> Void) {
+        adRemovalStopRequestHandler = handler
+    }
+
     func refreshStatus() -> RefreshStatus {
         do {
             return try database.query(
@@ -147,6 +152,10 @@ final class PodsBackend: PlaybackProgressRecording {
         recordRefreshCompletion(source: source, startedAt: startedAt, finishedAt: finishedAt, result: result)
         PodsLog("Pods feed refresh source=\(source.rawValue) refreshed=\(result.refreshed) errors=\(result.errors)")
         NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
+        if (try? settingValues()["ad_removal_enabled"]) == "true",
+           let adRemovalRunRequestHandler {
+            Task { await adRemovalRunRequestHandler() }
+        }
         return result
     }
 
@@ -266,6 +275,38 @@ final class PodsBackend: PlaybackProgressRecording {
         if path == "/api/ad-removal/disable", request.method == "POST" {
             try setSetting(key: "ad_removal_enabled", value: "false")
             try? adRemovalDiagnostics?.record(eventName: "feature_disabled", severity: .notice)
+            if let adRemovalStopRequestHandler {
+                Task { await adRemovalStopRequestHandler() }
+            }
+            return .json(try adRemovalSettings())
+        }
+        if parts.count == 5,
+           parts[0] == "api",
+           parts[1] == "ad-removal",
+           parts[2] == "corrections",
+           let podcastID = Int64(parts[3]),
+           parts[4] == "reset",
+           request.method == "POST" {
+            try resetAdRemovalCorrections(podcastID: podcastID)
+            return .json(try adRemovalSettings())
+        }
+        if path == "/api/ad-removal/diagnostics/export", request.method == "GET" {
+            return try exportAdRemovalDiagnostics()
+        }
+        if path == "/api/ad-removal/diagnostics/clear", request.method == "POST" {
+            guard let adRemovalDiagnostics else { throw PodsBackendError.notFound }
+            try adRemovalDiagnostics.clear()
+            return .noContent()
+        }
+        if path == "/api/ad-removal/cleanup", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard body["confirm"] as? String == "DELETE_AD_REMOVAL_DATA" else {
+                throw PodsBackendError.invalid("destructive cleanup confirmation does not match")
+            }
+            if let adRemovalStopRequestHandler {
+                await adRemovalStopRequestHandler()
+            }
+            try cleanupAdRemovalData()
             return .json(try adRemovalSettings())
         }
         if path == "/api/settings", request.method == "GET" {
@@ -482,6 +523,14 @@ final class PodsBackend: PlaybackProgressRecording {
     private func adRemovalSettings() throws -> AdRemovalSettingsPayload {
         let values = try settingValues()
         let manifest = AdModelManifest.qwen35FourBitV1
+        let modelDownloadState = values["ad_removal_model_download_state"] ?? "not_downloaded"
+        let modelBytesOnDisk = try modelDownloadedBytes(manifest: manifest)
+        let modelDownloadedBytes = modelDownloadState == "ready"
+            ? modelBytesOnDisk
+            : max(
+                modelBytesOnDisk,
+                Int64(values["ad_removal_model_downloaded_bytes"] ?? "") ?? 0
+            )
         let corrections = try database.query(
             """
             SELECT p.id, p.title, COUNT(c.id)
@@ -503,8 +552,8 @@ final class PodsBackend: PlaybackProgressRecording {
             model_repository: manifest.repository,
             model_revision: manifest.revision,
             model_total_bytes: manifest.totalByteCount,
-            model_downloaded_bytes: try modelDownloadedBytes(manifest: manifest),
-            model_download_state: values["ad_removal_model_download_state"] ?? "not_downloaded",
+            model_downloaded_bytes: modelDownloadedBytes,
+            model_download_state: modelDownloadState,
             episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
@@ -564,6 +613,70 @@ final class PodsBackend: PlaybackProgressRecording {
             total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         return total
+    }
+
+    private func resetAdRemovalCorrections(podcastID: Int64) throws {
+        guard (try database.scalarInt64("SELECT COUNT(*) FROM podcasts WHERE id = ?", [.int(podcastID)])) ?? 0 > 0 else {
+            throw PodsBackendError.notFound
+        }
+        try AdRemovalJobStore(database: database).resetCorrections(podcastID: podcastID)
+        try? adRemovalDiagnostics?.record(
+            eventName: "corrections_reset",
+            severity: .notice,
+            fields: ["podcast_id": String(podcastID)]
+        )
+    }
+
+    private func exportAdRemovalDiagnostics() throws -> HTTPResponse {
+        guard let adRemovalDiagnostics else { throw PodsBackendError.notFound }
+        let values = try settingValues()
+        let stateSummary = [
+            "enabled": values["ad_removal_enabled"] ?? "false",
+            "model_revision": values["ad_removal_model_revision"] ?? "none",
+            "model_download_state": values["ad_removal_model_download_state"] ?? "not_downloaded",
+            "queued_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage NOT IN ('ready', 'failed', 'cancelled')"
+            )) ?? 0),
+            "ready_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage = 'ready'"
+            )) ?? 0),
+            "failed_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage = 'failed'"
+            )) ?? 0)
+        ]
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PodsAdRemovalDiagnosticExports", isDirectory: true)
+        let archive = try adRemovalDiagnostics.exportArchive(
+            to: directory,
+            stateSummary: stateSummary,
+            schemaVersions: [
+                "database": "1",
+                "classifier_output": "1",
+                "skip_manifest": "1",
+                "model_revision": AdModelManifest.qwen35FourBitV1.revision
+            ]
+        )
+        defer { try? FileManager.default.removeItem(at: archive) }
+        return HTTPResponse(
+            statusCode: 200,
+            headers: [
+                "content-type": "application/zip",
+                "content-disposition": "attachment; filename=\"\(archive.lastPathComponent)\""
+            ],
+            body: try Data(contentsOf: archive)
+        )
+    }
+
+    private func cleanupAdRemovalData() throws {
+        guard let adRemovalArtifactStore else { throw PodsBackendError.notFound }
+        let modelStore = try AdModelAssetStore(artifactStore: adRemovalArtifactStore)
+        try? adRemovalDiagnostics?.record(eventName: "feature_cleanup_started", severity: .notice)
+        try modelStore.removeAll()
+        let store = AdRemovalJobStore(database: database)
+        try store.cleanupAllFeatureMetadata()
+        try adRemovalFileCleanup?.drain()
+        try adRemovalArtifactStore.removeAllEpisodeArtifacts()
+        try? adRemovalDiagnostics?.record(eventName: "feature_cleanup_finished", severity: .notice)
     }
 
     private func setPlayed(id: Int64) throws {

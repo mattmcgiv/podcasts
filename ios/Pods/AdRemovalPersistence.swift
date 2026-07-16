@@ -208,6 +208,24 @@ final class AdRemovalJobStore {
         }
     }
 
+    func clearTransientPolicyBlockingReasons() throws {
+        try clearBlockingReasons([.lowPower, .thermalPressure, .playbackActive])
+    }
+
+    func clearBlockingReasons(_ reasons: Set<AdRemovalBlockingReason>) throws {
+        guard !reasons.isEmpty else { return }
+        let placeholders = Array(repeating: "?", count: reasons.count).joined(separator: ", ")
+        let ordered = reasons.sorted { $0.rawValue < $1.rawValue }
+        try database.execute(
+            """
+            UPDATE ad_removal_jobs
+            SET blocking_reason = NULL, updated_at = ?
+            WHERE blocking_reason IN (\(placeholders))
+            """,
+            [.int(now())] + ordered.map { .text($0.rawValue) }
+        )
+    }
+
     func recordAudioArtifact(jobID: String, artifact: AdRemovalAudioArtifact) throws -> AdRemovalJob {
         guard AdRemovalArtifactStore.isValid(relativePath: artifact.relativePath),
               artifact.byteCount >= 0,
@@ -833,6 +851,29 @@ final class AdRemovalJobStore {
         }
     }
 
+    func resetCorrections(podcastID: Int64) throws {
+        try database.execute(
+            "UPDATE ad_corrections SET active = 0 WHERE podcast_id = ?",
+            [.int(podcastID)]
+        )
+    }
+
+    func cleanupAllFeatureMetadata() throws {
+        let episodeIDs = try database.query(
+            "SELECT episode_id FROM ad_removal_jobs ORDER BY episode_id",
+            map: { sqlite3_column_int64($0, 0) }
+        )
+        try database.withTransaction {
+            for episodeID in episodeIDs {
+                try Self.cleanupEpisodeMetadata(in: database, episodeID: episodeID, now: now())
+            }
+            try database.execute("DELETE FROM ad_corrections")
+            try database.execute(
+                "DELETE FROM settings WHERE key LIKE 'ad_removal_%'"
+            )
+        }
+    }
+
     static func enqueuePodcastArtifactCleanup(
         in database: PodsDatabase,
         podcastID: Int64,
@@ -1057,5 +1098,120 @@ actor AdRemovalCoordinator {
             ),
             fields: fields
         )
+    }
+}
+
+struct AdRemovalRuntimeConditions: Equatable {
+    let lowPowerMode: Bool
+    let seriousThermalPressure: Bool
+    let playbackActive: Bool
+}
+
+enum AdRemovalSchedulingPolicy {
+    static func executingStage(for job: AdRemovalJob) -> AdRemovalJobStage? {
+        switch job.stage {
+        case .queued, .downloading:
+            return .downloading
+        case .downloaded, .transcribing:
+            return .transcribing
+        case .classifying:
+            return .classifying
+        case .ready, .failed, .cancelled:
+            return nil
+        }
+    }
+
+    static func blockingReason(
+        for stage: AdRemovalJobStage,
+        conditions: AdRemovalRuntimeConditions
+    ) -> AdRemovalBlockingReason? {
+        guard stage == .transcribing || stage == .classifying else { return nil }
+        if conditions.playbackActive { return .playbackActive }
+        if conditions.lowPowerMode { return .lowPower }
+        if conditions.seriousThermalPressure { return .thermalPressure }
+        return nil
+    }
+}
+
+actor AdRemovalPipelineScheduler {
+    private let store: AdRemovalJobStore
+    private let coordinator: AdRemovalCoordinator
+    private let isEnabled: () async -> Bool
+    private let conditions: () async -> AdRemovalRuntimeConditions
+    private let diagnostics: AdRemovalDiagnostics?
+
+    init(
+        store: AdRemovalJobStore,
+        coordinator: AdRemovalCoordinator,
+        isEnabled: @escaping () async -> Bool = { true },
+        conditions: @escaping () async -> AdRemovalRuntimeConditions,
+        diagnostics: AdRemovalDiagnostics? = nil
+    ) {
+        self.store = store
+        self.coordinator = coordinator
+        self.isEnabled = isEnabled
+        self.conditions = conditions
+        self.diagnostics = diagnostics
+    }
+
+    func runUntilIdle(maximumStageCount: Int = 100) async {
+        guard await isEnabled() else { return }
+        do {
+            try store.clearTransientPolicyBlockingReasons()
+            for _ in 0..<maximumStageCount {
+                guard let next = try store.nextRunnableJob(),
+                      let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else {
+                    return
+                }
+                if let reason = AdRemovalSchedulingPolicy.blockingReason(
+                    for: stage,
+                    conditions: await conditions()
+                ) {
+                    let blocked = try store.setBlockingReason(jobID: next.id, reason: reason)
+                    try? diagnostics?.record(
+                        eventName: "scheduler_policy_pause",
+                        severity: .notice,
+                        context: .init(
+                            jobID: blocked.id,
+                            episodeID: blocked.episodeID,
+                            podcastID: blocked.podcastID,
+                            stage: blocked.stage.rawValue,
+                            attempt: blocked.attemptCount + 1
+                        ),
+                        fields: ["blocking_reason": reason.rawValue]
+                    )
+                    continue
+                }
+                guard await runOneStage() else { return }
+            }
+            try? diagnostics?.record(
+                eventName: "scheduler_stage_limit_reached",
+                severity: .warning,
+                fields: ["maximum_stage_count": String(maximumStageCount)]
+            )
+        } catch {
+            let nsError = error as NSError
+            try? diagnostics?.record(
+                eventName: "scheduler_run_failed",
+                severity: .error,
+                fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
+            )
+        }
+    }
+
+    private func runOneStage() async -> Bool {
+        do {
+            return try await coordinator.runNextStage() != nil
+        } catch is CancellationError {
+            return false
+        } catch {
+            let nsError = error as NSError
+            try? diagnostics?.record(
+                eventName: "scheduler_run_failed",
+                severity: .error,
+                fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
+            )
+            return false
+        }
     }
 }

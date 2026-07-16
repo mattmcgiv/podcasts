@@ -100,6 +100,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     var diagnostics: AdRemovalDiagnostics?
     var adRemovalPlaybackProvider: AdRemovalPlaybackProviding?
     var adRemovalRangeServer: AdRemovalRangeServing?
+    var playbackActivityDidChange: ((Bool) -> Void)?
 
     private weak var webView: WKWebView?
     private var player: AVPlayer?
@@ -119,6 +120,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var nowPlayingDuration: Double = 0
     private var nowPlayingRate: Float = 1
     private var nowPlayingPaused = true
+    private var lastReportedPlaybackActivity = false
     private let progressRecordStrideSeconds: Double = 5
     private var downloadedEpisode: AdRemovalDownloadedEpisode?
     private var publisherURL: URL?
@@ -1265,6 +1267,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             artwork: nowPlayingArtwork
         )
         MPNowPlayingInfoCenter.default().playbackState = nowPlayingPaused ? .paused : .playing
+        reportPlaybackActivityIfChanged()
     }
 
     private func clearNowPlaying() {
@@ -1279,6 +1282,26 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         nowPlayingPaused = true
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
+        reportPlaybackActivityIfChanged()
+    }
+
+    var isEpisodePlaybackActive: Bool {
+        PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: currentEpisodeID,
+            paused: nowPlayingPaused
+        )
+    }
+
+    private func reportPlaybackActivityIfChanged() {
+        let active = isEpisodePlaybackActive
+        guard active != lastReportedPlaybackActivity else { return }
+        lastReportedPlaybackActivity = active
+        playbackActivityDidChange?(active)
+        recordDiagnostic(
+            eventName: "playback_activity_changed",
+            severity: .info,
+            fields: ["active": active ? "true" : "false"]
+        )
     }
 
     private func loadNowPlayingArtwork(from url: URL?) {

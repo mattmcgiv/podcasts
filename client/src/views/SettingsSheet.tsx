@@ -2,7 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
-import type { RefreshStatus } from "../types";
+import type { AdRemovalSettings, RefreshStatus } from "../types";
+
+function formatGB(bytes: number): string {
+  return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
+}
+
+function modelStateLabel(state: string): string {
+  return state
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 function formatRefreshStatus(refreshStatus: RefreshStatus): string {
   if (refreshStatus.last_success_at == null) {
@@ -23,6 +34,7 @@ function formatRefreshStatus(refreshStatus: RefreshStatus): string {
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
+  const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
   const [feedUrl, setFeedUrl] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -35,10 +47,25 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       .catch(() => {
         // Refresh status is informational; it must not block Settings if unavailable.
       });
+    void Api.adRemovalSettings()
+      .then((settings) => {
+        if (active) setAdRemoval(settings);
+      })
+      .catch(() => {
+        // Older/native-less runtimes may not expose this optional settings section.
+      });
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (adRemoval?.model_download_state !== "downloading") return;
+    const timer = window.setInterval(() => {
+      void Api.adRemovalSettings().then(setAdRemoval).catch(() => {});
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [adRemoval?.model_download_state]);
 
   async function run(label: string, fn: () => Promise<string>) {
     setStatus(`${label}…`);
@@ -97,6 +124,60 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
+  async function enableAdRemoval() {
+    if (!adRemoval) return;
+    await run("Enabling ad removal", async () => {
+      setAdRemoval(await Api.enableAdRemoval(adRemoval.model_total_bytes));
+      emitEpisodesChanged();
+      return "Ad removal enabled";
+    });
+  }
+
+  async function disableAdRemoval() {
+    await run("Disabling ad removal", async () => {
+      setAdRemoval(await Api.disableAdRemoval());
+      emitEpisodesChanged();
+      return "Ad removal disabled; existing data retained";
+    });
+  }
+
+  async function resetCorrections(podcastId: number, podcastTitle: string) {
+    await run("Resetting corrections", async () => {
+      setAdRemoval(await Api.resetAdRemovalCorrections(podcastId));
+      return `Reset learned corrections for ${podcastTitle}`;
+    });
+  }
+
+  async function exportAdRemovalDiagnostics() {
+    await run("Exporting diagnostics", async () => {
+      const blob = await Api.exportAdRemovalDiagnostics();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "pods-ad-removal-diagnostics.zip";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      return "Exported ad-removal diagnostics";
+    });
+  }
+
+  async function clearAdRemovalDiagnostics() {
+    await run("Clearing diagnostics", async () => {
+      await Api.clearAdRemovalDiagnostics();
+      return "Cleared ad-removal diagnostics";
+    });
+  }
+
+  async function cleanupAdRemovalData() {
+    if (!window.confirm(
+      "Delete the classifier model, every prepared episode, and all learned corrections? This cannot be undone.",
+    )) return;
+    await run("Deleting ad-removal data", async () => {
+      setAdRemoval(await Api.cleanupAdRemovalData());
+      emitEpisodesChanged();
+      return "Deleted all ad-removal data";
+    });
+  }
+
   return (
     <div className="settings-sheet" role="dialog" aria-label="Settings">
       <header className="sheet-header">
@@ -110,6 +191,73 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       </header>
 
       <div className="settings-body">
+        {adRemoval && (
+          <section className="ad-removal-settings" aria-labelledby="ad-removal-title">
+            <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
+            <p className="settings-detail">
+              On-device transcript classification. The {formatGB(adRemoval.model_total_bytes)} model downloads
+              over Wi-Fi only.
+            </p>
+            {adRemoval.enabled ? (
+              <>
+                <button className="ghost-btn" onClick={() => void disableAdRemoval()}>
+                  Disable ad removal
+                </button>
+                {(adRemoval.model_download_state === "failed"
+                  || adRemoval.model_download_state === "not_downloaded") && (
+                  <button className="ghost-btn" onClick={() => void enableAdRemoval()}>
+                    Retry {formatGB(adRemoval.model_total_bytes)} model download
+                  </button>
+                )}
+              </>
+            ) : (
+              <button className="ghost-btn" onClick={() => void enableAdRemoval()}>
+                Enable and download {formatGB(adRemoval.model_total_bytes)}
+              </button>
+            )}
+            <p className="settings-detail">
+              Model download: {modelStateLabel(adRemoval.model_download_state)} ·{" "}
+              {formatGB(Math.min(adRemoval.model_downloaded_bytes, adRemoval.model_total_bytes))} of{" "}
+              {formatGB(adRemoval.model_total_bytes)}
+            </p>
+            <p className="settings-detail settings-revision">
+              Revision {adRemoval.model_revision}
+            </p>
+            <p className="settings-detail">
+              Prepared episode storage: {formatGB(adRemoval.episode_storage_bytes)} of{" "}
+              {formatGB(adRemoval.episode_storage_limit_bytes)} · {formatGB(adRemoval.device_available_bytes)} free
+            </p>
+
+            {adRemoval.corrections.length > 0 && (
+              <div className="correction-list">
+                <p className="settings-detail">Learned corrections</p>
+                {adRemoval.corrections.map((correction) => (
+                  <div className="correction-row" key={correction.podcast_id}>
+                    <span>{correction.podcast_title}: {correction.count}</span>
+                    <button
+                      className="ghost-btn small"
+                      aria-label={`Reset learned corrections for ${correction.podcast_title}`}
+                      onClick={() => void resetCorrections(correction.podcast_id, correction.podcast_title)}
+                    >
+                      Reset
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button className="ghost-btn" onClick={() => void exportAdRemovalDiagnostics()}>
+              Export ad-removal diagnostics
+            </button>
+            <button className="ghost-btn" onClick={() => void clearAdRemovalDiagnostics()}>
+              Clear ad-removal diagnostics
+            </button>
+            <button className="ghost-btn danger" onClick={() => void cleanupAdRemovalData()}>
+              Delete all ad-removal data
+            </button>
+          </section>
+        )}
+
         <h2 className="section-title">Add a feed by URL</h2>
         <div className="add-url-row">
           <input

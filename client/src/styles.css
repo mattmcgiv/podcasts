@@ -830,3 +830,28 @@ input[type="search"]::-webkit-search-cancel-button {
 .settings-body {
   padding: 8px 16px calc(40px + env(safe-area-inset-bottom));
 }
+
+.settings-detail {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.45;
+  margin: 8px 4px;
+  overflow-wrap: anywhere;
+}
+
+.settings-revision {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.correction-list {
+  margin: 14px 0;
+}
+
+.correction-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin: 8px 4px;
+}

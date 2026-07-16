@@ -55,6 +55,26 @@ export interface Settings {
   autoplay: boolean;
 }
 
+export interface AdRemovalCorrectionCount {
+  podcast_id: number;
+  podcast_title: string;
+  count: number;
+}
+
+export interface AdRemovalSettings {
+  enabled: boolean;
+  enrollment_cutoff: number | null;
+  model_repository: string;
+  model_revision: string;
+  model_total_bytes: number;
+  model_downloaded_bytes: number;
+  model_download_state: string;
+  episode_storage_bytes: number;
+  episode_storage_limit_bytes: number;
+  device_available_bytes: number;
+  corrections: AdRemovalCorrectionCount[];
+}
+
 export interface RefreshStatus {
   last_attempt_at: number | null;
   last_success_at: number | null;

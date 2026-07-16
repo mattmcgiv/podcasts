@@ -191,6 +191,15 @@ final class AdRemovalArtifactStore {
         return values.volumeAvailableCapacityForImportantUsage ?? 0
     }
 
+    func removeAllEpisodeArtifacts() throws {
+        for name in ["episodes", "resume"] {
+            let directory = rootURL.appendingPathComponent(name, isDirectory: true)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: directory)
+            }
+        }
+    }
+
     static func isValid(relativePath: String) -> Bool {
         guard !relativePath.isEmpty,
               !relativePath.hasPrefix("/"),

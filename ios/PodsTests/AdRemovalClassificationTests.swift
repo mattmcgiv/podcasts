@@ -307,6 +307,126 @@ final class AdRemovalClassificationTests: XCTestCase {
         ))
     }
 
+    func testModelDownloadURLPinsExactRepositoryRevisionAndEscapesFilePath() throws {
+        let manifest = AdModelManifest(
+            repository: "owner/model-name",
+            revision: "abc123",
+            files: [
+                AdModelFile(
+                    relativePath: "tokenizer files/vocab.json",
+                    byteCount: 1,
+                    sha256: String(repeating: "0", count: 64)
+                )
+            ]
+        )
+
+        let url = try AdModelDownloadPolicy.remoteURL(
+            for: manifest.files[0],
+            manifest: manifest
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://huggingface.co/owner/model-name/resolve/abc123/tokenizer%20files/vocab.json?download=true"
+        )
+    }
+
+    func testDownloadedModelFileIsVerifiedBeforeAtomicInstallation() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalModelInstallTests-\(UUID().uuidString)", isDirectory: true)
+        let incoming = directory.appendingPathComponent("incoming.bin")
+        let validData = Data("verified-model-file".utf8)
+        let manifest = AdModelManifest(
+            repository: "owner/model",
+            revision: "abc123",
+            files: [
+                AdModelFile(
+                    relativePath: "weights/model.bin",
+                    byteCount: Int64(validData.count),
+                    sha256: "690b827558b9a58429cc1003c914862993f319388e135163aa3c1a1a018a61dc"
+                )
+            ]
+        )
+        let store = try AdModelAssetStore(rootURL: directory.appendingPathComponent("Models"))
+        let destination = try store.fileURL(for: manifest.files[0], manifest: manifest)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("tampered-model-file".utf8).write(to: incoming)
+
+        XCTAssertThrowsError(try store.installDownloadedFile(
+            from: incoming,
+            file: manifest.files[0],
+            manifest: manifest
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+
+        try validData.write(to: incoming)
+        let installed = try store.installDownloadedFile(
+            from: incoming,
+            file: manifest.files[0],
+            manifest: manifest
+        )
+
+        XCTAssertEqual(installed, destination)
+        XCTAssertEqual(try Data(contentsOf: installed), validData)
+        XCTAssertEqual(try store.downloadedByteCount(manifest: manifest), Int64(validData.count))
+    }
+
+    func testModelDownloadPlanSkipsValidatedFilesAndRetriesMissingOrCorruptFiles() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalModelPlanTests-\(UUID().uuidString)", isDirectory: true)
+        let manifest = AdModelManifest(
+            repository: "owner/model",
+            revision: "abc123",
+            files: [
+                AdModelFile(
+                    relativePath: "config.json",
+                    byteCount: 6,
+                    sha256: "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+                ),
+                AdModelFile(
+                    relativePath: "weights.bin",
+                    byteCount: 7,
+                    sha256: "9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c"
+                ),
+                AdModelFile(
+                    relativePath: "tokenizer.json",
+                    byteCount: 9,
+                    sha256: "55525e31be2392f18c638d95ba6464c7bf92ac7529c46f60ec84b1136877fb79"
+                )
+            ]
+        )
+        let store = try AdModelAssetStore(rootURL: directory)
+        try store.installForTesting(Data("config".utf8), at: "config.json", manifest: manifest)
+        try store.installForTesting(Data("corrupt".utf8), at: "weights.bin", manifest: manifest)
+
+        let pending = try AdModelDownloadPlan.pendingFiles(manifest: manifest, assetStore: store)
+
+        XCTAssertEqual(pending.map(\.relativePath), ["weights.bin", "tokenizer.json"])
+    }
+
+    func testModelTaskCompletionAdvancesOnlyValidatedFilesAndIgnoresExplicitCancellation() {
+        XCTAssertTrue(AdModelTaskCompletionPolicy.shouldScheduleNext(
+            fileValidated: true,
+            completionError: nil
+        ))
+        XCTAssertFalse(AdModelTaskCompletionPolicy.shouldScheduleNext(
+            fileValidated: false,
+            completionError: nil
+        ))
+        XCTAssertFalse(AdModelTaskCompletionPolicy.shouldScheduleNext(
+            fileValidated: true,
+            completionError: URLError(.networkConnectionLost)
+        ))
+        XCTAssertFalse(AdModelTaskCompletionPolicy.shouldRecordFailure(
+            error: URLError(.cancelled),
+            cancellationRequested: true
+        ))
+        XCTAssertTrue(AdModelTaskCompletionPolicy.shouldRecordFailure(
+            error: URLError(.cancelled),
+            cancellationRequested: false
+        ))
+    }
+
     func testMLXClassifierUsesPinnedTextOnlyNonThinkingConfiguration() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AdRemovalMLXTests-\(UUID().uuidString)", isDirectory: true)
