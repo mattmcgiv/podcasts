@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var adRemovalDiagnostics: AdRemovalDiagnostics?
     private var adRemovalDownloader: AdRemovalBackgroundDownloader?
     private var adRemovalCoordinator: AdRemovalCoordinator?
+    private var adRemovalRangeServer: AdRemovalRangeServer?
     private var pendingAdRemovalBackgroundEvents: [(String, () -> Void)] = []
 
     func application(
@@ -36,6 +37,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         )
         PodsDebugLog("App launch bundle=\(Bundle.main.bundleIdentifier ?? "unknown") version=\(Self.bundleVersionSummary())")
         AudioBridge.shared.diagnostics = adRemovalDiagnostics
+        let rangeServer = AdRemovalRangeServer(diagnostics: adRemovalDiagnostics)
+        rangeServer.start()
+        adRemovalRangeServer = rangeServer
+        AudioBridge.shared.adRemovalRangeServer = rangeServer
         AudioBridge.shared.configureSession()
         do {
             let databaseURL = try DatabaseBootstrap.prepare()
@@ -51,6 +56,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             _ = try cleanup.drain()
             let jobStore = AdRemovalJobStore(database: database)
+            AudioBridge.shared.adRemovalPlaybackProvider = AdRemovalPlaybackStore(
+                database: database,
+                jobStore: jobStore,
+                artifactStore: artifactStore
+            )
             let storagePolicy = AdRemovalStoragePolicy(
                 usedBytes: { try artifactStore.episodeArtifactBytes() },
                 availableBytes: { try artifactStore.availableCapacity() }

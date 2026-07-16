@@ -45,6 +45,10 @@
 		113000000000000000000001 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 113000000000000000000011 /* MLXLLM */; };
 		113000000000000000000002 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 113000000000000000000012 /* MLXLMCommon */; };
 		113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 113000000000000000000013 /* AdRemovalMLXClassifier.swift */; };
+		114000000000000000000001 /* AdRemovalPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114000000000000000000011 /* AdRemovalPlaybackTests.swift */; };
+		114000000000000000000002 /* AdRemovalPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114000000000000000000012 /* AdRemovalPlayback.swift */; };
+		115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000011 /* AdRemovalRangeServerTests.swift */; };
+		115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000012 /* AdRemovalRangeServer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,6 +101,10 @@
 		112000000000000000000012 /* AdRemovalClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalClassification.swift; sourceTree = "<group>"; };
 		112000000000000000000013 /* AdRemovalModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalModel.swift; sourceTree = "<group>"; };
 		113000000000000000000013 /* AdRemovalMLXClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalMLXClassifier.swift; sourceTree = "<group>"; };
+		114000000000000000000011 /* AdRemovalPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPlaybackTests.swift; sourceTree = "<group>"; };
+		114000000000000000000012 /* AdRemovalPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPlayback.swift; sourceTree = "<group>"; };
+		115000000000000000000011 /* AdRemovalRangeServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServerTests.swift; sourceTree = "<group>"; };
+		115000000000000000000012 /* AdRemovalRangeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -142,6 +150,8 @@
 				112000000000000000000012 /* AdRemovalClassification.swift */,
 				112000000000000000000013 /* AdRemovalModel.swift */,
 				113000000000000000000013 /* AdRemovalMLXClassifier.swift */,
+				114000000000000000000012 /* AdRemovalPlayback.swift */,
+				115000000000000000000012 /* AdRemovalRangeServer.swift */,
 				10A000000000000000000011 /* PodsApp.swift */,
 				10A000000000000000000012 /* PodsWebView.swift */,
 				10A000000000000000000013 /* AudioBridge.swift */,
@@ -193,6 +203,8 @@
 				110000000000000000000011 /* AdRemovalStorageTests.swift */,
 				111000000000000000000011 /* AdRemovalTranscriptionTests.swift */,
 				112000000000000000000011 /* AdRemovalClassificationTests.swift */,
+				114000000000000000000011 /* AdRemovalPlaybackTests.swift */,
+				115000000000000000000011 /* AdRemovalRangeServerTests.swift */,
 			);
 			path = PodsTests;
 			sourceTree = "<group>";
@@ -331,6 +343,8 @@
 				112000000000000000000002 /* AdRemovalClassification.swift in Sources */,
 				112000000000000000000003 /* AdRemovalModel.swift in Sources */,
 				113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */,
+				114000000000000000000002 /* AdRemovalPlayback.swift in Sources */,
+				115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */,
 				10A000000000000000000001 /* PodsApp.swift in Sources */,
 				10A000000000000000000002 /* PodsWebView.swift in Sources */,
 				10A000000000000000000003 /* AudioBridge.swift in Sources */,
@@ -361,6 +375,8 @@
 				110000000000000000000001 /* AdRemovalStorageTests.swift in Sources */,
 				111000000000000000000001 /* AdRemovalTranscriptionTests.swift in Sources */,
 				112000000000000000000001 /* AdRemovalClassificationTests.swift in Sources */,
+				114000000000000000000001 /* AdRemovalPlaybackTests.swift in Sources */,
+				115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

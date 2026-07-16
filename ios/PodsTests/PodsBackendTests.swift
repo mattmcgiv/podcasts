@@ -192,6 +192,128 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(invalidSettings.statusCode, 422)
     }
 
+    func testEpisodeAdRemovalStatePrepareAndRetryRoundTrip() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/ad-state.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Ad State",
+            items: [("Episode", "ad-state-1", "https://h.example/ad-state.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let recentResponse = try await call(harness.backend, "GET", "/api/recent")
+        let episode = try XCTUnwrap(try decode(Page<EpisodeItem>.self, from: recentResponse).items.first)
+        XCTAssertEqual(episode.ad_removal_state, "unfiltered")
+        XCTAssertEqual(episode.ad_removal_action, "prepare")
+
+        let prepared = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episode.id)/ad-removal/prepare"
+        )
+        XCTAssertEqual(prepared.statusCode, 202)
+        var detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "preparing")
+        XCTAssertNil(detail.ad_removal_action)
+
+        let store = AdRemovalJobStore(database: harness.database, retryBackoff: { _ in 0 })
+        let job = try XCTUnwrap(try store.job(episodeID: episode.id))
+        _ = try store.transition(jobID: job.id, to: .downloading)
+        for _ in 0..<3 {
+            _ = try store.recordFailure(jobID: job.id, errorCode: "test", message: "failed")
+        }
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "failed")
+        XCTAssertEqual(detail.ad_removal_action, "retry")
+
+        let retried = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episode.id)/ad-removal/retry"
+        )
+        XCTAssertEqual(retried.statusCode, 202)
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "preparing")
+        XCTAssertNil(detail.ad_removal_action)
+    }
+
+    func testAdRemovalEnableConsentCutoffAndNewEpisodeEnrollment() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/enrollment.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Enrollment",
+            items: [("Existing", "existing", "https://h.example/existing.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        var settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertFalse(settings.enabled)
+        XCTAssertNil(settings.enrollment_cutoff)
+        XCTAssertEqual(settings.model_revision, AdModelManifest.qwen35FourBitV1.revision)
+        XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen35FourBitV1.totalByteCount)
+
+        let wrongConsent = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": 1]
+        )
+        XCTAssertEqual(wrongConsent.statusCode, 422)
+
+        let enabled = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": AdModelManifest.qwen35FourBitV1.totalByteCount]
+        )
+        XCTAssertEqual(enabled.statusCode, 202)
+        settings = try decode(AdRemovalSettingsPayload.self, from: enabled)
+        XCTAssertTrue(settings.enabled)
+        XCTAssertNotNil(settings.enrollment_cutoff)
+        XCTAssertEqual(settings.model_download_state, "consented")
+
+        let existingID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'existing'"
+        ))
+        XCTAssertNil(try AdRemovalJobStore(database: harness.database).job(episodeID: existingID))
+
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Enrollment",
+            items: [
+                ("Existing", "existing", "https://h.example/existing.mp3", Self.d1),
+                ("New", "new", "https://h.example/new.mp3", Self.d2),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/refresh")
+        let newID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'new'"
+        ))
+        XCTAssertEqual(
+            try AdRemovalJobStore(database: harness.database).job(episodeID: newID)?.stage,
+            .queued
+        )
+
+        let disabled = try await call(harness.backend, "POST", "/api/ad-removal/disable")
+        XCTAssertEqual(disabled.statusCode, 200)
+        XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
+    }
+
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/ad-cleanup.xml"
@@ -667,6 +789,11 @@ final class PodsBackendTests: XCTestCase {
             allowRegress: false,
             strideSeconds: 5
         ))
+    }
+
+    func testFailedMacStreamReloadsOnlyAfterFailure() {
+        XCTAssertTrue(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: true))
+        XCTAssertFalse(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: false))
     }
 
     func testCastKeepAliveRunsOnlyWhileMacIsPreferredOutput() {

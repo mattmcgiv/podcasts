@@ -219,6 +219,15 @@ final class CastServer: ObservableObject {
     }
 
     private func handleMessage(_ body: [String: Any], from connection: NWConnection) {
+        guard CastProtocol.isSupported(body) else {
+            recordDiagnostic(eventName: "lan_protocol_rejected", severity: .warning)
+            send([
+                "v": CastProtocol.version,
+                "type": "error",
+                "message": "unsupported protocol version",
+            ], to: connection)
+            return
+        }
         if let cmd = body["cmd"] as? String {
             recordDiagnostic(
                 eventName: "lan_control_command",

@@ -63,6 +63,10 @@ export const Api = {
       method: "PUT",
       body: JSON.stringify({ seconds }),
     }),
+  prepareAdRemoval: (id: number) =>
+    request<{ stage: string }>(`/episodes/${id}/ad-removal/prepare`, { method: "POST" }),
+  retryAdRemoval: (id: number) =>
+    request<{ stage: string }>(`/episodes/${id}/ad-removal/retry`, { method: "POST" }),
   settings: () => request<Settings>("/settings"),
   saveSettings: (s: Settings) =>
     request<void>("/settings", { method: "PUT", body: JSON.stringify(s) }),

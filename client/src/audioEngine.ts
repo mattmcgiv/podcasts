@@ -10,10 +10,18 @@ export interface AudioEngine extends EventTarget {
   castConnect?(): void;
   castDisconnect?(): void;
   requestCastStatus?(): void;
+  undoAdSkip?(): void;
   play(): Promise<void>;
   pause(): void;
   load(): void;
   removeAttribute(name: string): void;
+}
+
+export interface AdSkipNotice {
+  rangeId: string;
+  rangeStart: number;
+  rangeEnd: number;
+  skippedDuration: number;
 }
 
 export interface AudioMetadata {
@@ -33,7 +41,16 @@ export interface CastInfo {
 
 type NativeAudioEvent = {
   id?: number;
-  type: "play" | "pause" | "timeupdate" | "loadedmetadata" | "ended" | "state" | "cast";
+  type:
+    | "play"
+    | "pause"
+    | "timeupdate"
+    | "loadedmetadata"
+    | "ended"
+    | "state"
+    | "cast"
+    | "adSkip"
+    | "adSkipUndone";
   position?: number;
   duration?: number;
   playbackRate?: number;
@@ -46,6 +63,10 @@ type NativeAudioEvent = {
   error?: string;
   output?: "local" | "mac";
   cast?: CastInfo;
+  rangeId?: string;
+  rangeStart?: number;
+  rangeEnd?: number;
+  skippedDuration?: number;
 };
 
 type NativeAudioCommandBody =
@@ -58,7 +79,8 @@ type NativeAudioCommandBody =
   | { command: "stop" }
   | { command: "castConnect" }
   | { command: "castDisconnect" }
-  | { command: "castStatus" };
+  | { command: "castStatus" }
+  | { command: "undoAdSkip" };
 
 type NativeAudioCommand = NativeAudioCommandBody & { id: number };
 
@@ -209,6 +231,10 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this.post({ command: "castStatus" });
   }
 
+  undoAdSkip(): void {
+    this.post({ command: "undoAdSkip" });
+  }
+
   receive(event: NativeAudioEvent): void {
     if (event.type === "cast") {
       const cast = event.cast ?? {
@@ -253,6 +279,20 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     }
     if (event.type === "play") this._paused = false;
     if (event.type === "pause" || event.type === "ended") this._paused = true;
+    if (event.type === "adSkip") {
+      const detail: AdSkipNotice = {
+        rangeId: event.rangeId ?? "",
+        rangeStart: event.rangeStart ?? 0,
+        rangeEnd: event.rangeEnd ?? 0,
+        skippedDuration: event.skippedDuration ?? 0,
+      };
+      if (detail.rangeId) this.dispatchEvent(new CustomEvent("adSkip", { detail }));
+      return;
+    }
+    if (event.type === "adSkipUndone") {
+      this.dispatchEvent(new CustomEvent("adSkipUndone"));
+      return;
+    }
     if (event.type !== "state") {
       this.dispatchEvent(new Event(event.type));
     }

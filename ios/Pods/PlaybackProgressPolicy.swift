@@ -67,6 +67,10 @@ enum PlaybackProgressPolicy {
         !(wasPlaying || pendingPlayAfterConnect)
     }
 
+    static func shouldReloadMacSource(sourceFailed: Bool) -> Bool {
+        sourceFailed
+    }
+
     /// Accept untagged transport/ended events; reject an explicit episode tag that does
     /// not match the currently loaded episode. Prevents a late Mac completion for episode
     /// N from mutating transport or auto-advancing after load has moved to N+1.

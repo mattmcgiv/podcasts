@@ -46,6 +46,15 @@ export function PlayerSheet() {
           <span>{p.duration > 0 ? `-${fmtTime(Math.max(0, p.duration - p.position))}` : "--:--"}</span>
         </div>
 
+        {p.pendingAdSkip && (
+          <div className="ad-skip-undo" role="status">
+            <span>Skipped {fmtTime(p.pendingAdSkip.skippedDuration)}</span>
+            <button type="button" onClick={p.undoAdSkip} aria-label="Undo skipped section">
+              Undo
+            </button>
+          </div>
+        )}
+
         <div className="controls-row">
           <button className="icon-btn skip" onClick={p.skipBack} aria-label="Back 15 seconds">
             <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>

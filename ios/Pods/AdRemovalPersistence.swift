@@ -720,6 +720,71 @@ final class AdRemovalJobStore {
         }
     }
 
+    func disableRangeAndAddCorrection(
+        episodeID: Int64,
+        rangeID: String
+    ) throws -> AdRemovalUndoResult {
+        try database.withTransaction {
+            guard let range = try skipRanges(episodeID: episodeID).first(where: {
+                $0.id == rangeID && !$0.disabled
+            }),
+            let job = try job(episodeID: episodeID) else {
+                throw AdRemovalJobStoreError.corruptState("enabled skip range not found")
+            }
+            let segments = try transcriptSegments(episodeID: episodeID)
+            guard let firstIndex = segments.firstIndex(where: { $0.id == range.startSegmentID }),
+                  let lastIndex = segments.firstIndex(where: { $0.id == range.endSegmentID }),
+                  firstIndex <= lastIndex else {
+                throw AdRemovalJobStoreError.corruptState("skip range transcript bounds not found")
+            }
+            let contextStart = max(0, firstIndex - 1)
+            let contextEnd = min(segments.count - 1, lastIndex + 1)
+            let contextSegments = Array(segments[contextStart...contextEnd])
+            let transcriptWindow = contextSegments.map {
+                "\($0.id) [\(String(format: "%.3f", $0.startTime))-\(String(format: "%.3f", $0.endTime))]: \($0.text)"
+            }.joined(separator: "\n")
+            let classificationContext = "range_id=\(range.id); start_segment=\(range.startSegmentID); end_segment=\(range.endSegmentID); confidence=\(range.confidence); reason=\(range.reason)"
+            let correction = AdCorrection(
+                id: UUID().uuidString.lowercased(),
+                podcastID: job.podcastID,
+                sourceEpisodeID: episodeID,
+                transcriptWindow: transcriptWindow,
+                classificationContext: classificationContext,
+                classifierVersion: range.classifierVersion,
+                promptVersion: range.promptVersion,
+                createdAt: now(),
+                active: true
+            )
+            try database.execute(
+                "UPDATE ad_skip_ranges SET disabled = 1 WHERE id = ? AND episode_id = ?",
+                [.text(range.id), .int(episodeID)]
+            )
+            try database.execute(
+                """
+                INSERT INTO ad_corrections
+                    (id, podcast_id, source_episode_id, transcript_window, classification_context,
+                     classifier_version, prompt_version, created_at, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                [
+                    .text(correction.id),
+                    .int(correction.podcastID),
+                    .int(correction.sourceEpisodeID),
+                    .text(correction.transcriptWindow),
+                    .text(correction.classificationContext),
+                    .text(correction.classifierVersion),
+                    .text(correction.promptVersion),
+                    .int(correction.createdAt)
+                ]
+            )
+            return AdRemovalUndoResult(
+                disabledRangeID: range.id,
+                seekPosition: range.startTime,
+                correction: correction
+            )
+        }
+    }
+
     func cleanupEpisode(episodeID: Int64) throws {
         try database.withTransaction {
             try Self.cleanupEpisodeMetadata(in: database, episodeID: episodeID, now: now())

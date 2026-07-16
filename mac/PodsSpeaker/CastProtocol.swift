@@ -4,7 +4,7 @@ import Foundation
 /// Protocol is newline-delimited JSON over TCP, discovered via Bonjour.
 enum CastProtocol {
     static let bonjourType = "_pods-speaker._tcp"
-    static let version = 1
+    static let version = 2
     static let tokenDefaultsKey = "pods.speaker.pairingToken"
     static let allowedTokensDefaultsKey = "pods.speaker.allowedTokens"
 
@@ -53,5 +53,17 @@ enum CastProtocol {
 
     static func normalizedRate(_ value: Float) -> Float {
         value.isFinite && value > 0 ? value : 1
+    }
+
+    static func isSupported(_ payload: [String: Any]) -> Bool {
+        let supplied: Int?
+        if let value = payload["v"] as? Int {
+            supplied = value
+        } else if let value = payload["v"] as? NSNumber {
+            supplied = value.intValue
+        } else {
+            supplied = nil
+        }
+        return supplied == version
     }
 }

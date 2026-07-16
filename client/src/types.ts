@@ -10,6 +10,8 @@ export interface EpisodeItem {
   image_url: string;
   position_secs: number;
   played_at: number | null;
+  ad_removal_state: "preparing" | "ad-free" | "unfiltered" | "failed";
+  ad_removal_action: "prepare" | "retry" | null;
 }
 
 export interface EpisodeDetail extends EpisodeItem {

@@ -8,6 +8,8 @@ import MediaPlayer
 /// callbacks are hopped to main — updating `@Published` off-main has crashed this app.
 @MainActor
 final class SpeakerPlayer: ObservableObject {
+    static let progressReportInterval: TimeInterval = 0.25
+
     var onEvent: (([String: Any]) -> Void)?
 
     @Published private(set) var isPlaying = false
@@ -42,6 +44,12 @@ final class SpeakerPlayer: ObservableObject {
             self,
             selector: #selector(itemEnded(_:)),
             name: .AVPlayerItemDidPlayToEndTime,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(itemStalled(_:)),
+            name: .AVPlayerItemPlaybackStalled,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -138,7 +146,7 @@ final class SpeakerPlayer: ObservableObject {
         recordDiagnostic(
             eventName: "mac_player_source_load",
             severity: .notice,
-            fields: ["request_url": url.absoluteString, "position": "\(max(0, position))"]
+            fields: ["source": Self.logSafeSource(url), "position": "\(max(0, position))"]
         )
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
@@ -276,7 +284,7 @@ final class SpeakerPlayer: ObservableObject {
         removeTimeObserver()
         observedPlayer = player
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+            forInterval: CMTime(seconds: Self.progressReportInterval, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
             Task { @MainActor [weak self] in
@@ -344,12 +352,38 @@ final class SpeakerPlayer: ObservableObject {
                 return
             }
             let message = failed.error?.localizedDescription ?? "playback failed"
+            self.player?.pause()
             self.publishUI(playing: false)
             self.updateNowPlaying(rate: 0, paused: true)
             self.emit([
                 "type": "error",
                 "message": message,
                 "position": self.player?.currentTime().seconds ?? 0,
+                "paused": true,
+            ])
+        }
+    }
+
+    @objc private func itemStalled(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let stalled = notification.object as? AVPlayerItem,
+                  stalled === self.player?.currentItem else {
+                return
+            }
+            let position = self.currentPositionSeconds
+            self.player?.pause()
+            self.publishUI(playing: false)
+            self.updateNowPlaying(position: position, rate: 0, paused: true)
+            self.recordDiagnostic(
+                eventName: "mac_stream_stalled",
+                severity: .warning,
+                fields: ["position": String(position)]
+            )
+            self.emit([
+                "type": "error",
+                "message": "iPhone audio stream stalled",
+                "position": position,
                 "paused": true,
             ])
         }
@@ -405,6 +439,15 @@ final class SpeakerPlayer: ObservableObject {
     private static func positiveDuration(_ value: Double?) -> Double? {
         guard let value, value.isFinite, value > 0 else { return nil }
         return value
+    }
+
+    private static func logSafeSource(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return "invalid"
+        }
+        components.query = nil
+        components.fragment = nil
+        return components.string ?? "invalid"
     }
 
     private func emit(_ fields: [String: Any]) {

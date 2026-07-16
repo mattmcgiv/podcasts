@@ -65,6 +65,8 @@ export function episode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
     image_url: "",
     position_secs: 0,
     played_at: null,
+    ad_removal_state: "unfiltered",
+    ad_removal_action: "prepare",
     ...overrides,
   };
 }

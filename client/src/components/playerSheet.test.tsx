@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PlayerProvider, usePlayer } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
 import { episode, installApi } from "../test/mockApi";
@@ -113,5 +113,30 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(FakeAudio.last().paused).toBe(true);
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Player" })).not.toBeInTheDocument();
+  });
+
+  it("shows one pending skipped-duration action and sends Undo to native playback", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    const audio = FakeAudio.last() as FakeAudio & { undoAdSkip?: () => void };
+    const undo = vi.fn();
+    audio.undoAdSkip = undo;
+
+    act(() => audio.dispatchEvent(new CustomEvent("adSkip", {
+      detail: {
+        rangeId: "range-1",
+        rangeStart: 10,
+        rangeEnd: 30,
+        skippedDuration: 20,
+      },
+    })));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Skipped 0:20");
+    await user.click(screen.getByRole("button", { name: "Undo skipped section" }));
+    expect(undo).toHaveBeenCalledOnce();
+
+    act(() => audio.dispatchEvent(new CustomEvent("adSkipUndone")));
+    expect(screen.queryByText("Skipped 0:20")).not.toBeInTheDocument();
   });
 });

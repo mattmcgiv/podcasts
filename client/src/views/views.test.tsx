@@ -147,6 +147,43 @@ describe("RecentView", () => {
     wrap(<RecentView />);
     await screen.findByText("db exploded");
   });
+
+  it("shows compact ad-removal state and prepares or retries without gating playback", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page([
+        episode({
+          id: 21,
+          title: "Needs preparation",
+          ad_removal_state: "unfiltered",
+          ad_removal_action: "prepare",
+        }),
+        episode({
+          id: 22,
+          title: "Failed preparation",
+          ad_removal_state: "failed",
+          ad_removal_action: "retry",
+        }),
+      ]),
+      "POST /api/episodes/21/ad-removal/prepare": { stage: "queued" },
+      "POST /api/episodes/22/ad-removal/retry": { stage: "downloading" },
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+
+    const prepareRow = (await screen.findByText("Needs preparation")).closest("li")!;
+    expect(within(prepareRow).getByText("Unfiltered")).toBeInTheDocument();
+    await user.click(within(prepareRow).getByRole("button", { name: "Prepare ad-free" }));
+    expect(within(prepareRow).getByText("Preparing")).toBeInTheDocument();
+
+    const retryRow = screen.getByText("Failed preparation").closest("li")!;
+    expect(within(retryRow).getByText("Failed")).toBeInTheDocument();
+    await user.click(within(retryRow).getByRole("button", { name: "Retry ad-free preparation" }));
+    expect(within(retryRow).getByText("Preparing")).toBeInTheDocument();
+
+    expect(calls.some((call) => call.key === "POST /api/episodes/21/ad-removal/prepare")).toBe(true);
+    expect(calls.some((call) => call.key === "POST /api/episodes/22/ad-removal/retry")).toBe(true);
+  });
 });
 
 describe("PlayedView", () => {

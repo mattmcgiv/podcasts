@@ -14,6 +14,8 @@ struct EpisodeItem: Codable, Equatable {
     let image_url: String
     let position_secs: Double
     let played_at: Int64?
+    let ad_removal_state: String
+    let ad_removal_action: String?
 }
 
 struct EpisodeDetail: Codable, Equatable {
@@ -30,6 +32,8 @@ struct EpisodeDetail: Codable, Equatable {
     let played_at: Int64?
     let notes_html: String
     let archived_at: Int64?
+    let ad_removal_state: String
+    let ad_removal_action: String?
 }
 
 struct Show: Codable, Equatable {
@@ -56,6 +60,26 @@ struct ShowDetail: Codable {
 struct SettingsPayload: Codable, Equatable {
     let speed: Double
     let autoplay: Bool
+}
+
+struct AdRemovalCorrectionCountPayload: Codable, Equatable {
+    let podcast_id: Int64
+    let podcast_title: String
+    let count: Int64
+}
+
+struct AdRemovalSettingsPayload: Codable, Equatable {
+    let enabled: Bool
+    let enrollment_cutoff: Int64?
+    let model_repository: String
+    let model_revision: String
+    let model_total_bytes: Int64
+    let model_downloaded_bytes: Int64
+    let model_download_state: String
+    let episode_storage_bytes: Int64
+    let episode_storage_limit_bytes: Int64
+    let device_available_bytes: Int64
+    let corrections: [AdRemovalCorrectionCountPayload]
 }
 
 struct DirectoryPodcast: Codable, Equatable {
