@@ -383,13 +383,16 @@ final class PodsBackend: PlaybackProgressRecording {
     private func setPlayed(id: Int64) throws {
         try episodeExists(id: id)
         let ts = nowUnix()
-        try database.execute(
-            """
-            INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT (episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at
-            """,
-            [.int(id), .int(ts), .int(ts)]
-        )
+        try database.withTransaction {
+            try database.execute(
+                """
+                INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT (episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at
+                """,
+                [.int(id), .int(ts), .int(ts)]
+            )
+            try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
+        }
     }
 
     private func clearPlayed(id: Int64) throws {

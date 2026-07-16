@@ -1,0 +1,308 @@
+import XCTest
+@testable import Pods
+
+final class AdRemovalPersistenceTests: XCTestCase {
+    private final class RecordingStageExecutor: AdRemovalStageExecuting {
+        private let store: AdRemovalJobStore
+        private(set) var executedStages: [AdRemovalJobStage] = []
+        private(set) var durableStagesSeen: [AdRemovalJobStage] = []
+
+        init(store: AdRemovalJobStore) {
+            self.store = store
+        }
+
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            executedStages.append(stage)
+            durableStagesSeen.append(try XCTUnwrap(store.job(id: job.id)?.stage))
+        }
+    }
+
+    private final class FailOnceStageExecutor: AdRemovalStageExecuting {
+        private(set) var calls = 0
+
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            calls += 1
+            if calls == 1 {
+                throw NSError(domain: "AdRemovalTest", code: 17, userInfo: [
+                    NSLocalizedDescriptionKey: "transient failure"
+                ])
+            }
+        }
+    }
+
+    private actor ConcurrencyProbeExecutor: AdRemovalStageExecuting {
+        private var activeCalls = 0
+        private(set) var maximumConcurrentCalls = 0
+
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            activeCalls += 1
+            maximumConcurrentCalls = max(maximumConcurrentCalls, activeCalls)
+
+            try await Task.sleep(nanoseconds: 100_000_000)
+
+            activeCalls -= 1
+        }
+    }
+
+    func testEnqueueAndStageTransitionsAreDurableIdempotentAndValidated() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        XCTAssertEqual(queued.stage, .queued)
+        XCTAssertNil(queued.blockingReason)
+        XCTAssertEqual(queued.attemptCount, 0)
+        XCTAssertEqual(queued.enrolledAt, 1_000)
+
+        let downloading = try store.transition(jobID: queued.id, to: .downloading)
+        XCTAssertEqual(downloading.stage, .downloading)
+        XCTAssertEqual(downloading.updatedAt, 1_000)
+
+        let idempotent = try store.transition(jobID: queued.id, to: .downloading)
+        XCTAssertEqual(idempotent, downloading)
+        XCTAssertThrowsError(try store.transition(jobID: queued.id, to: .ready))
+
+        let reopened = AdRemovalJobStore(database: harness.database, now: { 2_000 })
+        XCTAssertEqual(try reopened.job(id: queued.id), downloading)
+        XCTAssertEqual(try reopened.job(episodeID: harness.episodeID), downloading)
+    }
+
+    func testRunnableSelectionIsOldestUnplayedFirstAndHonorsBlockingReasons() throws {
+        let harness = try makeHarness()
+        let olderEpisodeID = try insertEpisode(
+            database: harness.database,
+            guid: "episode-older",
+            publishedAt: 50
+        )
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let newer = try store.enqueue(episodeID: harness.episodeID)
+        let older = try store.enqueue(episodeID: olderEpisodeID)
+
+        XCTAssertEqual(try store.nextRunnableJob()?.id, older.id)
+
+        let blocked = try store.setBlockingReason(jobID: older.id, reason: .lowPower)
+        XCTAssertEqual(blocked.stage, .queued)
+        XCTAssertEqual(blocked.blockingReason, .lowPower)
+        XCTAssertEqual(try store.nextRunnableJob()?.id, newer.id)
+
+        let unblocked = try store.setBlockingReason(jobID: older.id, reason: nil)
+        XCTAssertNil(unblocked.blockingReason)
+        XCTAssertEqual(try store.nextRunnableJob()?.id, older.id)
+    }
+
+    func testFailuresRetryThreeTimesWithStableMetadataAndResumeFailedStage() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(
+            database: harness.database,
+            now: { 1_000 },
+            retryBackoff: { _ in 30 }
+        )
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.transition(jobID: queued.id, to: .downloading)
+
+        let first = try store.recordFailure(
+            jobID: queued.id,
+            errorCode: "network_timeout",
+            message: "request timed out"
+        )
+        XCTAssertEqual(first.stage, .downloading)
+        XCTAssertEqual(first.failedStage, .downloading)
+        XCTAssertEqual(first.attemptCount, 1)
+        XCTAssertEqual(first.lastErrorCode, "network_timeout")
+        XCTAssertEqual(first.lastErrorMessage, "request timed out")
+        XCTAssertTrue(first.retryEligible)
+        XCTAssertEqual(first.nextRetryAt, 1_030)
+
+        let second = try store.recordFailure(jobID: queued.id, errorCode: "network_timeout", message: "again")
+        XCTAssertEqual(second.stage, .downloading)
+        XCTAssertEqual(second.attemptCount, 2)
+        XCTAssertTrue(second.retryEligible)
+
+        let exhausted = try store.recordFailure(jobID: queued.id, errorCode: "network_timeout", message: "final")
+        XCTAssertEqual(exhausted.stage, .failed)
+        XCTAssertEqual(exhausted.failedStage, .downloading)
+        XCTAssertEqual(exhausted.attemptCount, 3)
+        XCTAssertFalse(exhausted.retryEligible)
+        XCTAssertNil(exhausted.nextRetryAt)
+
+        let retried = try store.retry(jobID: queued.id)
+        XCTAssertEqual(retried.stage, .downloading)
+        XCTAssertNil(retried.failedStage)
+        XCTAssertEqual(retried.attemptCount, 0)
+        XCTAssertNil(retried.lastErrorCode)
+        XCTAssertNil(retried.lastErrorMessage)
+        XCTAssertTrue(retried.retryEligible)
+    }
+
+    func testEpisodeCleanupDeletesArtifactsButPreservesPodcastCorrectionsUntilUnsubscribe() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        _ = try store.enqueue(episodeID: harness.episodeID)
+        let segments = [
+            AdTranscriptSegment(
+                id: "segment-0",
+                index: 0,
+                language: "en",
+                startTime: 10,
+                endTime: 20,
+                text: "Buy this product"
+            )
+        ]
+        try store.replaceTranscriptSegments(episodeID: harness.episodeID, segments: segments)
+        let ranges = [
+            AdSkipRange(
+                id: "range-0",
+                startSegmentID: "segment-0",
+                endSegmentID: "segment-0",
+                startTime: 10,
+                endTime: 20,
+                confidence: 0.97,
+                reason: "host-read promotion",
+                classifierVersion: "qwen-test",
+                promptVersion: "prompt-1",
+                createdAt: 1_000,
+                disabled: false
+            )
+        ]
+        try store.replaceSkipRanges(episodeID: harness.episodeID, ranges: ranges)
+        let podcastID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT podcast_id FROM episodes WHERE id = ?",
+            [.int(harness.episodeID)]
+        ))
+        let correction = try store.addCorrection(
+            podcastID: podcastID,
+            sourceEpisodeID: harness.episodeID,
+            transcriptWindow: "This recurring segment is editorial content",
+            classificationContext: "window-3",
+            classifierVersion: "qwen-test",
+            promptVersion: "prompt-1"
+        )
+
+        XCTAssertEqual(try store.transcriptSegments(episodeID: harness.episodeID), segments)
+        XCTAssertEqual(try store.skipRanges(episodeID: harness.episodeID), ranges)
+        XCTAssertEqual(try store.corrections(podcastID: podcastID), [correction])
+
+        try store.cleanupEpisode(episodeID: harness.episodeID)
+
+        XCTAssertNil(try store.job(episodeID: harness.episodeID))
+        XCTAssertTrue(try store.transcriptSegments(episodeID: harness.episodeID).isEmpty)
+        XCTAssertTrue(try store.skipRanges(episodeID: harness.episodeID).isEmpty)
+        XCTAssertEqual(try store.corrections(podcastID: podcastID), [correction])
+
+        try store.cleanupPodcast(podcastID: podcastID)
+        XCTAssertTrue(try store.corrections(podcastID: podcastID).isEmpty)
+    }
+
+    func testCoordinatorCommitsEachStageBeforeExecutingAndReachesReady() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let executor = RecordingStageExecutor(store: store)
+        let coordinator = AdRemovalCoordinator(store: store, executor: executor)
+
+        let afterDownload = try await coordinator.runNextStage()
+        let afterTranscription = try await coordinator.runNextStage()
+        let afterClassification = try await coordinator.runNextStage()
+        XCTAssertEqual(afterDownload?.stage, .downloaded)
+        XCTAssertEqual(afterTranscription?.stage, .classifying)
+        XCTAssertEqual(afterClassification?.stage, .ready)
+
+        XCTAssertEqual(executor.executedStages, [.downloading, .transcribing, .classifying])
+        XCTAssertEqual(executor.durableStagesSeen, [.downloading, .transcribing, .classifying])
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
+        XCTAssertNil(try store.nextRunnableJob())
+    }
+
+    func testCoordinatorDoesNotRunAStageBeforeItsRetryBackoffExpires() async throws {
+        let harness = try makeHarness()
+        var clock: Int64 = 1_000
+        let store = AdRemovalJobStore(
+            database: harness.database,
+            now: { clock },
+            retryBackoff: { _ in 30 }
+        )
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let executor = FailOnceStageExecutor()
+        let coordinator = AdRemovalCoordinator(store: store, executor: executor)
+
+        let failedAttempt = try await coordinator.runNextStage()
+        XCTAssertEqual(failedAttempt?.stage, .downloading)
+        XCTAssertEqual(failedAttempt?.attemptCount, 1)
+        XCTAssertEqual(failedAttempt?.lastErrorCode, "AdRemovalTest.17")
+        XCTAssertEqual(failedAttempt?.nextRetryAt, 1_030)
+
+        let beforeBackoff = try await coordinator.runNextStage()
+        XCTAssertNil(beforeBackoff)
+        XCTAssertEqual(executor.calls, 1)
+
+        clock = 1_030
+        let retried = try await coordinator.runNextStage()
+        XCTAssertEqual(retried?.stage, .downloaded)
+        XCTAssertEqual(executor.calls, 2)
+        let persistedRetry = try store.job(id: queued.id)
+        XCTAssertEqual(persistedRetry?.attemptCount, 0)
+        XCTAssertNil(persistedRetry?.failedStage)
+        XCTAssertNil(persistedRetry?.lastErrorCode)
+        XCTAssertNil(persistedRetry?.lastErrorMessage)
+        XCTAssertNil(persistedRetry?.nextRetryAt)
+    }
+
+    func testCoordinatorRunsOnlyOneEpisodeStageAtATime() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        _ = try store.enqueue(episodeID: harness.episodeID)
+        let executor = ConcurrencyProbeExecutor()
+        let coordinator = AdRemovalCoordinator(store: store, executor: executor)
+
+        async let first = coordinator.runNextStage()
+        async let second = coordinator.runNextStage()
+        _ = try await (first, second)
+
+        let maximumConcurrentCalls = await executor.maximumConcurrentCalls
+        XCTAssertEqual(maximumConcurrentCalls, 1)
+    }
+
+    private struct Harness {
+        let database: PodsDatabase
+        let episodeID: Int64
+    }
+
+    private func makeHarness() throws -> Harness {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalPersistenceTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        try database.execute(
+            "INSERT INTO podcasts (feed_url, title, created_at) VALUES (?, ?, ?)",
+            [.text("https://example.com/feed"), .text("Example"), .int(1)]
+        )
+        let podcastID = database.lastInsertRowID()
+        try database.execute(
+            "INSERT INTO episodes (podcast_id, guid, title, audio_url, published_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                .int(podcastID),
+                .text("episode-1"),
+                .text("Episode"),
+                .text("https://example.com/episode.mp3"),
+                .int(100)
+            ]
+        )
+        return Harness(database: database, episodeID: database.lastInsertRowID())
+    }
+
+
+    private func insertEpisode(database: PodsDatabase, guid: String, publishedAt: Int64) throws -> Int64 {
+        let podcastID = try XCTUnwrap(database.scalarInt64("SELECT id FROM podcasts LIMIT 1"))
+        try database.execute(
+            "INSERT INTO episodes (podcast_id, guid, title, audio_url, published_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                .int(podcastID),
+                .text(guid),
+                .text(guid),
+                .text("https://example.com/\(guid).mp3"),
+                .int(publishedAt)
+            ]
+        )
+        return database.lastInsertRowID()
+    }
+}

@@ -47,6 +47,7 @@ final class PodsBackendTests: XCTestCase {
         let backend: PodsBackend
         let fetcher: MockFeedFetcher
         let directory: URL
+        let database: PodsDatabase
     }
 
     private func makeHarness(directorySearcher: PodcastDirectorySearching? = nil) throws -> Harness {
@@ -60,7 +61,7 @@ final class PodsBackendTests: XCTestCase {
             feedFetcher: fetcher,
             directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher()
         )
-        return Harness(backend: backend, fetcher: fetcher, directory: directory)
+        return Harness(backend: backend, fetcher: fetcher, directory: directory, database: database)
     }
 
     private func call(
@@ -178,6 +179,66 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(saved, SettingsPayload(speed: 2.5, autoplay: false))
         let invalidSettings = try await call(harness.backend, "PUT", "/api/settings", json: ["speed": 9.9, "autoplay": true])
         XCTAssertEqual(invalidSettings.statusCode, 422)
+    }
+
+    func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/ad-cleanup.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Cleanup Show",
+            items: [("Cleanup Episode", "cleanup-1", "https://h.example/cleanup.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let recentResponse = try await call(harness.backend, "GET", "/api/recent")
+        let recent = try decode(Page<EpisodeItem>.self, from: recentResponse)
+        let episode = try XCTUnwrap(recent.items.first)
+        let podcastID = episode.podcast_id
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        _ = try store.enqueue(episodeID: episode.id)
+        try store.replaceTranscriptSegments(episodeID: episode.id, segments: [
+            AdTranscriptSegment(
+                id: "segment-0",
+                index: 0,
+                language: "en",
+                startTime: 10,
+                endTime: 20,
+                text: "Advertisement"
+            )
+        ])
+        try store.replaceSkipRanges(episodeID: episode.id, ranges: [
+            AdSkipRange(
+                id: "range-0",
+                startSegmentID: "segment-0",
+                endSegmentID: "segment-0",
+                startTime: 10,
+                endTime: 20,
+                confidence: 0.99,
+                reason: "promotion",
+                classifierVersion: "test-model",
+                promptVersion: "test-prompt",
+                createdAt: 1_000,
+                disabled: false
+            )
+        ])
+        _ = try store.addCorrection(
+            podcastID: podcastID,
+            sourceEpisodeID: episode.id,
+            transcriptWindow: "Not an ad",
+            classificationContext: "undo",
+            classifierVersion: "test-model",
+            promptVersion: "test-prompt"
+        )
+
+        let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
+        XCTAssertEqual(played.statusCode, 204)
+        XCTAssertNil(try store.job(episodeID: episode.id))
+        XCTAssertTrue(try store.transcriptSegments(episodeID: episode.id).isEmpty)
+        XCTAssertTrue(try store.skipRanges(episodeID: episode.id).isEmpty)
+        XCTAssertEqual(try store.corrections(podcastID: podcastID).count, 1)
+
+        let unsubscribed = try await call(harness.backend, "DELETE", "/api/shows/\(podcastID)")
+        XCTAssertEqual(unsubscribed.statusCode, 204)
+        XCTAssertTrue(try store.corrections(podcastID: podcastID).isEmpty)
     }
 
     func testNativePlaybackProgressRecordingUpdatesEpisodePosition() async throws {

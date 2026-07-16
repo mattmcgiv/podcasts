@@ -31,6 +31,8 @@
 		10B000000000000000000001 /* PodsBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000011 /* PodsBackendTests.swift */; };
 		10E000000000000000000001 /* AdRemovalDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */; };
 		10E000000000000000000002 /* AdRemovalDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E000000000000000000012 /* AdRemovalDiagnostics.swift */; };
+		10F000000000000000000001 /* AdRemovalPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10F000000000000000000011 /* AdRemovalPersistenceTests.swift */; };
+		10F000000000000000000002 /* AdRemovalPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10F000000000000000000012 /* AdRemovalPersistence.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +73,8 @@
 		10B000000000000000000011 /* PodsBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsBackendTests.swift; sourceTree = "<group>"; };
 		10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalDiagnosticsTests.swift; sourceTree = "<group>"; };
 		10E000000000000000000012 /* AdRemovalDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AdRemovalDiagnostics.swift; path = ../../shared/AdRemovalDiagnostics.swift; sourceTree = "<group>"; };
+		10F000000000000000000011 /* AdRemovalPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPersistenceTests.swift; sourceTree = "<group>"; };
+		10F000000000000000000012 /* AdRemovalPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPersistence.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -106,6 +110,7 @@
 			isa = PBXGroup;
 			children = (
 				10E000000000000000000012 /* AdRemovalDiagnostics.swift */,
+				10F000000000000000000012 /* AdRemovalPersistence.swift */,
 				10A000000000000000000011 /* PodsApp.swift */,
 				10A000000000000000000012 /* PodsWebView.swift */,
 				10A000000000000000000013 /* AudioBridge.swift */,
@@ -153,6 +158,7 @@
 			children = (
 				10B000000000000000000011 /* PodsBackendTests.swift */,
 				10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */,
+				10F000000000000000000011 /* AdRemovalPersistenceTests.swift */,
 			);
 			path = PodsTests;
 			sourceTree = "<group>";
@@ -276,6 +282,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				10E000000000000000000002 /* AdRemovalDiagnostics.swift in Sources */,
+				10F000000000000000000002 /* AdRemovalPersistence.swift in Sources */,
 				10A000000000000000000001 /* PodsApp.swift in Sources */,
 				10A000000000000000000002 /* PodsWebView.swift in Sources */,
 				10A000000000000000000003 /* AudioBridge.swift in Sources */,
@@ -302,6 +309,7 @@
 			files = (
 				10B000000000000000000001 /* PodsBackendTests.swift in Sources */,
 				10E000000000000000000001 /* AdRemovalDiagnosticsTests.swift in Sources */,
+				10F000000000000000000001 /* AdRemovalPersistenceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

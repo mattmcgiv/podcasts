@@ -210,6 +210,74 @@ final class PodsDatabase {
         last_modified TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS ad_removal_jobs (
+        id TEXT PRIMARY KEY,
+        episode_id INTEGER NOT NULL UNIQUE REFERENCES episodes(id) ON DELETE CASCADE,
+        podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        blocking_reason TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        failed_stage TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        retry_eligible INTEGER NOT NULL DEFAULT 1,
+        next_retry_at INTEGER,
+        enrolled_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_removal_jobs_stage
+        ON ad_removal_jobs(stage, blocking_reason, enrolled_at);
+
+    CREATE TABLE IF NOT EXISTS ad_transcript_segments (
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        segment_id TEXT NOT NULL,
+        segment_index INTEGER NOT NULL,
+        language TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY (episode_id, segment_id),
+        UNIQUE (episode_id, segment_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS ad_skip_ranges (
+        id TEXT PRIMARY KEY,
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        start_segment_id TEXT NOT NULL,
+        end_segment_id TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        confidence REAL NOT NULL,
+        reason TEXT NOT NULL,
+        classifier_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (episode_id, start_segment_id)
+            REFERENCES ad_transcript_segments(episode_id, segment_id) ON DELETE CASCADE,
+        FOREIGN KEY (episode_id, end_segment_id)
+            REFERENCES ad_transcript_segments(episode_id, segment_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_skip_ranges_episode_time
+        ON ad_skip_ranges(episode_id, start_time, end_time);
+
+    CREATE TABLE IF NOT EXISTS ad_corrections (
+        id TEXT PRIMARY KEY,
+        podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+        source_episode_id INTEGER NOT NULL,
+        transcript_window TEXT NOT NULL,
+        classification_context TEXT NOT NULL,
+        classifier_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_corrections_podcast_active
+        ON ad_corrections(podcast_id, active, created_at);
+
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);
     """
 }
