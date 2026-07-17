@@ -399,13 +399,13 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertFalse(settings.enabled)
         XCTAssertNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_revision, AdModelManifest.qwen35FourBitV1.revision)
-        XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen35FourBitV1.totalByteCount)
+        XCTAssertEqual(settings.model_revision, AdModelManifest.qwen3OneSevenBFourBitV1.revision)
+        XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount)
         XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
 
         try harness.database.execute(
             "INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'ready'), ('ad_removal_model_downloaded_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [.text(String(AdModelManifest.qwen35FourBitV1.totalByteCount))]
+            [.text(String(AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount))]
         )
         settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
             harness.backend,
@@ -432,7 +432,7 @@ final class PodsBackendTests: XCTestCase {
             harness.backend,
             "POST",
             "/api/ad-removal/enable",
-            json: ["confirmed_bytes": AdModelManifest.qwen35FourBitV1.totalByteCount]
+            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
         )
         XCTAssertEqual(enabled.statusCode, 202)
         settings = try decode(AdRemovalSettingsPayload.self, from: enabled)
@@ -482,7 +482,7 @@ final class PodsBackendTests: XCTestCase {
         pipelineRequested.expectedFulfillmentCount = 2
         let runtimeStopped = expectation(description: "runtime stopped")
         harness.backend.setAdRemovalModelDownloadRequestHandler { manifest in
-            XCTAssertEqual(manifest, .qwen35FourBitV1)
+            XCTAssertEqual(manifest, .qwen3OneSevenBFourBitV1)
             modelRequested.fulfill()
         }
         harness.backend.setAdRemovalRunRequestHandler {
@@ -496,7 +496,7 @@ final class PodsBackendTests: XCTestCase {
             harness.backend,
             "POST",
             "/api/ad-removal/enable",
-            json: ["confirmed_bytes": AdModelManifest.qwen35FourBitV1.totalByteCount]
+            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
         )
         _ = try await call(
             harness.backend,

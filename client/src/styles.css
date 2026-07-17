@@ -286,6 +286,33 @@ input {
   color: var(--danger, #ff7b72);
 }
 
+.ad-classification-progress {
+  display: block;
+  width: min(180px, 72%);
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.ad-classification-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0.72;
+  transition: width 420ms ease;
+  animation: ad-progress-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes ad-progress-breathe {
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ad-classification-progress > span { animation: none; }
+}
+
 .ad-removal-error {
   font-size: 11px;
   line-height: 1.25;
@@ -721,6 +748,34 @@ input[type="search"]::-webkit-search-cancel-button {
   justify-content: center;
   gap: 34px;
   margin: 18px 0 6px;
+}
+
+.stream-initializing {
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+}
+
+.stream-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: stream-pulse 1.15s ease-in-out infinite;
+}
+
+@keyframes stream-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50% { opacity: 0.95; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-pulse { animation: none; opacity: 0.75; }
 }
 
 .skip {

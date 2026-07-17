@@ -149,18 +149,20 @@ state.
 
 ### Initial model
 
-- The first implementation uses Qwen3.5-4B through MLX Swift with a 4-bit MLX
-  conversion behind an `AdClassifier` interface.
-- Qwen3.5-4B is a candidate, not a permanent product dependency. Accuracy and
-  device stability determine whether it remains selected.
+- The classifier uses Qwen3-1.7B through MLX Swift with the official 4-bit MLX
+  conversion behind an `AdClassifier` interface. It replaced Qwen3.5-4B after
+  that model exceeded the iPhone's per-process memory limit during inference.
 - The initial configuration is text-only, vision disabled, non-thinking mode,
   and an 8,192-token maximum context.
-- The current `mlx-community/Qwen3.5-4B-MLX-4bit` repository is approximately
-  3.06 GB decimal (2.85 GiB) including tokenizer and configuration files.
+- Classification windows contain at most eight transcript segments with two
+  segments of overlap, and generation is capped at 384 output tokens to bound
+  the phone's inference-time memory peak.
+- The pinned `Qwen/Qwen3-1.7B-MLX-4bit` artifact is approximately 930 MB decimal
+  including tokenizer and configuration files.
 - Transcription assets and the classifier are not deliberately kept resident at
   the same time.
-- A smaller Qwen3.5 model is evaluated only if 4B fails memory, thermal, latency,
-  or reliability gates. There is no broad pre-v1 model bakeoff.
+- A smaller model remains the fallback if Qwen3-1.7B fails memory, thermal,
+  latency, reliability, or golden-corpus accuracy gates.
 
 ### Input and output contract
 

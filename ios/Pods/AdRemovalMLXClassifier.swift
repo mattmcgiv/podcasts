@@ -15,7 +15,7 @@ final class MLXQwenAdClassifier: AdClassifier {
 
     init(
         assetStore: AdModelAssetStore,
-        manifest: AdModelManifest = .qwen35FourBitV1,
+        manifest: AdModelManifest = .qwen3OneSevenBFourBitV1,
         diagnostics: AdRemovalDiagnostics? = nil
     ) {
         self.assetStore = assetStore
@@ -27,7 +27,7 @@ final class MLXQwenAdClassifier: AdClassifier {
             quantization: "4-bit",
             promptRevision: "ad-classifier-v1",
             maximumContextTokens: 8_192,
-            maximumOutputTokens: 1_024,
+            maximumOutputTokens: 384,
             temperature: 0,
             topP: 1
         )

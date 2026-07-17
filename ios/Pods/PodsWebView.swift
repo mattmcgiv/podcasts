@@ -168,7 +168,7 @@ struct PodsWebView: UIViewControllerRepresentable {
 }
 
 final class PodsWebViewController: UIViewController {
-    private static let localRootURL = URL(string: "http://127.0.0.1:18180/")!
+    private static let localRootURL = URL(string: "http://127.0.0.1:18180/?ui=progress-v1")!
     private static let retiredRemoteHost = "pods.mcgiv.dev"
 
     private var webView: WKWebView!

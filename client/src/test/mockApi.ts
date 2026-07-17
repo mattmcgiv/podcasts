@@ -75,6 +75,8 @@ export function episode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
     ad_removal_action: "prepare",
     ad_removal_stage: null,
     ad_removal_blocking_reason: null,
+    ad_removal_completed_windows: null,
+    ad_removal_total_windows: null,
     ...overrides,
   };
 }
@@ -85,6 +87,7 @@ export function adRemovalSettings(
   return {
     enabled: false,
     enrollment_cutoff: null,
+    cloud_classifier_configured: false,
     model_repository: "",
     model_revision: "",
     model_total_bytes: 3_060_000_000,
@@ -112,6 +115,8 @@ export function adRemovalStatusItem(
     ad_removal_action: "prepare",
     ad_removal_stage: null,
     ad_removal_blocking_reason: null,
+    ad_removal_completed_windows: null,
+    ad_removal_total_windows: null,
     ...overrides,
   };
 }

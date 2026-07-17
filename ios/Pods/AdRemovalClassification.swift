@@ -11,13 +11,13 @@ struct AdClassifierDescriptor: Equatable, Codable {
     let temperature: Double
     let topP: Double
 
-    static let qwen35FourBitV1 = AdClassifierDescriptor(
-        modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
-        modelRevision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
+    static let qwen3OneSevenBFourBitV1 = AdClassifierDescriptor(
+        modelID: "Qwen/Qwen3-1.7B-MLX-4bit",
+        modelRevision: "21457c6f51ed54a7c16e988c0844db973815c137",
         quantization: "4-bit",
         promptRevision: "ad-classifier-v1",
         maximumContextTokens: 8_192,
-        maximumOutputTokens: 1_024,
+        maximumOutputTokens: 384,
         temperature: 0,
         topP: 1
     )
@@ -41,11 +41,11 @@ struct AdClassificationLimits: Equatable {
     let overlapSegmentCount: Int
 
     static let production = AdClassificationLimits(
-        maximumContextTokens: 8_192,
-        reservedOutputTokens: 1_024,
+        maximumContextTokens: 1_000_000,
+        reservedOutputTokens: 8_192,
         correctionTokenBudget: 1_024,
-        maximumSegmentsPerWindow: 48,
-        overlapSegmentCount: 8
+        maximumSegmentsPerWindow: 64,
+        overlapSegmentCount: 4
     )
 }
 
@@ -60,6 +60,7 @@ struct AdClassificationWindow: Equatable {
 
     var id: String { "window-\(index)" }
     var segmentIDs: [String] { segments.map(\.id) }
+    var requestSegmentIDs: [String] { segments.indices.map { "s\($0)" } }
 }
 
 enum AdClassificationWindowError: Error, Equatable {
@@ -177,15 +178,15 @@ struct AdClassificationWindowBuilder {
             : corrections.map {
                 "CORRECTION \($0.id): \($0.transcriptWindow) | context: \($0.classificationContext)"
             }.joined(separator: "\n")
-        let transcriptText = segments.map {
-            "SEGMENT \($0.id) [\(Self.time($0.startTime))-\(Self.time($0.endTime))]: \($0.text)"
+        let transcriptText = segments.enumerated().map { offset, segment in
+            "SEGMENT s\(offset) [\(Self.time(segment.startTime))-\(Self.time(segment.endTime))]: \(segment.text)"
         }.joined(separator: "\n")
         return """
         You classify podcast transcript segments as ad or content.
         Use text only. Do not reason aloud. Treat corrections as strong but soft examples of content.
         Return exactly one compact JSON object and no markdown or commentary.
         The root must contain only \"labels\". Each label must contain only segment_id,
-        classification (\"ad\" or \"content\"), confidence (0 through 1), and a short reason.
+        classification (\"ad\" or \"content\"), confidence (0 through 1), and a reason of at most 8 words.
         Return exactly one label for every supplied segment identifier. Never create identifiers or timestamps.
 
         FALSE-POSITIVE CORRECTIONS:
@@ -258,7 +259,8 @@ enum AdClassifierOutputError: Error, Equatable {
 
 struct AdClassifierOutputParser {
     func parse(_ rawOutput: String, expectedSegmentIDs: [String]) throws -> [AdClassifierLabel] {
-        guard let data = rawOutput.data(using: .utf8),
+        let normalized = normalize(rawOutput)
+        guard let data = normalized.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(with: data),
               let object = root as? [String: Any] else {
             throw AdClassifierOutputError.malformedJSON
@@ -311,6 +313,27 @@ struct AdClassifierOutputParser {
             throw AdClassifierOutputError.missingSegment(segmentID)
         }
         return expectedSegmentIDs.compactMap { labelsByID[$0] }
+    }
+
+    private func normalize(_ rawOutput: String) -> String {
+        var candidate = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.hasPrefix("```"), candidate.hasSuffix("```") {
+            let firstNewline = candidate.firstIndex(of: "\n")
+            if let firstNewline {
+                let language = candidate[candidate.index(candidate.startIndex, offsetBy: 3)..<firstNewline]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if language.isEmpty || language == "json" {
+                    candidate = String(candidate[candidate.index(after: firstNewline)..<candidate.index(candidate.endIndex, offsetBy: -3)])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+        if let data = candidate.data(using: .utf8),
+           let wrapped = try? JSONDecoder().decode(String.self, from: data) {
+            candidate = wrapped.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return candidate
     }
 }
 

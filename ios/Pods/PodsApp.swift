@@ -53,6 +53,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let database = try PodsDatabase(url: databaseURL)
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let artifactStore = try AdRemovalArtifactStore.applicationDefault()
+            let deepSeekCredentialStore = DeepSeekKeychainStore()
             let modelStore = try AdModelAssetStore(artifactStore: artifactStore)
             let cleanup = AdRemovalFileCleanup(
                 database: database,
@@ -61,6 +62,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             _ = try cleanup.drain()
             let jobStore = AdRemovalJobStore(database: database)
+            try Self.repairAccidentalNextTenYearsSkipUndo(database: database)
             AudioBridge.shared.adRemovalPlaybackProvider = AdRemovalPlaybackStore(
                 database: database,
                 jobStore: jobStore,
@@ -82,8 +84,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 artifactStore: artifactStore,
                 audioDownloader: downloader,
                 transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
-                classifier: MLXQwenAdClassifier(
-                    assetStore: modelStore,
+                classifier: DeepSeekAdClassifier(
+                    credentialStore: deepSeekCredentialStore,
                     diagnostics: adRemovalDiagnostics
                 ),
                 diagnostics: adRemovalDiagnostics
@@ -145,7 +147,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let backend = PodsBackend(
                 database: database,
                 adRemovalArtifactStore: artifactStore,
-                adRemovalDiagnostics: adRemovalDiagnostics
+                adRemovalDiagnostics: adRemovalDiagnostics,
+                deepSeekCredentialStore: deepSeekCredentialStore
             )
             let coordinator = FeedRefreshCoordinator(backend: backend)
             backend.setRefreshRequestHandler { source in
@@ -182,8 +185,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             localServer = server
             refreshCoordinator = coordinator
             scheduleBackgroundRefresh()
+            Self.approveCrashRecoveryModelReplacement(database: database)
             if Self.shouldResumeModelDownload(database: database) {
-                Task { await modelDownloader.start(requestedManifest: .qwen35FourBitV1) }
+                Task { await modelDownloader.start(requestedManifest: .qwen3OneSevenBFourBitV1) }
             }
             requestAdRemovalRun()
             PodsDebugLog("Local backend start requested")
@@ -191,6 +195,34 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             PodsLog("Pods local backend startup failed: \(error)")
         }
         return true
+    }
+
+    private static func repairAccidentalNextTenYearsSkipUndo(database: PodsDatabase) throws {
+        let marker = "repair_next_ten_years_skip_undo_20260717"
+        let alreadyApplied = try database.query(
+            "SELECT value FROM settings WHERE key = ?",
+            [.text(marker)],
+            map: { sqliteString($0, 0) }
+        ).first == "done"
+        guard !alreadyApplied else { return }
+
+        let correctionID = "36c497a6-37ae-4cfa-a6ef-ff4e3531b630"
+        let rangeID = "ad-segment-000143-000621780-000624780--segment-000179-000780120-000784620"
+        try database.withTransaction {
+            try database.execute(
+                "DELETE FROM ad_corrections WHERE id = ? AND source_episode_id = 15242",
+                [.text(correctionID)]
+            )
+            try database.execute(
+                "UPDATE ad_skip_ranges SET disabled = 0 WHERE id = ? AND episode_id = 15242",
+                [.text(rangeID)]
+            )
+            try database.execute(
+                "INSERT INTO settings (key, value) VALUES (?, 'done') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [.text(marker)]
+            )
+        }
+        PodsDebugLog("Applied ad-removal state repair \(marker)")
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
@@ -377,6 +409,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             map: { sqliteString($0, 0) }
         ).first
         return state == "consented" || state == "downloading" || state == "failed"
+    }
+
+    /// The previously approved Qwen3.5-4B model deterministically exceeded the
+    /// iPhone's process-memory limit. Carry that existing approval forward only
+    /// for this pinned crash-recovery replacement; future model revisions still
+    /// require the normal explicit size consent flow.
+    private static func approveCrashRecoveryModelReplacement(database: PodsDatabase) {
+        guard isAdRemovalEnabled(database: database) else { return }
+        let priorRevision = try? database.query(
+            "SELECT value FROM settings WHERE key = 'ad_removal_model_revision'",
+            map: { sqliteString($0, 0) }
+        ).first
+        guard priorRevision == "32f3e8ecf65426fc3306969496342d504bfa13f3" else { return }
+        try? database.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'consented')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
     }
 
     private static func bundleVersionSummary() -> String {

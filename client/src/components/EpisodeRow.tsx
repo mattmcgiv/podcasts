@@ -76,6 +76,12 @@ export function EpisodeRow({
   const effectiveStage = localAd ? localAd.stage : item.ad_removal_stage;
   const effectiveBlocking = localAd ? localAd.blocking : item.ad_removal_blocking_reason;
   const effectiveAction = localAd ? localAd.action : item.ad_removal_action;
+  const adWindowProgress =
+    effectiveStage === "classifying" &&
+    item.ad_removal_total_windows != null &&
+    item.ad_removal_total_windows > 0
+      ? Math.min(1, (item.ad_removal_completed_windows ?? 0) / item.ad_removal_total_windows)
+      : null;
 
   async function runAdRemovalAction() {
     const action = effectiveAction;
@@ -122,6 +128,18 @@ export function EpisodeRow({
           <span className={`ad-removal-state is-${effectiveState}`}>
             {adStageLabel(effectiveState, effectiveStage, effectiveBlocking)}
           </span>
+          {adWindowProgress != null && (
+            <span
+              className="ad-classification-progress"
+              role="progressbar"
+              aria-label="Finding ads progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(adWindowProgress * 100)}
+            >
+              <span style={{ width: `${Math.max(4, adWindowProgress * 100)}%` }} />
+            </span>
+          )}
           {adError && <span className="ad-removal-error">{adError}</span>}
           {progress > 0 && !item.played_at && (
             <span className="row-progress" role="progressbar" aria-valuenow={Math.round(progress * 100)}>

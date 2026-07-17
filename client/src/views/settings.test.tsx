@@ -8,6 +8,7 @@ import { SettingsSheet } from "./SettingsSheet";
 const adRemovalSettings = {
   enabled: false,
   enrollment_cutoff: null,
+  cloud_classifier_configured: false,
   model_repository: "mlx-community/Qwen3.5-4B-MLX-4bit",
   model_revision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
   model_total_bytes: 3_061_129_077,
@@ -19,7 +20,26 @@ const adRemovalSettings = {
   corrections: [{ podcast_id: 7, podcast_title: "Example Show", count: 3 }],
 };
 
+
 describe("SettingsSheet", () => {
+  it("saves the DeepSeek API key without rendering it back", async () => {
+    const { calls } = installApi({
+      "GET /api/ad-removal/settings": adRemovalSettings,
+      "PUT /api/ad-removal/deepseek-key": { ...adRemovalSettings, cloud_classifier_configured: true },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    const input = await screen.findByLabelText("DeepSeek API key");
+    await user.type(input, "ds-test-secret");
+    await user.click(screen.getByRole("button", { name: "Save DeepSeek API key" }));
+
+    await screen.findByText("DeepSeek API key saved in iPhone Keychain");
+    expect(screen.queryByDisplayValue("ds-test-secret")).not.toBeInTheDocument();
+    const call = calls.find((item) => item.key === "PUT /api/ad-removal/deepseek-key");
+    expect(JSON.parse(String(call?.init.body))).toEqual({ api_key: "ds-test-secret" });
+  });
+
   it("shows the most recent native automatic refresh", async () => {
     installApi({
       "GET /api/refresh-status": {
@@ -115,43 +135,34 @@ describe("SettingsSheet", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("shows exact model consent and enables Wi-Fi-only ad removal", async () => {
+  it("enables cloud ad removal after the API key is configured", async () => {
     const { calls } = installApi({
-      "GET /api/ad-removal/settings": adRemovalSettings,
+      "GET /api/ad-removal/settings": { ...adRemovalSettings, cloud_classifier_configured: true },
       "POST /api/ad-removal/enable": {
         ...adRemovalSettings,
         enabled: true,
         enrollment_cutoff: 1_784_100_000,
-        model_download_state: "downloading",
+        cloud_classifier_configured: true,
+        model_download_state: "ready",
       },
     });
     const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
 
     expect(await screen.findByText("Ad removal")).toBeInTheDocument();
-    const enable = screen.getByRole("button", { name: "Enable and download 3.06 GB" });
+    const enable = screen.getByRole("button", { name: "Enable ad removal" });
     await user.click(enable);
 
-    await screen.findByText(/Model download: Downloading/);
+    await screen.findByText(/Cloud classifier: Configured/);
     const call = calls.find((item) => item.key === "POST /api/ad-removal/enable");
     expect(JSON.parse(String(call?.init.body))).toEqual({ confirmed_bytes: 3_061_129_077 });
-    expect(screen.getByText(/Wi-Fi only/)).toBeInTheDocument();
+    expect(screen.getByText(/Transcript windows are sent to DeepSeek/)).toBeInTheDocument();
   });
 
-  it("allows an enabled feature to retry a failed pinned model download", async () => {
-    const failed = { ...adRemovalSettings, enabled: true, model_download_state: "failed" };
-    const { calls } = installApi({
-      "GET /api/ad-removal/settings": failed,
-      "POST /api/ad-removal/enable": { ...failed, model_download_state: "downloading" },
-    });
-    const user = userEvent.setup();
+  it("keeps enable disabled until a DeepSeek API key is configured", async () => {
+    installApi({ "GET /api/ad-removal/settings": adRemovalSettings });
     render(<SettingsSheet onClose={() => {}} />);
-
-    await user.click(await screen.findByRole("button", { name: "Retry 3.06 GB model download" }));
-
-    await screen.findByText(/Model download: Downloading/);
-    const call = calls.find((item) => item.key === "POST /api/ad-removal/enable");
-    expect(JSON.parse(String(call?.init.body))).toEqual({ confirmed_bytes: 3_061_129_077 });
+    expect(await screen.findByRole("button", { name: "Enable ad removal" })).toBeDisabled();
   });
 
   it("shows storage and correction controls and runs destructive actions explicitly", async () => {

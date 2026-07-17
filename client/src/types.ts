@@ -33,6 +33,8 @@ export interface EpisodeItem {
   ad_removal_stage: AdRemovalStage | null;
   /** Why an active stage is paused/waiting. Null when not blocked. */
   ad_removal_blocking_reason: AdRemovalBlockingReason | null;
+  ad_removal_completed_windows?: number | null;
+  ad_removal_total_windows?: number | null;
 }
 
 export interface EpisodeDetail extends EpisodeItem {
@@ -85,6 +87,7 @@ export interface AdRemovalCorrectionCount {
 export interface AdRemovalSettings {
   enabled: boolean;
   enrollment_cutoff: number | null;
+  cloud_classifier_configured: boolean;
   model_repository: string;
   model_revision: string;
   model_total_bytes: number;
@@ -120,6 +123,8 @@ export interface AdRemovalStatusItem {
   ad_removal_action: EpisodeItem["ad_removal_action"];
   ad_removal_stage: EpisodeItem["ad_removal_stage"];
   ad_removal_blocking_reason: EpisodeItem["ad_removal_blocking_reason"];
+  ad_removal_completed_windows: number | null;
+  ad_removal_total_windows: number | null;
 }
 
 export interface AdRemovalStatusesPayload {

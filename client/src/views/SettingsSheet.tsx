@@ -8,13 +8,6 @@ function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
 }
 
-function modelStateLabel(state: string): string {
-  return state
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 function formatRefreshStatus(refreshStatus: RefreshStatus): string {
   if (refreshStatus.last_success_at == null) {
     return "No successful feed refresh yet.";
@@ -35,6 +28,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
+  const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -133,6 +127,16 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
+  async function saveDeepSeekApiKey() {
+    const apiKey = deepSeekApiKey.trim();
+    if (!apiKey) return;
+    await run("Saving DeepSeek API key", async () => {
+      setAdRemoval(await Api.saveDeepSeekApiKey(apiKey));
+      setDeepSeekApiKey("");
+      return "DeepSeek API key saved in iPhone Keychain";
+    });
+  }
+
   async function disableAdRemoval() {
     await run("Disabling ad removal", async () => {
       setAdRemoval(await Api.disableAdRemoval());
@@ -195,30 +199,32 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           <section className="ad-removal-settings" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
-              On-device transcript classification. The {formatGB(adRemoval.model_total_bytes)} model downloads
-              over Wi-Fi only.
+              Transcript windows are sent to DeepSeek V4 Pro for classification. Audio stays on this iPhone.
             </p>
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="DeepSeek API key"
+              placeholder={adRemoval.cloud_classifier_configured ? "DeepSeek API key saved" : "DeepSeek API key"}
+              value={deepSeekApiKey}
+              onChange={(event) => setDeepSeekApiKey(event.target.value)}
+            />
+            <button className="ghost-btn" disabled={!deepSeekApiKey.trim()} onClick={() => void saveDeepSeekApiKey()}>
+              Save DeepSeek API key
+            </button>
             {adRemoval.enabled ? (
               <>
                 <button className="ghost-btn" onClick={() => void disableAdRemoval()}>
                   Disable ad removal
                 </button>
-                {(adRemoval.model_download_state === "failed"
-                  || adRemoval.model_download_state === "not_downloaded") && (
-                  <button className="ghost-btn" onClick={() => void enableAdRemoval()}>
-                    Retry {formatGB(adRemoval.model_total_bytes)} model download
-                  </button>
-                )}
               </>
             ) : (
-              <button className="ghost-btn" onClick={() => void enableAdRemoval()}>
-                Enable and download {formatGB(adRemoval.model_total_bytes)}
+              <button className="ghost-btn" disabled={!adRemoval.cloud_classifier_configured} onClick={() => void enableAdRemoval()}>
+                Enable ad removal
               </button>
             )}
             <p className="settings-detail">
-              Model download: {modelStateLabel(adRemoval.model_download_state)} ·{" "}
-              {formatGB(Math.min(adRemoval.model_downloaded_bytes, adRemoval.model_total_bytes))} of{" "}
-              {formatGB(adRemoval.model_total_bytes)}
+              Cloud classifier: {adRemoval.cloud_classifier_configured ? "Configured" : "API key required"}
             </p>
             <p className="settings-detail settings-revision">
               Revision {adRemoval.model_revision}

@@ -46,6 +46,13 @@ export function PlayerSheet() {
           <span>{p.duration > 0 ? `-${fmtTime(Math.max(0, p.duration - p.position))}` : "--:--"}</span>
         </div>
 
+        {p.initializing && (
+          <div className="stream-initializing" role="status" aria-label="Loading audio">
+            <span className="stream-pulse" aria-hidden />
+            <span>Loading audio</span>
+          </div>
+        )}
+
         {p.pendingAdSkip && (
           <div className="ad-skip-undo" role="status">
             <span>Skipped {fmtTime(p.pendingAdSkip.skippedDuration)}</span>

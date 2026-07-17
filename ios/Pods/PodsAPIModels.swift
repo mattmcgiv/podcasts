@@ -76,6 +76,8 @@ struct AdRemovalStatusItem: Codable, Equatable {
     let ad_removal_action: String?
     let ad_removal_stage: String?
     let ad_removal_blocking_reason: String?
+    let ad_removal_completed_windows: Int64?
+    let ad_removal_total_windows: Int64?
 }
 
 struct AdRemovalStatusesPayload: Codable, Equatable {
@@ -91,6 +93,7 @@ struct AdRemovalCorrectionCountPayload: Codable, Equatable {
 struct AdRemovalSettingsPayload: Codable, Equatable {
     let enabled: Bool
     let enrollment_cutoff: Int64?
+    let cloud_classifier_configured: Bool
     let model_repository: String
     let model_revision: String
     let model_total_bytes: Int64

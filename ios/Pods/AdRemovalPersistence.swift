@@ -96,7 +96,9 @@ final class AdRemovalJobStore {
     init(
         database: PodsDatabase,
         now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970) },
-        retryBackoff: @escaping (Int) -> Int64 = { attempt in Int64(30 * (1 << max(0, attempt - 1))) }
+        retryBackoff: @escaping (Int) -> Int64 = { attempt in
+            [2, 5, 15][min(max(attempt - 1, 0), 2)]
+        }
     ) {
         self.database = database
         self.now = now
@@ -209,7 +211,7 @@ final class AdRemovalJobStore {
     }
 
     func clearTransientPolicyBlockingReasons() throws {
-        try clearBlockingReasons([.lowPower, .thermalPressure, .playbackActive])
+        try clearBlockingReasons([.storageLimit, .lowPower, .thermalPressure, .playbackActive])
     }
 
     func clearBlockingReasons(_ reasons: Set<AdRemovalBlockingReason>) throws {
@@ -307,6 +309,29 @@ final class AdRemovalJobStore {
         ).first
     }
 
+    func earliestRetryAt() throws -> Int64? {
+        try database.scalarInt64(
+            """
+            SELECT MIN(j.next_retry_at)
+            FROM ad_removal_jobs j
+            JOIN episodes e ON e.id = j.episode_id
+            LEFT JOIN episode_state s ON s.episode_id = e.id
+            WHERE j.blocking_reason IS NULL
+              AND j.retry_eligible = 1
+              AND j.next_retry_at IS NOT NULL
+              AND j.stage IN (?, ?, ?, ?, ?)
+              AND s.played_at IS NULL
+            """,
+            [
+                .text(AdRemovalJobStage.queued.rawValue),
+                .text(AdRemovalJobStage.downloading.rawValue),
+                .text(AdRemovalJobStage.downloaded.rawValue),
+                .text(AdRemovalJobStage.transcribing.rawValue),
+                .text(AdRemovalJobStage.classifying.rawValue)
+            ]
+        )
+    }
+
     func recordFailure(jobID: String, errorCode: String, message: String) throws -> AdRemovalJob {
         try database.withTransaction {
             let current = try requiredJob(id: jobID)
@@ -316,7 +341,7 @@ final class AdRemovalJobStore {
                 throw AdRemovalJobStoreError.invalidTransition(from: current.stage, to: .failed)
             }
             let attempt = current.attemptCount + 1
-            let exhausted = attempt >= 3
+            let exhausted = attempt >= 4
             let timestamp = now()
             try database.execute(
                 """
@@ -1139,19 +1164,27 @@ actor AdRemovalPipelineScheduler {
     private let isEnabled: () async -> Bool
     private let conditions: () async -> AdRemovalRuntimeConditions
     private let diagnostics: AdRemovalDiagnostics?
+    private let now: () -> Int64
+    private let sleep: (UInt64) async throws -> Void
 
     init(
         store: AdRemovalJobStore,
         coordinator: AdRemovalCoordinator,
         isEnabled: @escaping () async -> Bool = { true },
         conditions: @escaping () async -> AdRemovalRuntimeConditions,
-        diagnostics: AdRemovalDiagnostics? = nil
+        diagnostics: AdRemovalDiagnostics? = nil,
+        now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970) },
+        sleep: @escaping (UInt64) async throws -> Void = { seconds in
+            try await Task.sleep(for: .seconds(seconds))
+        }
     ) {
         self.store = store
         self.coordinator = coordinator
         self.isEnabled = isEnabled
         self.conditions = conditions
         self.diagnostics = diagnostics
+        self.now = now
+        self.sleep = sleep
     }
 
     func runUntilIdle(maximumStageCount: Int = 100) async {
@@ -1159,10 +1192,23 @@ actor AdRemovalPipelineScheduler {
         do {
             try store.clearTransientPolicyBlockingReasons()
             for _ in 0..<maximumStageCount {
-                guard let next = try store.nextRunnableJob(),
-                      let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else {
-                    return
+                guard let next = try store.nextRunnableJob() else {
+                    guard let deadline = try store.earliestRetryAt() else { return }
+                    let delay = UInt64(max(0, deadline - now()))
+                    try? diagnostics?.record(
+                        eventName: "retry_scheduled",
+                        severity: .info,
+                        fields: ["delay_seconds": String(delay), "deadline": String(deadline)]
+                    )
+                    try await sleep(delay)
+                    try? diagnostics?.record(
+                        eventName: "retry_awakened",
+                        severity: .info,
+                        fields: ["deadline": String(deadline)]
+                    )
+                    continue
                 }
+                guard let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else { return }
                 if let reason = AdRemovalSchedulingPolicy.blockingReason(
                     for: stage,
                     conditions: await conditions()

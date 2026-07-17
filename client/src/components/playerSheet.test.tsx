@@ -40,6 +40,15 @@ function setup() {
 }
 
 describe("PlayerSheet + MiniPlayer", () => {
+  it("shows a minimal indicator while the audio stream initializes", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+
+    expect(await screen.findByRole("status", { name: "Loading audio" })).toBeInTheDocument();
+    act(() => FakeAudio.last().emitLoadedMetadata(600));
+    expect(screen.queryByRole("status", { name: "Loading audio" })).not.toBeInTheDocument();
+  });
+
   it("opens expanded with controls, collapses to the mini player, re-expands", async () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));
@@ -132,7 +141,7 @@ describe("PlayerSheet + MiniPlayer", () => {
       },
     })));
 
-    expect(screen.getByRole("status")).toHaveTextContent("Skipped 0:20");
+    expect(screen.getByText("Skipped 0:20")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo skipped section" }));
     expect(undo).toHaveBeenCalledOnce();
 

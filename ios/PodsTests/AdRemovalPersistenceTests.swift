@@ -159,12 +159,11 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertTrue(columns.contains("downloaded_at"))
     }
 
-    func testFailuresRetryThreeTimesWithStableMetadataAndResumeFailedStage() throws {
+    func testFailuresRetryFourTimesWithStableMetadataAndResumeFailedStage() throws {
         let harness = try makeHarness()
         let store = AdRemovalJobStore(
             database: harness.database,
-            now: { 1_000 },
-            retryBackoff: { _ in 30 }
+            now: { 1_000 }
         )
         let queued = try store.enqueue(episodeID: harness.episodeID)
         _ = try store.transition(jobID: queued.id, to: .downloading)
@@ -180,17 +179,24 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(first.lastErrorCode, "network_timeout")
         XCTAssertEqual(first.lastErrorMessage, "request timed out")
         XCTAssertTrue(first.retryEligible)
-        XCTAssertEqual(first.nextRetryAt, 1_030)
+        XCTAssertEqual(first.nextRetryAt, 1_002)
 
         let second = try store.recordFailure(jobID: queued.id, errorCode: "network_timeout", message: "again")
         XCTAssertEqual(second.stage, .downloading)
         XCTAssertEqual(second.attemptCount, 2)
         XCTAssertTrue(second.retryEligible)
+        XCTAssertEqual(second.nextRetryAt, 1_005)
+
+        let third = try store.recordFailure(jobID: queued.id, errorCode: "network_timeout", message: "third")
+        XCTAssertEqual(third.stage, .downloading)
+        XCTAssertEqual(third.attemptCount, 3)
+        XCTAssertTrue(third.retryEligible)
+        XCTAssertEqual(third.nextRetryAt, 1_015)
 
         let exhausted = try store.recordFailure(jobID: queued.id, errorCode: "network_timeout", message: "final")
         XCTAssertEqual(exhausted.stage, .failed)
         XCTAssertEqual(exhausted.failedStage, .downloading)
-        XCTAssertEqual(exhausted.attemptCount, 3)
+        XCTAssertEqual(exhausted.attemptCount, 4)
         XCTAssertFalse(exhausted.retryEligible)
         XCTAssertNil(exhausted.nextRetryAt)
 
@@ -201,6 +207,32 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertNil(retried.lastErrorCode)
         XCTAssertNil(retried.lastErrorMessage)
         XCTAssertTrue(retried.retryEligible)
+    }
+
+    func testSchedulerWaitsForRetryDeadlineAndRunsWithoutAnotherTrigger() async throws {
+        let harness = try makeHarness()
+        var clock: Int64 = 1_000
+        let store = AdRemovalJobStore(database: harness.database, now: { clock })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.transition(jobID: queued.id, to: .downloading)
+        _ = try store.recordFailure(jobID: queued.id, errorCode: "temporary", message: "retry")
+        let executor = RecordingStageExecutor(store: store)
+        var slept: [UInt64] = []
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false) },
+            now: { clock },
+            sleep: { seconds in
+                slept.append(seconds)
+                clock += Int64(seconds)
+            }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(slept, [2])
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
     }
 
     func testEpisodeCleanupDeletesArtifactsButPreservesPodcastCorrectionsUntilUnsubscribe() throws {

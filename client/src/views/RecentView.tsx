@@ -50,6 +50,8 @@ function applyStatus(item: EpisodeItem, status: AdRemovalStatusItem): EpisodeIte
     ad_removal_action: status.ad_removal_action,
     ad_removal_stage: status.ad_removal_stage,
     ad_removal_blocking_reason: status.ad_removal_blocking_reason,
+    ad_removal_completed_windows: status.ad_removal_completed_windows,
+    ad_removal_total_windows: status.ad_removal_total_windows,
   };
 }
 
@@ -248,6 +250,8 @@ export function RecentView() {
           ad_removal_stage: stage,
           ad_removal_action: null,
           ad_removal_blocking_reason: null,
+          ad_removal_completed_windows: null,
+          ad_removal_total_windows: null,
         },
       ]);
     },

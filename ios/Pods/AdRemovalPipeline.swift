@@ -91,78 +91,27 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
             let runID = UUID().uuidString.lowercased()
             var evidence: [AdClassificationEvidence] = []
             do {
-                for window in windows {
-                    try Task.checkCancellation()
-                    let rawOutput = try await classifier.classify(window: window)
-                    let labels: [AdClassifierLabel]
-                    do {
-                        labels = try classifierOutputParser.parse(
-                            rawOutput,
-                            expectedSegmentIDs: window.segmentIDs
-                        )
-                    } catch {
-                        let invalidRecord = AdClassificationEvidence(
-                            runID: runID,
-                            episodeID: job.episodeID,
-                            windowIndex: window.index,
-                            segmentIDs: window.segmentIDs,
-                            correctionIDs: window.corrections.map(\.id),
-                            prompt: window.prompt,
-                            rawOutput: rawOutput,
-                            schemaValid: false,
-                            validationError: String(describing: error),
-                            labels: [],
-                            descriptor: classifier.descriptor,
-                            createdAt: Int64(Date().timeIntervalSince1970)
-                        )
-                        try jobStore.recordClassificationEvidence(invalidRecord)
-                        evidence.append(invalidRecord)
-                        saveClassificationSnapshot(
-                            job: job,
-                            segments: segments,
-                            windows: windows,
-                            evidence: evidence,
-                            ranges: []
-                        )
-                        recordClassificationEvent(
-                            "classifier_output_rejected",
-                            severity: .warning,
-                            job: job,
-                            fields: [
-                                "window_id": window.id,
-                                "validation_error": String(describing: error)
-                            ]
-                        )
-                        throw error
+                for batchStart in stride(from: 0, to: windows.count, by: 4) {
+                    let batch = Array(windows[batchStart..<min(batchStart + 4, windows.count)])
+                    let records = try await withThrowingTaskGroup(of: AdClassificationEvidence.self) { group in
+                        for window in batch {
+                            group.addTask { [self] in
+                                try await classifyCloudWindow(
+                                    window,
+                                    classifier: classifier,
+                                    job: job,
+                                    runID: runID
+                                )
+                            }
+                        }
+                        var completed: [AdClassificationEvidence] = []
+                        for try await record in group { completed.append(record) }
+                        return completed.sorted { $0.windowIndex < $1.windowIndex }
                     }
-                    let record = AdClassificationEvidence(
-                        runID: runID,
-                        episodeID: job.episodeID,
-                        windowIndex: window.index,
-                        segmentIDs: window.segmentIDs,
-                        correctionIDs: window.corrections.map(\.id),
-                        prompt: window.prompt,
-                        rawOutput: rawOutput,
-                        schemaValid: true,
-                        validationError: nil,
-                        labels: labels,
-                        descriptor: classifier.descriptor,
-                        createdAt: Int64(Date().timeIntervalSince1970)
-                    )
-                    try jobStore.recordClassificationEvidence(record)
-                    evidence.append(record)
-                    let adCount = labels.filter { $0.classification == .advertisement }.count
-                    recordClassificationEvent(
-                        "classifier_output_validated",
-                        severity: .info,
-                        job: job,
-                        fields: [
-                            "window_id": window.id,
-                            "label_count": String(labels.count),
-                            "ad_label_count": String(adCount),
-                            "content_label_count": String(labels.count - adCount)
-                        ]
-                    )
+                    for record in records {
+                        try jobStore.recordClassificationEvidence(record)
+                        evidence.append(record)
+                    }
                 }
                 let ranges = try manifestBuilder.makeRanges(
                     segments: segments,
@@ -201,6 +150,74 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
         case .queued, .downloaded, .ready, .failed, .cancelled:
             throw AdRemovalPipelineError.unsupportedStage(stage)
         }
+    }
+
+    private func classifyCloudWindow(
+        _ window: AdClassificationWindow,
+        classifier: AdClassifier,
+        job: AdRemovalJob,
+        runID: String
+    ) async throws -> AdClassificationEvidence {
+        let delays: [UInt64] = [2, 5, 15]
+        for attempt in 0...delays.count {
+            try Task.checkCancellation()
+            do {
+                let rawOutput = try await classifier.classify(window: window)
+                let requestLabels = try classifierOutputParser.parse(
+                    rawOutput,
+                    expectedSegmentIDs: window.requestSegmentIDs
+                )
+                let labels = requestLabels.enumerated().map { offset, label in
+                    AdClassifierLabel(
+                        segmentID: window.segmentIDs[offset],
+                        classification: label.classification,
+                        confidence: label.confidence,
+                        reason: label.reason
+                    )
+                }
+                let adCount = labels.filter { $0.classification == .advertisement }.count
+                recordClassificationEvent(
+                    "classifier_output_validated",
+                    severity: .info,
+                    job: job,
+                    fields: [
+                        "window_id": window.id,
+                        "window_attempt": String(attempt + 1),
+                        "label_count": String(labels.count),
+                        "ad_label_count": String(adCount),
+                        "content_label_count": String(labels.count - adCount)
+                    ]
+                )
+                return AdClassificationEvidence(
+                    runID: runID,
+                    episodeID: job.episodeID,
+                    windowIndex: window.index,
+                    segmentIDs: window.segmentIDs,
+                    correctionIDs: window.corrections.map(\.id),
+                    prompt: window.prompt,
+                    rawOutput: rawOutput,
+                    schemaValid: true,
+                    validationError: nil,
+                    labels: labels,
+                    descriptor: classifier.descriptor,
+                    createdAt: Int64(Date().timeIntervalSince1970)
+                )
+            } catch {
+                recordClassificationEvent(
+                    "classifier_window_retry",
+                    severity: attempt < delays.count ? .warning : .error,
+                    job: job,
+                    fields: [
+                        "window_id": window.id,
+                        "window_attempt": String(attempt + 1),
+                        "error": String(describing: error)
+                    ]
+                )
+                guard attempt < delays.count else { throw error }
+                try await Task.sleep(for: .seconds(delays[attempt]))
+            }
+        }
+        throw CancellationError()
     }
 
     private func saveClassificationSnapshot(

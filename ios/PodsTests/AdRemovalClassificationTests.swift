@@ -4,6 +4,67 @@ import XCTest
 @testable import Pods
 
 final class AdRemovalClassificationTests: XCTestCase {
+    func testDeepSeekClassifierPausesWhenAPIKeyIsMissing() async throws {
+        let transport = DeepSeekAdClassifier.Transport { _ in
+            XCTFail("Transport should not run without an API key")
+            throw DeepSeekClassifierError.invalidResponse
+        }
+        let classifier = DeepSeekAdClassifier(apiKey: "   ", transport: transport)
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: [],
+            corrections: [],
+            prompt: "classify this",
+            estimatedInputTokens: 3,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 8_000
+        )
+
+        do {
+            _ = try await classifier.classify(window: window)
+            XCTFail("Expected the classifier to pause")
+        } catch let pause as AdRemovalPipelinePause {
+            XCTAssertEqual(pause.reason, .modelRequired)
+        }
+    }
+
+    func testDeepSeekClassifierSendsNonThinkingJSONRequestAndReturnsMessageContent() async throws {
+        var captured: URLRequest?
+        let transport = DeepSeekAdClassifier.Transport { request in
+            captured = request
+            let body = #"{"choices":[{"message":{"content":"{\"labels\":[]}"}}]}"#
+            return (Data(body.utf8), HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!)
+        }
+        let classifier = DeepSeekAdClassifier(apiKey: "secret-test-key", transport: transport)
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: [],
+            corrections: [],
+            prompt: "classify this",
+            estimatedInputTokens: 3,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 8_000
+        )
+
+        let output = try await classifier.classify(window: window)
+
+        XCTAssertEqual(output, #"{"labels":[]}"#)
+        XCTAssertEqual(captured?.url?.absoluteString, "https://api.deepseek.com/chat/completions")
+        XCTAssertEqual(captured?.value(forHTTPHeaderField: "Authorization"), "Bearer secret-test-key")
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(captured?.httpBody)) as? [String: Any]
+        )
+        XCTAssertEqual(json["model"] as? String, "deepseek-v4-pro")
+        XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
+        XCTAssertEqual((json["response_format"] as? [String: String])?["type"], "json_object")
+        XCTAssertEqual(json["max_tokens"] as? Int, 8_192)
+    }
+
     private final class UnusedDownloader: AdRemovalAudioDownloading {
         func download(job: AdRemovalJob, sourceURL: URL) async throws -> AdRemovalAudioArtifact {
             throw AdRemovalPipelineError.unsupportedStage(.downloading)
@@ -72,6 +133,29 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertTrue(windows.allSatisfy { $0.estimatedInputTokens <= $0.maximumInputTokens })
     }
 
+    func testProductionWindowUsesCloudSizedBatchAndShortRequestIDs() throws {
+        let segments = (0..<70).map { index in
+            AdTranscriptSegment(
+                id: "segment-canonical-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: "Podcast transcript \(index)"
+            )
+        }
+
+        let windows = try AdClassificationWindowBuilder(limits: .production)
+            .makeWindows(segments: segments, corrections: [])
+
+        XCTAssertEqual(windows.first?.segments.count, 64)
+        XCTAssertEqual(windows.first?.requestSegmentIDs.first, "s0")
+        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s63")
+        XCTAssertTrue(windows.first?.prompt.contains("SEGMENT s0 ") == true)
+        XCTAssertFalse(windows.first?.prompt.contains("SEGMENT segment-canonical-0 ") == true)
+        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-60")
+    }
+
     func testCorrectionSelectionIsRelevantNewestFirstAndBounded() throws {
         let segments = [
             AdTranscriptSegment(
@@ -104,6 +188,7 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertLessThanOrEqual(window.estimatedCorrectionTokens, 90)
         XCTAssertTrue(window.prompt.contains("new-relevant"))
         XCTAssertFalse(window.prompt.contains("irrelevant"))
+        XCTAssertTrue(window.prompt.contains("at most 8 words"))
     }
 
     func testStructuredOutputParserAcceptsOnlyCompleteKnownSegmentLabels() throws {
@@ -129,11 +214,26 @@ final class AdRemovalClassificationTests: XCTestCase {
         ])
     }
 
+    func testStructuredOutputParserAcceptsOneOuterJSONFenceOrJSONStringWrapper() throws {
+        let parser = AdClassifierOutputParser()
+        let json = #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":0.91,"reason":"editorial discussion"}]}"#
+
+        let fenced = try parser.parse("```json\n\(json)\n```", expectedSegmentIDs: ["segment-0"])
+        let wrappedData = try JSONEncoder().encode(json)
+        let wrapped = try parser.parse(
+            try XCTUnwrap(String(data: wrappedData, encoding: .utf8)),
+            expectedSegmentIDs: ["segment-0"]
+        )
+
+        XCTAssertEqual(fenced, wrapped)
+        XCTAssertEqual(fenced.first?.segmentID, "segment-0")
+    }
+
     func testStructuredOutputParserRejectsMalformedInventedAndIncompleteOutput() {
         let parser = AdClassifierOutputParser()
         let expectedIDs = ["segment-0", "segment-1"]
         let cases = [
-            "```json\n{\"labels\":[]}\n```",
+            "Here is the JSON: {\"labels\":[]}",
             #"{"labels":[{"segment_id":"invented","classification":"ad","confidence":0.9,"reason":"ad"}]}"#,
             #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":0.9,"reason":"content"}]}"#,
             #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":1.1,"reason":"content"},{"segment_id":"segment-1","classification":"ad","confidence":0.9,"reason":"ad"}]}"#,
@@ -238,13 +338,13 @@ final class AdRemovalClassificationTests: XCTestCase {
     }
 
     func testPinnedQwenManifestHasExactRevisionChecksumsAndConsentSize() {
-        let manifest = AdModelManifest.qwen35FourBitV1
+        let manifest = AdModelManifest.qwen3OneSevenBFourBitV1
 
-        XCTAssertEqual(AdClassifierDescriptor.qwen35FourBitV1.modelRevision, manifest.revision)
-        XCTAssertEqual(manifest.repository, "mlx-community/Qwen3.5-4B-MLX-4bit")
+        XCTAssertEqual(AdClassifierDescriptor.qwen3OneSevenBFourBitV1.modelRevision, manifest.revision)
+        XCTAssertEqual(manifest.repository, "Qwen/Qwen3-1.7B-MLX-4bit")
         XCTAssertEqual(manifest.revision, "32f3e8ecf65426fc3306969496342d504bfa13f3")
         XCTAssertEqual(manifest.files.count, 10)
-        XCTAssertEqual(manifest.totalByteCount, 3_061_129_077)
+        XCTAssertEqual(manifest.totalByteCount, 930_246_470)
         XCTAssertTrue(manifest.files.allSatisfy { file in
             file.sha256.count == 64 && file.byteCount > 0 && !file.relativePath.contains("..")
         })
@@ -389,12 +489,12 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertFalse(configuration.allowsExpensiveNetworkAccess)
         XCTAssertFalse(configuration.allowsConstrainedNetworkAccess)
         XCTAssertThrowsError(try AdModelDownloadPolicy.authorize(
-            manifest: .qwen35FourBitV1,
+            manifest: .qwen3OneSevenBFourBitV1,
             confirmedByteCount: 3_061_129_076
         ))
         XCTAssertNoThrow(try AdModelDownloadPolicy.authorize(
-            manifest: .qwen35FourBitV1,
-            confirmedByteCount: 3_061_129_077
+            manifest: .qwen3OneSevenBFourBitV1,
+            confirmedByteCount: 930_246_470
         ))
     }
 
@@ -423,16 +523,16 @@ final class AdRemovalClassificationTests: XCTestCase {
     }
 
     func testPinnedQwenDownloadURLAllowsRepositoryComponentPeriod() throws {
-        let file = AdModelManifest.qwen35FourBitV1.files[0]
+        let file = AdModelManifest.qwen3OneSevenBFourBitV1.files[0]
 
         let url = try AdModelDownloadPolicy.remoteURL(
             for: file,
-            manifest: .qwen35FourBitV1
+            manifest: .qwen3OneSevenBFourBitV1
         )
 
         XCTAssertEqual(
             url.absoluteString,
-            "https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-4bit/resolve/32f3e8ecf65426fc3306969496342d504bfa13f3/chat_template.jinja?download=true"
+            "https://huggingface.co/Qwen/Qwen3-1.7B-MLX-4bit/resolve/21457c6f51ed54a7c16e988c0844db973815c137/config.json?download=true"
         )
     }
 
@@ -543,15 +643,15 @@ final class AdRemovalClassificationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AdRemovalMLXTests-\(UUID().uuidString)", isDirectory: true)
         let store = try AdModelAssetStore(rootURL: directory)
-        let classifier = MLXQwenAdClassifier(assetStore: store, manifest: .qwen35FourBitV1)
+        let classifier = MLXQwenAdClassifier(assetStore: store, manifest: .qwen3OneSevenBFourBitV1)
 
         XCTAssertEqual(classifier.descriptor, AdClassifierDescriptor(
-            modelID: "mlx-community/Qwen3.5-4B-MLX-4bit",
+            modelID: "Qwen/Qwen3-1.7B-MLX-4bit",
             modelRevision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
             quantization: "4-bit",
             promptRevision: "ad-classifier-v1",
             maximumContextTokens: 8_192,
-            maximumOutputTokens: 1_024,
+            maximumOutputTokens: 384,
             temperature: 0,
             topP: 1
         ))

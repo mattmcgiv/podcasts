@@ -25,6 +25,7 @@ export type PlayerEpisode = EpisodeItem & { notes_html?: string };
 export interface PlayerApi {
   current: PlayerEpisode | null;
   playing: boolean;
+  initializing: boolean;
   expanded: boolean;
   position: number;
   duration: number;
@@ -57,6 +58,7 @@ export function usePlayer(): PlayerApi {
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [current, setCurrent] = useState<PlayerEpisode | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [initializing, setInitializing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -94,6 +96,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
     setCurrent(null);
     setPlaying(false);
+    setInitializing(false);
     setExpanded(false);
     setPosition(0);
     setDuration(0);
@@ -116,6 +119,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setPosition(item.position_secs);
       setDuration(item.duration_secs ?? 0);
       setPendingAdSkip(null);
+      setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
       resumeAtRef.current = a.loadSource ? 0 : resumeAt;
       const metadata = audioMetadata(item);
@@ -126,7 +130,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         a.src = item.audio_url;
       }
-      void a.play().catch(() => setPlaying(false));
+      void a.play().catch(() => {
+        setPlaying(false);
+        setInitializing(false);
+      });
       updateMediaSessionMetadata(metadata);
       // Upgrade to the full detail (show notes) in the background.
       void Api.episode(item.id)
@@ -188,10 +195,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (Number.isFinite(a.duration) && a.duration > 0) setDuration(a.duration);
     };
     a.addEventListener("timeupdate", () => {
+      setInitializing(false);
       setPosition(a.currentTime);
       adoptDuration();
     });
     a.addEventListener("loadedmetadata", () => {
+      setInitializing(false);
       adoptDuration();
       if (resumeAtRef.current > 0) {
         a.currentTime = resumeAtRef.current;
@@ -200,6 +209,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.playbackRate = speedRef.current;
     });
     a.addEventListener("ended", () => void endedRef.current());
+    a.addEventListener("error", () => setInitializing(false));
     a.addEventListener("cast", ((e: Event) => {
       const detail = (e as CustomEvent<CastInfo>).detail;
       if (detail) setCast(detail);
@@ -333,6 +343,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     () => ({
       current,
       playing,
+      initializing,
       expanded,
       position,
       duration,
@@ -356,6 +367,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [
       current,
       playing,
+      initializing,
       expanded,
       position,
       duration,

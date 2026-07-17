@@ -16,59 +16,44 @@ struct AdModelManifest: Equatable, Codable {
         files.reduce(0) { $0 + $1.byteCount }
     }
 
-    static let qwen35FourBitV1 = AdModelManifest(
-        repository: "mlx-community/Qwen3.5-4B-MLX-4bit",
-        revision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
+    static let qwen3OneSevenBFourBitV1 = AdModelManifest(
+        repository: "Qwen/Qwen3-1.7B-MLX-4bit",
+        revision: "21457c6f51ed54a7c16e988c0844db973815c137",
         files: [
             AdModelFile(
-                relativePath: "chat_template.jinja",
-                byteCount: 7_756,
-                sha256: "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+                relativePath: "config.json",
+                byteCount: 988,
+                sha256: "4e95bb0b083bf4847aacc08e67c5d59410f45fff6f43889d6ff400511c243fa5"
             ),
             AdModelFile(
-                relativePath: "config.json",
-                byteCount: 3_366,
-                sha256: "f3efc81b2ea8d96a45301037d3ccccbcccdef44a961845c87f286aaddbc6eaaa"
+                relativePath: "merges.txt",
+                byteCount: 1_671_853,
+                sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
             ),
             AdModelFile(
                 relativePath: "model.safetensors",
-                byteCount: 3_034_300_695,
-                sha256: "5fb9acd0246866381cf8c5c354c6db1019f6498eec4ccb4f5edcc71ffeacb2db"
+                byteCount: 914_316_100,
+                sha256: "42e688d626b3e144bf721af7517a82f3ea7e97bb5764fef1c89942bf9165072a"
             ),
             AdModelFile(
                 relativePath: "model.safetensors.index.json",
-                byteCount: 101_944,
-                sha256: "52e534c41f7b97708329c85f762e5882bf48bd5955a422c6ae74eba321e6048a"
-            ),
-            AdModelFile(
-                relativePath: "preprocessor_config.json",
-                byteCount: 390,
-                sha256: "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
-            ),
-            AdModelFile(
-                relativePath: "processor_config.json",
-                byteCount: 1_300,
-                sha256: "14932921ca485d458a04dafd8069fbb0a4505622a48208d19ed247115801385b"
+                byteCount: 49_731,
+                sha256: "dae65ea418d2d8ea25e72d0b1f5b1d0a12633c1f46ca2c5ca97903bbcc3a6ce2"
             ),
             AdModelFile(
                 relativePath: "tokenizer.json",
-                byteCount: 19_989_343,
-                sha256: "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
+                byteCount: 11_422_654,
+                sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
             ),
             AdModelFile(
                 relativePath: "tokenizer_config.json",
-                byteCount: 1_139,
-                sha256: "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182"
-            ),
-            AdModelFile(
-                relativePath: "video_preprocessor_config.json",
-                byteCount: 385,
-                sha256: "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+                byteCount: 8_311,
+                sha256: "5fdfe1416aaa323832d52c5bd8624a6e9bba3e9acc6ca8104f017abc775e2368"
             ),
             AdModelFile(
                 relativePath: "vocab.json",
-                byteCount: 6_722_759,
-                sha256: "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+                byteCount: 2_776_833,
+                sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
             )
         ]
     )
@@ -401,7 +386,7 @@ final class AdModelBackgroundDownloader: NSObject {
     init(
         database: PodsDatabase,
         assetStore: AdModelAssetStore,
-        manifest: AdModelManifest = .qwen35FourBitV1,
+        manifest: AdModelManifest = .qwen3OneSevenBFourBitV1,
         diagnostics: AdRemovalDiagnostics? = nil
     ) {
         self.database = database
