@@ -4,9 +4,6 @@ import { fmtDate, fmtRemaining, progressFraction } from "../lib";
 import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
 
-/** Bounded interval for polling an episode's ad-removal progress while nonterminal. */
-export const AD_POLL_INTERVAL_MS = 8_000;
-
 interface Props {
   item: EpisodeItem;
   onPlay: (item: EpisodeItem) => void;
@@ -16,6 +13,34 @@ interface Props {
   actionDone?: boolean;
   actionIcon?: "check" | "plus";
   showPodcast?: boolean;
+  /** Notified after a user-initiated prepare/retry succeeds with the backend's
+   * returned stage, so the owning view can merge it into row state immediately
+   * and invalidate any in-flight batch status poll. */
+  onAdRemovalStage?: (id: number, stage: AdRemovalStage) => void;
+}
+
+/** Small optimistic overlay derived from a returned prepare/retry stage. Used
+ * only by non-Listen owners that do not pass `onAdRemovalStage`; it carries no
+ * requests and is reset whenever authoritative ad-removal props change. */
+interface LocalAdStatus {
+  state: EpisodeItem["ad_removal_state"];
+  stage: AdRemovalStage | null;
+  blocking: AdRemovalBlockingReason | null;
+  action: EpisodeItem["ad_removal_action"];
+}
+
+function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
+  switch (stage) {
+    case "ready":
+      return "ad-free";
+    case "failed":
+      return "failed";
+    // The backend cancelled job stage maps to the user-facing Unfiltered state.
+    case "cancelled":
+      return "unfiltered";
+    default:
+      return "preparing";
+  }
 }
 
 export function EpisodeRow({
@@ -26,94 +51,56 @@ export function EpisodeRow({
   actionDone,
   actionIcon = "check",
   showPodcast = true,
+  onAdRemovalStage,
 }: Props) {
   const progress = progressFraction(item);
-  const [adState, setAdState] = useState(item.ad_removal_state);
-  const [adStage, setAdStage] = useState<AdRemovalStage | null>(item.ad_removal_stage);
-  const [adBlocking, setAdBlocking] = useState<AdRemovalBlockingReason | null>(
-    item.ad_removal_blocking_reason,
-  );
-  const [adAction, setAdAction] = useState(item.ad_removal_action);
   const [adBusy, setAdBusy] = useState(false);
   const [adError, setAdError] = useState<string | null>(null);
-
+  // Local fallback overlay for non-Listen owners (no onAdRemovalStage). It is
+  // reset to null whenever authoritative ad-removal props change so a parent
+  // refresh always wins and stale optimistic data cannot linger.
+  const [localAd, setLocalAd] = useState<LocalAdStatus | null>(null);
   useEffect(() => {
-    setAdState(item.ad_removal_state);
-    setAdStage(item.ad_removal_stage);
-    setAdBlocking(item.ad_removal_blocking_reason);
-    setAdAction(item.ad_removal_action);
+    setLocalAd(null);
   }, [
-    item.ad_removal_action,
     item.ad_removal_state,
     item.ad_removal_stage,
+    item.ad_removal_action,
     item.ad_removal_blocking_reason,
   ]);
 
-  // While the row is in a nonterminal ad-removal stage, poll the existing
-  // episode-detail API so backend stage/blocking/action changes appear without
-  // navigation. Polling is single-flight: the next request is scheduled only
-  // after the prior one settles, so at most one detail request is in flight per
-  // row and an older response can never apply after a newer one. Any same-id
-  // prop change (stage/blocking/action/state) re-runs this effect, which
-  // invalidates the active generation so a stale in-flight poll cannot
-  // overwrite newer props. Stop polling once terminal (ad-free, failed,
-  // unfiltered) or the row unmounts. Transient poll errors never replace the
-  // visible row state; they just reschedule.
-  useEffect(() => {
-    if (isTerminalAdState(adState)) return;
-    let active = true;
-    let generation = 0;
-    let timer: number | undefined;
-    const schedule = () => {
-      if (!active) return;
-      timer = window.setTimeout(tick, AD_POLL_INTERVAL_MS);
-    };
-    const tick = () => {
-      const mine = ++generation;
-      void Api.episode(item.id)
-        .then((detail) => {
-          if (!active || mine !== generation) return;
-          setAdState(detail.ad_removal_state);
-          setAdStage(detail.ad_removal_stage);
-          setAdBlocking(detail.ad_removal_blocking_reason);
-          setAdAction(detail.ad_removal_action);
-          schedule();
-        })
-        .catch(() => {
-          // Keep the last visible state; a transient poll error must not break the row.
-          if (!active) return;
-          schedule();
-        });
-    };
-    schedule();
-    return () => {
-      active = false;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-    // Re-run on any same-id prop advance so a stale in-flight poll is invalidated.
-  }, [
-    adState,
-    item.id,
-    item.ad_removal_state,
-    item.ad_removal_stage,
-    item.ad_removal_blocking_reason,
-    item.ad_removal_action,
-  ]);
+  // When the owner delegates (Listen), authoritative props drive the display.
+  // When the owner does not delegate, a local optimistic overlay from a returned
+  // prepare/retry stage drives the display until authoritative props change.
+  const effectiveState = localAd ? localAd.state : item.ad_removal_state;
+  const effectiveStage = localAd ? localAd.stage : item.ad_removal_stage;
+  const effectiveBlocking = localAd ? localAd.blocking : item.ad_removal_blocking_reason;
+  const effectiveAction = localAd ? localAd.action : item.ad_removal_action;
 
   async function runAdRemovalAction() {
-    if (!adAction || adBusy) return;
+    const action = effectiveAction;
+    if (!action || adBusy) return;
     setAdBusy(true);
     setAdError(null);
     try {
       const result =
-        adAction === "retry"
+        action === "retry"
           ? await Api.retryAdRemoval(item.id)
           : await Api.prepareAdRemoval(item.id);
-      // Use the returned stage immediately instead of collapsing to generic Preparing.
-      setAdStage(result.stage as AdRemovalStage);
-      setAdBlocking(null);
-      setAdState(stageToCoarseState(result.stage as AdRemovalStage));
-      setAdAction(null);
+      if (onAdRemovalStage) {
+        // Listen owner owns status merging; delegate the returned stage.
+        onAdRemovalStage(item.id, result.stage as AdRemovalStage);
+      } else {
+        // Non-Listen owner: apply a small local optimistic overlay derived from
+        // the returned stage (granular label, matching coarse state, null action
+        // and blocking reason) so the row updates and the action button disappears.
+        setLocalAd({
+          state: stageToCoarseState(result.stage as AdRemovalStage),
+          stage: result.stage as AdRemovalStage,
+          blocking: null,
+          action: null,
+        });
+      }
     } catch (error) {
       setAdError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -132,8 +119,8 @@ export function EpisodeRow({
             {fmtDate(item.published_at)}
             {fmtRemaining(item) && <> · {fmtRemaining(item)}</>}
           </span>
-          <span className={`ad-removal-state is-${adState}`}>
-            {adStageLabel(adState, adStage, adBlocking)}
+          <span className={`ad-removal-state is-${effectiveState}`}>
+            {adStageLabel(effectiveState, effectiveStage, effectiveBlocking)}
           </span>
           {adError && <span className="ad-removal-error">{adError}</span>}
           {progress > 0 && !item.played_at && (
@@ -143,16 +130,16 @@ export function EpisodeRow({
           )}
         </span>
       </button>
-      {adAction && (
+      {effectiveAction && (
         <button
           type="button"
-          className={`ad-removal-action${adAction === "retry" ? " ad-removal-retry" : ""}`}
-          aria-label={adAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
-          title={adAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
+          className={`ad-removal-action${effectiveAction === "retry" ? " ad-removal-retry" : ""}`}
+          aria-label={effectiveAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
+          title={effectiveAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
           disabled={adBusy}
           onClick={() => void runAdRemovalAction()}
         >
-          {adBusy ? "…" : adAction === "retry" ? "Retry" : "Prepare"}
+          {adBusy ? "…" : effectiveAction === "retry" ? "Retry" : "Prepare"}
         </button>
       )}
       <button
@@ -175,24 +162,6 @@ export function EpisodeRow({
       </button>
     </li>
   );
-}
-
-function isTerminalAdState(state: EpisodeItem["ad_removal_state"]): boolean {
-  return state === "ad-free" || state === "failed" || state === "unfiltered";
-}
-
-function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
-  switch (stage) {
-    case "ready":
-      return "ad-free";
-    case "failed":
-      return "failed";
-    // The backend cancelled job stage maps to the user-facing Unfiltered state.
-    case "cancelled":
-      return "unfiltered";
-    default:
-      return "preparing";
-  }
 }
 
 function adStageLabel(

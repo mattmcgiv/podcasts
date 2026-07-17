@@ -1,5 +1,6 @@
 import type {
   AdRemovalSettings,
+  AdRemovalStatusesPayload,
   EpisodeDetail,
   EpisodeItem,
   Page,
@@ -83,6 +84,10 @@ export const Api = {
     request<{ stage: string }>(`/episodes/${id}/ad-removal/prepare`, { method: "POST" }),
   retryAdRemoval: (id: number) =>
     request<{ stage: string }>(`/episodes/${id}/ad-removal/retry`, { method: "POST" }),
+  adRemovalStatuses: (episodeIds: number[]) =>
+    request<AdRemovalStatusesPayload>(
+      `/ad-removal/statuses?episode_ids=${episodeIds.join(",")}`,
+    ),
   adRemovalSettings: () => request<AdRemovalSettings>("/ad-removal/settings"),
   enableAdRemoval: (confirmedBytes: number) =>
     request<AdRemovalSettings>("/ad-removal/enable", {

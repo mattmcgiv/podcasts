@@ -66,6 +66,22 @@ struct SettingsPayload: Codable, Equatable {
     let autoplay: Bool
 }
 
+/// Lightweight ad-removal status for a single episode, with no notes_html or
+/// other heavy fields. Used by the batch `/api/ad-removal/statuses` endpoint so
+/// the Listen view can poll many active rows with one bounded request instead
+/// of one full episode-detail request per row.
+struct AdRemovalStatusItem: Codable, Equatable {
+    let id: Int64
+    let ad_removal_state: String
+    let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
+}
+
+struct AdRemovalStatusesPayload: Codable, Equatable {
+    let items: [AdRemovalStatusItem]
+}
+
 struct AdRemovalCorrectionCountPayload: Codable, Equatable {
     let podcast_id: Int64
     let podcast_title: String

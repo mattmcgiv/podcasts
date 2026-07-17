@@ -265,6 +265,124 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertNil(detail.ad_removal_action)
     }
 
+    func testAdRemovalStatusesReturnsLightweightOrderedRecordsForExistingEpisodes() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/statuses.xml"
+        // Three episodes; the subscription backfill keeps only the newest two in
+        // Listen (the oldest is archived). The two recent episodes are the ones
+        // the batch endpoint is meant to serve.
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Statuses",
+            items: [
+                ("Ep A", "status-a", "https://h.example/a.mp3", Self.d1),
+                ("Ep B", "status-b", "https://h.example/b.mp3", Self.d2),
+                ("Ep C", "status-c", "https://h.example/c.mp3", Self.d3),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        // The two newest episodes (B and C) remain in Listen; the oldest (A) is archived.
+        let episodes = recent.items.sorted { $0.id < $1.id }
+        XCTAssertEqual(episodes.count, 2, "newest two episodes are kept in Listen")
+        let bID = episodes[0].id
+        let cID = episodes[1].id
+
+        // Enqueue a job for B so it reports a preparing stage; leave C unfiltered.
+        _ = try await call(harness.backend, "POST", "/api/episodes/\(bID)/ad-removal/prepare")
+        let store = AdRemovalJobStore(database: harness.database, retryBackoff: { _ in 0 })
+        let bJob = try XCTUnwrap(try store.job(episodeID: bID))
+        _ = try store.transition(jobID: bJob.id, to: .downloading)
+        _ = try store.setBlockingReason(jobID: bJob.id, reason: .storageLimit)
+
+        // Request in a deliberately non-sorted, deduplicated order including a
+        // non-existent id and an archived id. Existing recent records must come
+        // back in REQUESTED order, missing/non-recent ids are omitted, and
+        // duplicates collapse to one record.
+        let archivedID = try XCTUnwrap(try harness.database.scalarInt64("SELECT id FROM episodes WHERE title = 'Ep A'"))
+        let requestedIDs = [cID, bID, cID, 9_999_999, archivedID]
+        let target = "/api/ad-removal/statuses?episode_ids=\(requestedIDs.map(String.init).joined(separator: ","))"
+        let response = try await call(harness.backend, "GET", target)
+        XCTAssertEqual(response.statusCode, 200)
+        let payload = try decode(AdRemovalStatusesPayload.self, from: response)
+
+        // Deduplicated requested order, minus the non-existent id. The archived
+        // episode still exists in the episodes table, so it is returned too —
+        // preserving requested order across all existing ids.
+        let expectedOrder = [cID, bID, archivedID]
+        XCTAssertEqual(payload.items.map { $0.id }, expectedOrder, "records preserve requested order and omit missing ids")
+
+        let byID = Dictionary(uniqueKeysWithValues: payload.items.map { ($0.id, $0) })
+        XCTAssertEqual(byID[bID]?.ad_removal_state, "preparing")
+        XCTAssertNil(byID[bID]?.ad_removal_action)
+        XCTAssertEqual(byID[bID]?.ad_removal_stage, "downloading")
+        XCTAssertEqual(byID[bID]?.ad_removal_blocking_reason, "storage_limit")
+
+        XCTAssertEqual(byID[cID]?.ad_removal_state, "unfiltered")
+        XCTAssertEqual(byID[cID]?.ad_removal_action, "prepare")
+        XCTAssertNil(byID[cID]?.ad_removal_stage)
+        XCTAssertNil(byID[cID]?.ad_removal_blocking_reason)
+
+        // Lightweight: the response must not contain notes_html anywhere.
+        let raw = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertFalse(raw.contains("notes_html"), "batch statuses must not serialize notes_html")
+    }
+
+    func testAdRemovalStatusesRejectsMalformedEmptyNonPositiveAndOverLimitInput() async throws {
+        let harness = try makeHarness()
+
+        // Missing query parameter entirely.
+        let missing = try await call(harness.backend, "GET", "/api/ad-removal/statuses")
+        XCTAssertEqual(missing.statusCode, 422)
+
+        // Empty value.
+        let empty = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=")
+        XCTAssertEqual(empty.statusCode, 422)
+
+        // Non-numeric token.
+        let nonNumeric = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=abc")
+        XCTAssertEqual(nonNumeric.statusCode, 422)
+
+        // Mixed valid + non-numeric token.
+        let mixed = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,abc")
+        XCTAssertEqual(mixed.statusCode, 422)
+
+        // Malformed CSV with an empty interior token. The default split would
+        // silently omit the empty field and accept this as [1, 2].
+        let emptyInterior = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,,2")
+        XCTAssertEqual(emptyInterior.statusCode, 422)
+
+        // Trailing comma yields a trailing empty token.
+        let trailingComma = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,")
+        XCTAssertEqual(trailingComma.statusCode, 422)
+
+        // Leading comma yields a leading empty token.
+        let leadingComma = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=,1")
+        XCTAssertEqual(leadingComma.statusCode, 422)
+
+        // Whitespace-only token is not a valid integer.
+        let whitespaceToken = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1, ,2")
+        XCTAssertEqual(whitespaceToken.statusCode, 422)
+
+        // Non-positive id.
+        let zero = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=0")
+        XCTAssertEqual(zero.statusCode, 422)
+        let negative = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=-5")
+        XCTAssertEqual(negative.statusCode, 422)
+
+        // Over the 50-id limit (51 unique ids).
+        let tooMany = (1...51).map(String.init).joined(separator: ",")
+        let overLimit = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=\(tooMany)")
+        XCTAssertEqual(overLimit.statusCode, 422)
+
+        // Exactly 50 unique ids is accepted (no episodes exist, so empty items).
+        let exactlyFifty = (1...50).map(String.init).joined(separator: ",")
+        let atLimit = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=\(exactlyFifty)")
+        XCTAssertEqual(atLimit.statusCode, 200)
+        let atLimitPayload = try decode(AdRemovalStatusesPayload.self, from: atLimit)
+        XCTAssertTrue(atLimitPayload.items.isEmpty)
+    }
+
     func testAdRemovalEnableConsentCutoffAndNewEpisodeEnrollment() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/enrollment.xml"

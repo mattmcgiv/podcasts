@@ -1,15 +1,13 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { useState } from "react";
 import type { ReactNode } from "react";
 import { PlayerProvider } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
-import { adRemovalSettings, episode, HttpError, installApi, page, type MockRoutes } from "../test/mockApi";
+import { adRemovalSettings, adRemovalStatusItem, adRemovalStatuses, episode, HttpError, installApi, page, type MockRoutes } from "../test/mockApi";
 import type { Show } from "../types";
 import type { EpisodeItem } from "../types";
-import { AD_POLL_INTERVAL_MS, EpisodeRow } from "../components/EpisodeRow";
-import { AD_SETTINGS_POLL_INTERVAL_MS } from "../views/RecentView";
+import { AD_SETTINGS_POLL_INTERVAL_MS, AD_STATUS_POLL_INTERVAL_MS } from "../views/RecentView";
 import { PlayedView } from "./PlayedView";
 import { RecentView } from "./RecentView";
 import { SearchView } from "./SearchView";
@@ -514,61 +512,105 @@ describe("RecentView", () => {
     expect(within(row).queryByText(/^Preparing$/)).not.toBeInTheDocument();
   });
 
-  it("polls episode detail and advances an active row to Ad-free automatically", async () => {
-    const detail = episode({
+  it("one batch status request covers multiple active rows and makes no per-row detail calls", async () => {
+    const active1 = episode({
+      id: 301,
+      title: "Batch A",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "downloading",
+      ad_removal_action: null,
+    });
+    const active2 = episode({
+      id: 302,
+      title: "Batch B",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "transcribing",
+      ad_removal_action: null,
+    });
+    const terminal = episode({
+      id: 303,
+      title: "Batch Done",
+      ad_removal_state: "ad-free",
+      ad_removal_stage: "ready",
+      ad_removal_action: null,
+    });
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page([active1, active2, terminal]),
+      "GET /api/ad-removal/statuses": () =>
+        adRemovalStatuses([
+          adRemovalStatusItem(active1),
+          adRemovalStatusItem(active2),
+        ]),
+    });
+    vi.useFakeTimers();
+    wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    screen.getByText("Batch A");
+    screen.getByText("Batch B");
+
+    // Advance past one poll boundary: exactly one batch request covers both rows.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    const statusCalls = calls.filter((c) => c.key === "GET /api/ad-removal/statuses");
+    expect(statusCalls).toHaveLength(1);
+    const ids = statusCalls[0].url.searchParams.get("episode_ids")?.split(",").map(Number);
+    expect(ids).toEqual(expect.arrayContaining([301, 302]));
+    expect(ids).not.toContain(303);
+
+    // No per-row episode-detail calls should ever occur for status polling.
+    expect(calls.filter((c) => /^GET \/api\/episodes\/\d+$/.test(c.key))).toHaveLength(0);
+  });
+
+  it("batch polling advances an active row to Ad-free automatically", async () => {
+    const active = episode({
       id: 71,
       title: "Active Ep",
       ad_removal_state: "preparing",
       ad_removal_stage: "downloading",
       ad_removal_action: null,
     });
+    let next = active;
     installApi({
       ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/71": () => ({
-        ...detail,
-        ad_removal_state: "ad-free",
-        ad_removal_stage: "ready",
-        ad_removal_action: null,
-        notes_html: "",
-        archived_at: null,
-      }),
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () =>
+        adRemovalStatuses([
+          adRemovalStatusItem(next),
+        ]),
     });
     vi.useFakeTimers();
     wrap(<RecentView />);
-    // Flush the initial mount + recent fetch under fake timers.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     const row = screen.getByText("Active Ep").closest("li")!;
     expect(within(row).getByText("Downloading")).toBeInTheDocument();
 
-    // Advance past one poll boundary; the row should become Ad-free without navigation.
+    next = { ...active, ad_removal_state: "ad-free", ad_removal_stage: "ready", ad_removal_action: null };
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
     });
     expect(within(row).getByText("Ad-free")).toBeInTheDocument();
   });
 
-  it("polls episode detail and surfaces Failed plus Retry automatically", async () => {
-    const detail = episode({
+  it("batch polling surfaces Failed plus Retry automatically", async () => {
+    const active = episode({
       id: 72,
       title: "Will Fail Ep",
       ad_removal_state: "preparing",
       ad_removal_stage: "transcribing",
       ad_removal_action: null,
     });
+    let next = active;
     installApi({
       ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/72": () => ({
-        ...detail,
-        ad_removal_state: "failed",
-        ad_removal_stage: "failed",
-        ad_removal_action: "retry",
-        notes_html: "",
-        archived_at: null,
-      }),
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () =>
+        adRemovalStatuses([adRemovalStatusItem(next)]),
     });
     vi.useFakeTimers();
     wrap(<RecentView />);
@@ -578,32 +620,27 @@ describe("RecentView", () => {
     const row = screen.getByText("Will Fail Ep").closest("li")!;
     expect(within(row).getByText("Transcribing")).toBeInTheDocument();
 
+    next = { ...active, ad_removal_state: "failed", ad_removal_stage: "failed", ad_removal_action: "retry" };
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
     });
     expect(within(row).getByText("Failed")).toBeInTheDocument();
     expect(within(row).getByRole("button", { name: "Retry ad-free preparation" })).toBeInTheDocument();
   });
 
-  it("stops making detail requests after an active row polls to ready", async () => {
-    const detail = episode({
+  it("stops batch polling after all visible rows reach terminal status", async () => {
+    const active = episode({
       id: 73,
       title: "Goes Ready Ep",
       ad_removal_state: "preparing",
       ad_removal_stage: "downloading",
       ad_removal_action: null,
     });
+    let next = active;
     const { calls } = installApi({
       ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/73": () => ({
-        ...detail,
-        ad_removal_state: "ad-free",
-        ad_removal_stage: "ready",
-        ad_removal_action: null,
-        notes_html: "",
-        archived_at: null,
-      }),
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () => adRemovalStatuses([adRemovalStatusItem(next)]),
     });
     vi.useFakeTimers();
     wrap(<RecentView />);
@@ -613,92 +650,24 @@ describe("RecentView", () => {
     const row = screen.getByText("Goes Ready Ep").closest("li")!;
     expect(within(row).getByText("Downloading")).toBeInTheDocument();
 
-    // First poll brings the row to Ad-free.
+    next = { ...active, ad_removal_state: "ad-free", ad_removal_stage: "ready", ad_removal_action: null };
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
     });
     expect(within(row).getByText("Ad-free")).toBeInTheDocument();
-    const callsAfterReady = calls.filter((c) => c.key === "GET /api/episodes/73").length;
+    const callsAfterReady = calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length;
     expect(callsAfterReady).toBe(1);
 
-    // Advancing several more poll boundaries must not start any further requests.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS * 4);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
     });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/73").length).toBe(1);
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
   });
 
-  it("stops making detail requests after an active row polls to failed", async () => {
-    const detail = episode({
-      id: 76,
-      title: "Goes Failed Ep",
-      ad_removal_state: "preparing",
-      ad_removal_stage: "transcribing",
-      ad_removal_action: null,
-    });
-    const { calls } = installApi({
-      ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/76": () => ({
-        ...detail,
-        ad_removal_state: "failed",
-        ad_removal_stage: "failed",
-        ad_removal_action: "retry",
-        notes_html: "",
-        archived_at: null,
-      }),
-    });
-    vi.useFakeTimers();
-    wrap(<RecentView />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    const row = screen.getByText("Goes Failed Ep").closest("li")!;
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
-    });
-    expect(within(row).getByText("Failed")).toBeInTheDocument();
-    expect(calls.filter((c) => c.key === "GET /api/episodes/76").length).toBe(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS * 4);
-    });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/76").length).toBe(1);
-  });
-
-  it("makes no further poll calls after the row unmounts", async () => {
-    const detail = episode({
-      id: 77,
-      title: "Unmount Me Ep",
-      ad_removal_state: "preparing",
-      ad_removal_stage: "downloading",
-      ad_removal_action: null,
-    });
-    const { calls } = installApi({
-      ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/77": () => ({ ...detail, notes_html: "", archived_at: null }),
-    });
-    vi.useFakeTimers();
-    const { unmount } = wrap(<RecentView />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    screen.getByText("Unmount Me Ep");
-    const callsBeforeUnmount = calls.filter((c) => c.key === "GET /api/episodes/77").length;
-
-    unmount();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS * 4);
-    });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/77").length).toBe(callsBeforeUnmount);
-  });
-
-  it("keeps at most one detail request in flight when the first response is slow", async () => {
-    const detail = episode({
+  it("keeps at most one batch status request in flight when the first response is slow", async () => {
+    const active = episode({
       id: 78,
-      title: "Slow Detail Ep",
+      title: "Slow Batch Ep",
       ad_removal_state: "preparing",
       ad_removal_stage: "downloading",
       ad_removal_action: null,
@@ -709,52 +678,60 @@ describe("RecentView", () => {
     });
     const { calls } = installApi({
       ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/78": () => firstRequest.then(() => ({
-        ...detail,
-        notes_html: "",
-        archived_at: null,
-      })),
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () =>
+        firstRequest.then(() => adRemovalStatuses([adRemovalStatusItem(active)])),
     });
     vi.useFakeTimers();
     wrap(<RecentView />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    screen.getByText("Slow Detail Ep");
+    screen.getByText("Slow Batch Ep");
 
-    // The first poll fires at one interval and stays unresolved.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
     });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/78").length).toBe(1);
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
 
-    // Advancing several more intervals must NOT start overlapping requests.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS * 4);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
     });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/78").length).toBe(1);
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
 
-    // Resolving the slow request cleans up without throwing and without leaks.
     await act(async () => {
       resolveFirst();
       await Promise.resolve();
     });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/78").length).toBe(1);
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
   });
 
-  it("does not replace the visible row state when an episode-detail poll errors", async () => {
-    const detail = episode({
+  it("recovers from a transient batch poll error on a later completion-scheduled cycle without overlap", async () => {
+    const active = episode({
       id: 74,
       title: "Poll Error Ep",
       ad_removal_state: "preparing",
       ad_removal_stage: "downloading",
       ad_removal_action: null,
     });
-    installApi({
+    let attempt = 0;
+    const { calls } = installApi({
       ...settings,
-      "GET /api/recent": page([detail]),
-      "GET /api/episodes/74": new HttpError(500, { error: "boom-transient" }),
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () => {
+        attempt += 1;
+        // First cycle fails; a later cycle succeeds and advances the row.
+        if (attempt === 1) return new HttpError(500, { error: "boom-transient" });
+        return adRemovalStatuses([
+          adRemovalStatusItem({
+            id: 74,
+            ad_removal_state: "ad-free",
+            ad_removal_stage: "ready",
+            ad_removal_action: null,
+            ad_removal_blocking_reason: null,
+          }),
+        ]);
+      },
     });
     vi.useFakeTimers();
     wrap(<RecentView />);
@@ -764,16 +741,31 @@ describe("RecentView", () => {
     const row = screen.getByText("Poll Error Ep").closest("li")!;
     expect(within(row).getByText("Downloading")).toBeInTheDocument();
 
+    // First cycle fails: visible state is preserved, no error text shown.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
     });
-    // The visible state is unchanged; no error text replaces the stage label.
     expect(within(row).getByText("Downloading")).toBeInTheDocument();
     expect(within(row).queryByText(/boom-transient/)).not.toBeInTheDocument();
+    const callsAfterError = calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length;
+    expect(callsAfterError).toBe(1);
+
+    // No overlapping request fires while waiting for the next cycle.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS / 2);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(callsAfterError);
+
+    // A later completion-scheduled cycle retries successfully and updates the row.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBeGreaterThan(callsAfterError);
+    expect(within(row).getByText("Ad-free")).toBeInTheDocument();
   });
 
-  it("renders a cancelled ad-removal stage as Unfiltered", async () => {
-    installApi({
+  it("renders a cancelled ad-removal stage as Unfiltered and does not poll", async () => {
+    const { calls } = installApi({
       ...settings,
       "GET /api/recent": page([
         episode({
@@ -792,7 +784,370 @@ describe("RecentView", () => {
     });
     const row = screen.getByText("Cancelled Ep").closest("li")!;
     expect(within(row).getByText("Unfiltered")).toBeInTheDocument();
-    // A cancelled/Unfiltered row is terminal and must not poll.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(0);
+  });
+
+  it("makes no further batch poll calls after the view unmounts", async () => {
+    const active = episode({
+      id: 77,
+      title: "Unmount Me Ep",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "downloading",
+      ad_removal_action: null,
+    });
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page([active]),
+      "GET /api/ad-removal/statuses": () => adRemovalStatuses([adRemovalStatusItem(active)]),
+    });
+    vi.useFakeTimers();
+    const { unmount } = wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    screen.getByText("Unmount Me Ep");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    const callsBeforeUnmount = calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length;
+
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(callsBeforeUnmount);
+  });
+
+  it("a deferred stale batch response cannot apply after a same-flush same-id active-to-active backing-list change", async () => {
+    // The backing list starts with an active row at `downloading`. The first
+    // batch poll is deferred and, when resolved, returns the STALE downloading
+    // stage. While that poll is in flight, a same-ID active-to-active reload
+    // delivers a newer stage (`transcribing`). The old response is resolved in
+    // the SAME flush as the backing-list change, before any follow-up
+    // effect-driven render, and must NOT apply/regress the row.
+    const initial = episode({
+      id: 420,
+      title: "Refresh Race Ep",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "downloading",
+      ad_removal_action: null,
+    });
+    const refreshed: EpisodeItem = {
+      ...initial,
+      title: "Refresh Race Ep",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "transcribing",
+      ad_removal_action: null,
+    };
+    let current = initial;
+    let resolvePoll: () => void = () => {};
+    const pollResponse = new Promise<void>((resolve) => {
+      resolvePoll = resolve;
+    });
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": () => page([current]),
+      "GET /api/ad-removal/statuses": () =>
+        // Always returns the stale downloading status for this id.
+        pollResponse.then(() => adRemovalStatuses([adRemovalStatusItem(initial)])),
+    });
+    vi.useFakeTimers();
+    wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const row = screen.getByText("Refresh Race Ep").closest("li")!;
+    expect(within(row).getByText("Downloading")).toBeInTheDocument();
+
+    // Start the deferred batch poll (it stays unresolved).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
+
+    // Same-ID active-to-active backing-list change delivers a newer stage. The
+    // old deferred poll is resolved in the SAME flush (same act, no timer advance
+    // / no follow-up effect-driven render) as the backing-list replacement. The
+    // old response must be invalidated by the backing-list identity change at
+    // apply time, not by a later generation bump.
+    current = refreshed;
+    await act(async () => {
+      window.dispatchEvent(new Event("pods-episodes-changed"));
+      // Let the reload fetch + setItems commit the new backing list identity.
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      // Now resolve the OLD deferred poll returning the stale downloading stage,
+      // still in the same flush before any follow-up effect-driven render.
+      resolvePoll();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    // The refreshed stage wins; the stale downloading response never applied.
+    expect(within(row).queryByText("Downloading")).not.toBeInTheDocument();
+    expect(within(row).getByText("Transcribing")).toBeInTheDocument();
+  });
+
+  it("a same-id reload retains fresh non-status fields from the new backing list", async () => {
+    const initial = episode({
+      id: 410,
+      title: "Old Title",
+      audio_url: "https://h.example/old.mp3",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "downloading",
+      ad_removal_action: null,
+    });
+    // After a reload the same id returns a fresh title + audio URL. The fresh
+    // backing list also carries the current stage, so the overlay is not needed;
+    // the point is that fresh non-status fields replace any stale overlay data.
+    const reloaded: EpisodeItem = {
+      ...initial,
+      title: "Fresh Title",
+      audio_url: "https://h.example/fresh.mp3",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "transcribing",
+      ad_removal_action: null,
+    };
+    let current = initial;
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": () => page([current]),
+      "GET /api/ad-removal/statuses": () =>
+        adRemovalStatuses([
+          adRemovalStatusItem({
+            id: 410,
+            ad_removal_state: "preparing",
+            ad_removal_stage: "transcribing",
+            ad_removal_action: null,
+            ad_removal_blocking_reason: null,
+          }),
+        ]),
+    });
+    vi.useFakeTimers();
+    wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Old Title")).toBeInTheDocument();
+
+    // One batch poll advances the stage to Transcribing.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    const row = screen.getByText("Old Title").closest("li")!;
+    expect(within(row).getByText("Transcribing")).toBeInTheDocument();
+
+    // Same-id reload delivers fresh non-status fields (title/audio) and the
+    // current stage from the backing list.
+    current = reloaded;
+    await act(async () => {
+      window.dispatchEvent(new Event("pods-episodes-changed"));
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    // Fresh title is retained from the backing list; stale old title is gone.
+    expect(screen.getByText("Fresh Title")).toBeInTheDocument();
+    expect(screen.queryByText("Old Title")).not.toBeInTheDocument();
+    const freshRow = screen.getByText("Fresh Title").closest("li")!;
+    expect(within(freshRow).getByText("Transcribing")).toBeInTheDocument();
+    // No per-row detail fetch for status.
+    expect(calls.filter((c) => /^GET \/api\/episodes\/\d+$/.test(c.key))).toHaveLength(0);
+  });
+
+  it("a terminal-patch-to-active same-id reload shows the fresh active stage and restarts polling", async () => {
+    // A poll marks id 430 terminal (ad-free). Then a same-id reload brings the
+    // row back as ACTIVE with a fresh preparing/queued stage. The retained
+    // terminal patch must NOT mask the fresh active stage, and polling must
+    // resume so the active row keeps refreshing.
+    const initial = episode({
+      id: 430,
+      title: "Terminal To Active Ep",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "downloading",
+      ad_removal_action: null,
+    });
+    const reloadedActive: EpisodeItem = {
+      ...initial,
+      title: "Terminal To Active Ep",
+      ad_removal_state: "preparing",
+      ad_removal_stage: "queued",
+      ad_removal_action: null,
+    };
+    let current = initial;
+    let pollCount = 0;
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": () => page([current]),
+      "GET /api/ad-removal/statuses": () => {
+        pollCount += 1;
+        // First poll (before reload) advances the row to terminal ad-free.
+        // Later polls (after reload) report the active queued stage.
+        const stage = pollCount === 1 ? "ready" : "queued";
+        const state = pollCount === 1 ? "ad-free" : "preparing";
+        return adRemovalStatuses([
+          adRemovalStatusItem({
+            id: 430,
+            ad_removal_state: state as EpisodeItem["ad_removal_state"],
+            ad_removal_stage: stage as EpisodeItem["ad_removal_stage"],
+            ad_removal_action: null,
+            ad_removal_blocking_reason: null,
+          }),
+        ]);
+      },
+    });
+    vi.useFakeTimers();
+    wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const row = screen.getByText("Terminal To Active Ep").closest("li")!;
+    expect(within(row).getByText("Downloading")).toBeInTheDocument();
+
+    // First poll brings the row to terminal Ad-free; polling stops.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    expect(within(row).getByText("Ad-free")).toBeInTheDocument();
+    const callsAfterTerminal = calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(callsAfterTerminal);
+
+    // Same-id reload brings the row back as ACTIVE with a fresh queued stage.
+    current = reloadedActive;
+    await act(async () => {
+      window.dispatchEvent(new Event("pods-episodes-changed"));
+      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    });
+    // The retained terminal patch must NOT mask the fresh active stage.
+    expect(within(row).queryByText("Ad-free")).not.toBeInTheDocument();
+    expect(within(row).getByText("Queued")).toBeInTheDocument();
+
+    // Polling restarts for the active row: advancing one boundary fires a poll.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBeGreaterThan(callsAfterTerminal);
+  });
+
+  it("covers more than 50 visible active rows with bounded sequential batches", async () => {
+    // 55 active rows exceeds the backend's 50-id cap. The view must split the
+    // active ids into bounded batches (each <=50), process them sequentially
+    // within one completion-scheduled cycle (never overlapping), and cover every
+    // active id. The first batch is deferred to prove no second request begins
+    // until it resolves; then the second batch begins, every request has <=50
+    // ids, and all 55 rows automatically reach the returned terminal state.
+    const active = Array.from({ length: 55 }, (_, i) =>
+      episode({
+        id: 1000 + i,
+        title: `Many Ep ${i}`,
+        ad_removal_state: "preparing",
+        ad_removal_stage: "downloading",
+        ad_removal_action: null,
+      }),
+    );
+    let resolveFirst: () => void = () => {};
+    const firstResponse = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let firstBatchResolved = false;
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page(active),
+      "GET /api/ad-removal/statuses": (url: URL) => {
+        const ids = (url.searchParams.get("episode_ids") ?? "").split(",").map(Number);
+        // Backend would 422 over-50 requests; emulate that guard so an unbounded
+        // client would loop on 422 forever.
+        if (ids.length > 50) return new HttpError(422, { error: "too many ids" });
+        // The first <=50 batch is deferred until resolveFirst() is called.
+        if (!firstBatchResolved && ids.length === 50) {
+          return firstResponse.then(() =>
+            adRemovalStatuses(
+              ids.map((id) =>
+                adRemovalStatusItem({
+                  id,
+                  ad_removal_state: "ad-free",
+                  ad_removal_stage: "ready",
+                  ad_removal_action: null,
+                  ad_removal_blocking_reason: null,
+                }),
+              ),
+            ),
+          );
+        }
+        return adRemovalStatuses(
+          ids.map((id) =>
+            adRemovalStatusItem({
+              id,
+              ad_removal_state: "ad-free",
+              ad_removal_stage: "ready",
+              ad_removal_action: null,
+              ad_removal_blocking_reason: null,
+            }),
+          ),
+        );
+      },
+    });
+    vi.useFakeTimers();
+    wrap(<RecentView />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    screen.getByText("Many Ep 0");
+
+    // Start the cycle: the first 50-id batch fires and stays unresolved.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS + 100);
+    });
+    let statusCalls = calls.filter((c) => c.key === "GET /api/ad-removal/statuses");
+    expect(statusCalls).toHaveLength(1);
+    const firstIds = (statusCalls[0].url.searchParams.get("episode_ids") ?? "").split(",").map(Number);
+    expect(firstIds).toHaveLength(50);
+
+    // No second request begins until the first batch resolves. Advance timers
+    // well past the boundary while it is still unresolved: still only 1 call.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AD_STATUS_POLL_INTERVAL_MS * 4);
+    });
+    expect(calls.filter((c) => c.key === "GET /api/ad-removal/statuses").length).toBe(1);
+
+    // Resolve the first batch; the second (<=50) batch begins immediately after.
+    await act(async () => {
+      firstBatchResolved = true;
+      resolveFirst();
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+    });
+    statusCalls = calls.filter((c) => c.key === "GET /api/ad-removal/statuses");
+    expect(statusCalls.length).toBeGreaterThanOrEqual(2);
+
+    // No request exceeds the 50-id cap, and all 55 ids are covered this cycle.
+    for (const c of statusCalls) {
+      const ids = (c.url.searchParams.get("episode_ids") ?? "").split(",").map(Number);
+      expect(ids.length).toBeLessThanOrEqual(50);
+    }
+    const covered = new Set<number>();
+    for (const c of statusCalls) {
+      for (const id of (c.url.searchParams.get("episode_ids") ?? "").split(",").map(Number)) {
+        covered.add(id);
+      }
+    }
+    expect(covered.size).toBe(55);
+    // No over-limit (51-id) request was ever attempted.
+    expect(
+      statusCalls.some((c) => (c.url.searchParams.get("episode_ids") ?? "").split(",").length > 50),
+    ).toBe(false);
+
+    // Every row automatically reaches the returned terminal Ad-free state.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 4; i++) await Promise.resolve();
+    });
+    const rows = screen.getAllByRole("listitem");
+    expect(rows).toHaveLength(55);
+    for (const r of rows) {
+      expect(within(r).getByText("Ad-free")).toBeInTheDocument();
+    }
   });
 });
 
@@ -1008,168 +1363,40 @@ describe("ShowDetailView", () => {
     expect(screen.queryByText("Noise Episode")).not.toBeInTheDocument();
     expect(calls.some((c) => c.key === "GET /api/shows/5/search")).toBe(true);
   });
-});
 
-describe("EpisodeRow polling", () => {
-  const statefulSetters = new Map<number, (ep: EpisodeItem) => void>();
-
-  function rowFor(item: EpisodeItem) {
-    return (
-      <EpisodeRow
-        item={item}
-        onPlay={() => {}}
-        actionLabel="Mark played"
-        onAction={() => {}}
-      />
-    );
-  }
-
-  // A stateful wrapper lets the test drive a same-id prop update from within an
-  // async act so it can race an in-flight poll response before React flushes the
-  // prop-sync state rerender (which RTL's synchronous rerender would otherwise
-  // close immediately).
-  function StatefulRow({ initial }: { initial: EpisodeItem }) {
-    const [ep, setEp] = useState(initial);
-    statefulSetters.set(initial.id, setEp);
-    return rowFor(ep);
-  }
-
-  it("an in-flight poll must not overwrite newer same-id props", async () => {
-    const initial = episode({
-      id: 81,
-      title: "Race Ep",
-      ad_removal_state: "preparing",
-      ad_removal_stage: "downloading",
-      ad_removal_action: null,
-      ad_removal_blocking_reason: null,
-    });
-    // The poll response is unresolved and, when resolved, returns the STALE older state.
-    let resolvePoll: () => void = () => {};
-    const pollResponse = new Promise<void>((resolve) => {
-      resolvePoll = resolve;
-    });
-    installApi({
-      ...settings,
-      "GET /api/episodes/81": () =>
-        pollResponse.then(() => ({
-          ...initial,
-          ad_removal_state: "preparing",
-          ad_removal_stage: "downloading",
-          ad_removal_action: null,
-          ad_removal_blocking_reason: null,
-          notes_html: "",
-          archived_at: null,
-        })),
-    });
-    vi.useFakeTimers();
-    const { rerender } = wrap(rowFor(initial));
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    const row = screen.getByText("Race Ep").closest("li")!;
-    expect(within(row).getByText("Downloading")).toBeInTheDocument();
-
-    // Fire the first poll, which starts an unresolved detail request.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
-    });
-
-    // Parent advances the same episode id to a newer stage + blocking reason.
-    const newer: EpisodeItem = {
-      ...initial,
-      ad_removal_state: "preparing",
-      ad_removal_stage: "transcribing",
-      ad_removal_action: null,
-      ad_removal_blocking_reason: "low_power",
-    };
-    await act(async () => {
-      rerender(<PlayerProvider>{rowFor(newer)}</PlayerProvider>);
-    });
-    expect(within(row).getByText(/Paused.*low power/i)).toBeInTheDocument();
-
-    // Now resolve the OLD poll response returning the stale downloading state.
-    await act(async () => {
-      resolvePoll();
-      await Promise.resolve();
-    });
-    // The stale response must NOT regress the UI back to Downloading.
-    expect(within(row).queryByText("Downloading")).not.toBeInTheDocument();
-    expect(within(row).getByText(/Paused.*low power/i)).toBeInTheDocument();
-  });
-
-  it("a same-id coarse-state-only prop update to terminal invalidates a stale in-flight poll", async () => {
-    const initial = episode({
-      id: 91,
-      title: "Coarse Race Ep",
-      ad_removal_state: "preparing",
-      ad_removal_stage: "downloading",
-      ad_removal_action: null,
-      ad_removal_blocking_reason: null,
-    });
-    // The poll response is unresolved and, when resolved, returns the STALE older state.
-    let resolvePoll: () => void = () => {};
-    const pollResponse = new Promise<void>((resolve) => {
-      resolvePoll = resolve;
-    });
+  it("updates ad-removal stage immediately after Prepare in a non-Listen owner and removes the action button", async () => {
+    // ShowDetailView renders EpisodeRow without onAdRemovalStage. A successful
+    // Prepare must still surface the backend-returned granular stage right away
+    // and remove the old action button so the row cannot be re-submitted.
     const { calls } = installApi({
       ...settings,
-      "GET /api/episodes/91": () =>
-        pollResponse.then(() => ({
-          ...initial,
-          ad_removal_state: "preparing",
-          ad_removal_stage: "downloading",
-          ad_removal_action: null,
-          ad_removal_blocking_reason: null,
-          notes_html: "",
-          archived_at: null,
-        })),
+      "GET /api/shows/5": {
+        show: show(),
+        episodes: page([
+          episode({
+            id: 17,
+            title: "Prepare Me Ep",
+            ad_removal_state: "unfiltered",
+            ad_removal_action: "prepare",
+            ad_removal_stage: null,
+          }),
+        ]),
+      },
+      "POST /api/episodes/17/ad-removal/prepare": { stage: "queued" },
     });
-    vi.useFakeTimers();
-    wrap(<StatefulRow initial={initial} />);
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    const row = screen.getByText("Coarse Race Ep").closest("li")!;
-    expect(within(row).getByText("Downloading")).toBeInTheDocument();
+    const user = userEvent.setup();
+    wrap(<ShowDetailView showId={5} />);
 
-    // Fire the first poll, which starts an unresolved detail request.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS + 100);
-    });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/91").length).toBe(1);
+    const row = (await screen.findByText("Prepare Me Ep")).closest("li")!;
+    expect(within(row).getByText("Unfiltered")).toBeInTheDocument();
+    const prepareBtn = within(row).getByRole("button", { name: "Prepare ad-free" });
+    expect(prepareBtn).toBeInTheDocument();
 
-    // Parent advances ONLY the coarse state to terminal (ad-free), leaving the
-    // nullable granular/action fields otherwise unchanged. The stale poll is
-    // resolved in the SAME async flush as the prop commit so it races the
-    // prop-sync state rerender; the in-flight generation must already be
-    // invalidated by the coarse-state prop dependency.
-    const newer: EpisodeItem = {
-      ...initial,
-      ad_removal_state: "ad-free",
-      ad_removal_stage: "downloading",
-      ad_removal_action: null,
-      ad_removal_blocking_reason: null,
-    };
-    const setEp = statefulSetters.get(91)!;
-    // Drive the prop update and resolve the stale poll in the same async flush
-    // so the stale response races the prop-sync state rerender. The in-flight
-    // generation must already be invalidated by the coarse-state prop dependency.
-    await act(async () => {
-      setEp(newer);
-      resolvePoll();
-      for (let i = 0; i < 8; i++) await Promise.resolve();
-    });
-    // The stale response must NOT regress the terminal UI back to Downloading/Preparing.
-    expect(within(row).queryByText("Downloading")).not.toBeInTheDocument();
-    expect(within(row).queryByText(/^Preparing$/)).not.toBeInTheDocument();
-    expect(within(row).getByText("Ad-free")).toBeInTheDocument();
-
-    // The terminal row must not restart polling: advancing several more poll
-    // boundaries causes no additional detail requests.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(AD_POLL_INTERVAL_MS * 4);
-    });
-    expect(calls.filter((c) => c.key === "GET /api/episodes/91").length).toBe(1);
-    statefulSetters.delete(91);
+    await user.click(prepareBtn);
+    // The backend-returned granular stage appears immediately.
+    expect(within(row).getByText("Queued")).toBeInTheDocument();
+    // The old action button is gone, preventing duplicate submission.
+    expect(within(row).queryByRole("button", { name: "Prepare ad-free" })).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.key === "POST /api/episodes/17/ad-removal/prepare").length).toBe(1);
   });
 });

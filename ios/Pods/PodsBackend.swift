@@ -261,6 +261,9 @@ final class PodsBackend: PlaybackProgressRecording {
         if path == "/api/ad-removal/settings", request.method == "GET" {
             return .json(try adRemovalSettings())
         }
+        if path == "/api/ad-removal/statuses", request.method == "GET" {
+            return .json(try adRemovalStatuses(request: request))
+        }
         if path == "/api/ad-removal/enable", request.method == "POST" {
             let body = try request.jsonObject()
             guard let confirmedBytes = (body["confirmed_bytes"] as? NSNumber)?.int64Value else {
@@ -562,6 +565,79 @@ final class PodsBackend: PlaybackProgressRecording {
             device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
             corrections: corrections
         )
+    }
+
+    /// Bounded, lightweight batch ad-removal status for the Listen view. Accepts
+    /// at most 50 unique positive episode ids via `episode_ids` (comma-separated),
+    /// preserves the deduplicated requested order, omits non-existent ids, and
+    /// returns only the ad-removal status fields — never `notes_html`.
+    private func adRemovalStatuses(request: HTTPRequest) throws -> AdRemovalStatusesPayload {
+        let raw = request.query("episode_ids") ?? ""
+        guard !raw.isEmpty else {
+            throw PodsBackendError.invalid("episode_ids must not be empty")
+        }
+        var ids: [Int64] = []
+        var seen = Set<Int64>()
+        // Preserve empty subsequences so malformed CSV like `1,,2`, `1,`, and
+        // `,1` is rejected instead of silently accepted by omitting empties.
+        for token in raw.split(separator: ",", omittingEmptySubsequences: false) {
+            let trimmed = token.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else {
+                throw PodsBackendError.invalid("episode_ids must not contain empty tokens")
+            }
+            guard let id = Int64(trimmed) else {
+                throw PodsBackendError.invalid("episode_ids must be comma-separated integers")
+            }
+            guard id > 0 else {
+                throw PodsBackendError.invalid("episode_ids must be positive")
+            }
+            if seen.insert(id).inserted {
+                ids.append(id)
+            }
+        }
+        guard ids.count <= 50 else {
+            throw PodsBackendError.invalid("episode_ids must contain at most 50 unique ids")
+        }
+        guard !ids.isEmpty else {
+            throw PodsBackendError.invalid("episode_ids must not be empty")
+        }
+
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let sql = """
+        SELECT e.id,
+        CASE
+            WHEN j.stage = 'ready' THEN 'ad-free'
+            WHEN j.stage = 'failed' THEN 'failed'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered'
+            ELSE 'preparing'
+        END AS ad_removal_state,
+        CASE
+            WHEN j.stage = 'failed' THEN 'retry'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
+            ELSE NULL
+        END AS ad_removal_action,
+        j.stage AS ad_removal_stage,
+        j.blocking_reason AS ad_removal_blocking_reason
+        FROM episodes e
+        LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
+        WHERE e.id IN (\(placeholders))
+        """
+        let values = ids.map { SQLiteValue.int($0) }
+        let byID = try Dictionary(uniqueKeysWithValues: database.query(sql, values) { statement in
+            (
+                sqlite3_column_int64(statement, 0),
+                AdRemovalStatusItem(
+                    id: sqlite3_column_int64(statement, 0),
+                    ad_removal_state: sqliteString(statement, 1),
+                    ad_removal_action: sqliteOptionalString(statement, 2),
+                    ad_removal_stage: sqliteOptionalString(statement, 3),
+                    ad_removal_blocking_reason: sqliteOptionalString(statement, 4)
+                )
+            )
+        })
+        // Preserve deduplicated requested order, omitting non-existent ids.
+        let items = ids.compactMap { byID[$0] }
+        return AdRemovalStatusesPayload(items: items)
     }
 
     private func enableAdRemoval(confirmedBytes: Int64) throws -> AdRemovalSettingsPayload {

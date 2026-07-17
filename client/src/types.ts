@@ -112,3 +112,16 @@ export interface ShowDetailResponse {
 }
 
 export type PlayContext = "recent" | "show";
+
+/** Lightweight ad-removal status record returned by the batch statuses poll. */
+export interface AdRemovalStatusItem {
+  id: number;
+  ad_removal_state: EpisodeItem["ad_removal_state"];
+  ad_removal_action: EpisodeItem["ad_removal_action"];
+  ad_removal_stage: EpisodeItem["ad_removal_stage"];
+  ad_removal_blocking_reason: EpisodeItem["ad_removal_blocking_reason"];
+}
+
+export interface AdRemovalStatusesPayload {
+  items: AdRemovalStatusItem[];
+}

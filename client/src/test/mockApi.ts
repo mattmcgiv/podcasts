@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { AdRemovalSettings, EpisodeItem } from "../types";
+import type { AdRemovalSettings, AdRemovalStatusItem, EpisodeItem } from "../types";
 
 type RouteValue =
   | unknown
@@ -101,4 +101,21 @@ export function adRemovalSettings(
 
 export function page<T>(items: T[], next_offset: number | null = null) {
   return { items, next_offset };
+}
+
+export function adRemovalStatusItem(
+  overrides: Partial<AdRemovalStatusItem> = {},
+): AdRemovalStatusItem {
+  return {
+    id: 1,
+    ad_removal_state: "unfiltered",
+    ad_removal_action: "prepare",
+    ad_removal_stage: null,
+    ad_removal_blocking_reason: null,
+    ...overrides,
+  };
+}
+
+export function adRemovalStatuses(items: AdRemovalStatusItem[]) {
+  return { items };
 }
