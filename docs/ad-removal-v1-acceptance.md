@@ -17,9 +17,10 @@ Accepted design: `docs/ad-removal-design.md` at `45b911e`
   `xcodebuild -project mac/PodsSpeaker.xcodeproj -scheme PodsSpeaker -destination 'platform=macOS' test`
   - 3 tests passed, covering protocol v2, progress cadence, legacy-message
     rejection, and position recovery.
-- Physical-device architecture build for the paired iPhone 16:
-  `xcodebuild -skipPackagePluginValidation -project ios/Pods.xcodeproj -scheme Pods -destination 'platform=iOS,id=F51CC28B-1C20-5F95-9E16-5A9238979720' CODE_SIGNING_ALLOWED=NO build`
-  - The arm64 iPhoneOS build completed successfully.
+- Signed physical-device build for the paired iPhone 16:
+  `xcodebuild -skipPackagePluginValidation -project ios/Pods.xcodeproj -scheme Pods -destination 'platform=iOS,id=F51CC28B-1C20-5F95-9E16-5A9238979720' build`
+  - The arm64 iPhoneOS build completed successfully using the configured
+    Personal Team, Apple Development certificate, and Xcode-managed profile.
 - Golden-corpus helper contract:
   `sh dev/tests/evaluate-ad-removal-corpus.test.sh`
   - Usage/error behavior passed, and the helper compiled successfully against
@@ -35,10 +36,9 @@ These checks cannot be completed in this local-only task without installing the
 app, downloading user-approved assets, using private podcast data, or occupying
 the physical devices for the prescribed session.
 
-1. **Signed install and real-device pipeline.** A signed build currently stops
-   with `Signing for "Pods" requires a development team.` The project needs a
-   development team configured, followed by explicit authorization to install
-   or launch the build on the iPhone. This task explicitly prohibited deploys.
+1. **Install and real-device pipeline.** Signing is configured and a signed
+   iPhone build succeeds. Installing or launching that build still requires
+   explicit deployment authorization; this task changed signing only.
 2. **Model asset.** The pinned Qwen model is 3,061,129,077 bytes. It must be
    explicitly authorized in Settings and downloaded over Wi-Fi. The app verifies
    every pinned file's size and SHA-256 before activation; this task did not
