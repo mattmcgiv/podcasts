@@ -653,6 +653,15 @@ input[type="search"]::-webkit-search-cancel-button {
   inset: 0;
   background: var(--bg);
   z-index: 30;
+}
+
+.player-sheet {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-sheet {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -663,8 +672,7 @@ input[type="search"]::-webkit-search-cancel-button {
   gap: 8px;
   padding: 10px 12px 0;
   padding-top: calc(10px + env(safe-area-inset-top));
-  position: sticky;
-  top: 0;
+  flex: 0 0 auto;
   background: var(--bg);
   z-index: 2;
 }
@@ -687,6 +695,13 @@ input[type="search"]::-webkit-search-cancel-button {
   padding: 8px 22px calc(40px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
+}
+
+.sheet-scroll-region {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .sheet-art {
@@ -806,6 +821,13 @@ input[type="search"]::-webkit-search-cancel-button {
   justify-content: center;
   gap: 8px;
   margin: 16px 0 4px;
+}
+
+.speed-chip {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 7px 10px;
+  touch-action: manipulation;
 }
 
 .chip {

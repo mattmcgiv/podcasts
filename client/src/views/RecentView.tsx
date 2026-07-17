@@ -117,9 +117,22 @@ export function RecentView() {
     });
   }, [items, statusPatch]);
 
+  const displayItems = useMemo<EpisodeItem[] | null>(() => {
+    if (enrichedItems == null || player.current == null) return enrichedItems;
+    return enrichedItems.map((item) =>
+      item.id === player.current?.id
+        ? {
+            ...item,
+            position_secs: player.position,
+            duration_secs: player.duration > 0 ? player.duration : item.duration_secs,
+          }
+        : item,
+    );
+  }, [enrichedItems, player.current, player.position, player.duration]);
+
   const sortedItems = useMemo(
-    () => enrichedItems?.slice().sort((a, b) => compareByReleaseDate(a, b, sortAscending)) ?? null,
-    [enrichedItems, sortAscending],
+    () => displayItems?.slice().sort((a, b) => compareByReleaseDate(a, b, sortAscending)) ?? null,
+    [displayItems, sortAscending],
   );
 
   // Fetch ad-removal settings on mount and poll on a bounded, single-flight

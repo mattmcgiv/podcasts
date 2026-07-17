@@ -38,7 +38,7 @@ export interface PlayerApi {
   seekTo: (secs: number) => void;
   skipForward: () => void;
   skipBack: () => void;
-  setSpeed: (speed: number) => void;
+  setSpeed: (speed: number, correlationId?: string) => void;
   setAutoplay: (on: boolean) => void;
   setExpanded: (on: boolean) => void;
   setCastOutput: (target: "local" | "mac") => void;
@@ -257,10 +257,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
   }, []);
 
-  const setSpeed = useCallback((value: number) => {
+  const setSpeed = useCallback((value: number, correlationId?: string) => {
     setSpeedState(value);
     speedRef.current = value;
-    if (audioRef.current) audioRef.current.playbackRate = value;
+    if (audioRef.current) {
+      if (correlationId && audioRef.current.setPlaybackRate) {
+        console.log(`speed_bridge_send correlation_id=${correlationId} requested_rate=${value}`);
+        audioRef.current.setPlaybackRate(value, correlationId);
+      } else {
+        audioRef.current.playbackRate = value;
+      }
+    }
     void Api.saveSettings({ speed: value, autoplay: autoplayRef.current }).catch(() => {});
   }, []);
 

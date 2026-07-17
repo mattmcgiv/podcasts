@@ -221,7 +221,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         let scheduler = AdRemovalPipelineScheduler(
             store: store,
             coordinator: AdRemovalCoordinator(store: store, executor: executor),
-            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false) },
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) },
             now: { clock },
             sleep: { seconds in
                 slept.append(seconds)
@@ -409,23 +409,30 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertNil(try store.nextRunnableJob())
     }
 
-    func testSchedulingPolicyOnlyPausesComputeStagesForPowerThermalOrPlayback() {
+    func testSchedulingPolicyKeepsAdRemovalRunningDuringPlayback() {
         XCTAssertNil(AdRemovalSchedulingPolicy.blockingReason(
             for: .downloading,
-            conditions: .init(lowPowerMode: true, seriousThermalPressure: true, playbackActive: true)
+            conditions: .init(lowPowerMode: true, seriousThermalPressure: true)
         ))
+        XCTAssertNil(AdRemovalSchedulingPolicy.blockingReason(
+            for: .transcribing,
+            conditions: .init(lowPowerMode: false, seriousThermalPressure: false)
+        ))
+        XCTAssertNil(AdRemovalSchedulingPolicy.blockingReason(
+            for: .classifying,
+            conditions: .init(lowPowerMode: true, seriousThermalPressure: true)
+        ))
+    }
+
+    func testSchedulingPolicyOnlyPausesLocalTranscriptionForResourcePressure() {
         XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
             for: .transcribing,
-            conditions: .init(lowPowerMode: true, seriousThermalPressure: false, playbackActive: false)
+            conditions: .init(lowPowerMode: true, seriousThermalPressure: false)
         ), .lowPower)
         XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
-            for: .classifying,
-            conditions: .init(lowPowerMode: false, seriousThermalPressure: true, playbackActive: false)
+            for: .transcribing,
+            conditions: .init(lowPowerMode: false, seriousThermalPressure: true)
         ), .thermalPressure)
-        XCTAssertEqual(AdRemovalSchedulingPolicy.blockingReason(
-            for: .classifying,
-            conditions: .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: true)
-        ), .playbackActive)
     }
 
     func testSchedulerDownloadsDuringLowPowerThenResumesComputeUntilReady() async throws {
@@ -436,8 +443,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         let coordinator = AdRemovalCoordinator(store: store, executor: executor)
         var conditions = AdRemovalRuntimeConditions(
             lowPowerMode: true,
-            seriousThermalPressure: false,
-            playbackActive: false
+            seriousThermalPressure: false
         )
         let scheduler = AdRemovalPipelineScheduler(
             store: store,
@@ -451,7 +457,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.job(id: queued.id)?.blockingReason, .lowPower)
         XCTAssertEqual(executor.executedStages, [.downloading])
 
-        conditions = .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false)
+        conditions = .init(lowPowerMode: false, seriousThermalPressure: false)
         await scheduler.runUntilIdle()
 
         XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
@@ -469,7 +475,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
             coordinator: AdRemovalCoordinator(store: store, executor: executor),
             isEnabled: { false },
             conditions: {
-                .init(lowPowerMode: false, seriousThermalPressure: false, playbackActive: false)
+                .init(lowPowerMode: false, seriousThermalPressure: false)
             }
         )
 

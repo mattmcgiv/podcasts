@@ -151,6 +151,41 @@ final class AdRemovalStorageTests: XCTestCase {
         XCTAssertEqual(persisted?.audioArtifact, artifact)
     }
 
+    func testDownloadFinalizerAcceptsSubstackBinaryOctetStreamAsMP3() throws {
+        let directory = try makeDirectory()
+        let database = try makeDatabase(in: directory)
+        let jobStore = AdRemovalJobStore(database: database, now: { 1_000 })
+        let episodeID = try XCTUnwrap(database.scalarInt64("SELECT id FROM episodes LIMIT 1"))
+        let queued = try jobStore.enqueue(episodeID: episodeID)
+        let downloading = try jobStore.transition(jobID: queued.id, to: .downloading)
+        let artifactStore = try AdRemovalArtifactStore(rootURL: directory.appendingPathComponent("AdRemoval"))
+        let finalizer = AdRemovalDownloadFinalizer(
+            jobStore: jobStore,
+            artifactStore: artifactStore,
+            storagePolicy: AdRemovalStoragePolicy(
+                usedBytes: { 0 },
+                availableBytes: { Int64.max }
+            )
+        )
+        let temporaryURL = directory.appendingPathComponent("substack-download.tmp")
+        try Data("substack-audio".utf8).write(to: temporaryURL)
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://substackcdn.com/podcast/transcoded.mp3")!,
+            statusCode: 200,
+            httpVersion: "HTTP/2",
+            headerFields: ["Content-Type": "binary/octet-stream"]
+        ))
+
+        let artifact = try finalizer.finalize(
+            temporaryURL: temporaryURL,
+            response: response,
+            job: downloading
+        )
+
+        XCTAssertEqual(artifact.relativePath, "episodes/\(episodeID)/audio.mp3")
+        XCTAssertEqual(try jobStore.job(id: queued.id)?.stage, .downloaded)
+    }
+
     func testDownloadFinalizerRejectsHTTPFailureWithoutFalseDownloadedState() throws {
         let directory = try makeDirectory()
         let database = try makeDatabase(in: directory)

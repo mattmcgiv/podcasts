@@ -17,6 +17,7 @@ enum AdRemovalBlockingReason: String, Codable, CaseIterable {
     case storageLimit = "storage_limit"
     case lowPower = "low_power"
     case thermalPressure = "thermal_pressure"
+    // Retained so jobs persisted by older builds can be decoded and unblocked.
     case playbackActive = "playback_active"
 }
 
@@ -1129,7 +1130,6 @@ actor AdRemovalCoordinator {
 struct AdRemovalRuntimeConditions: Equatable {
     let lowPowerMode: Bool
     let seriousThermalPressure: Bool
-    let playbackActive: Bool
 }
 
 enum AdRemovalSchedulingPolicy {
@@ -1150,8 +1150,7 @@ enum AdRemovalSchedulingPolicy {
         for stage: AdRemovalJobStage,
         conditions: AdRemovalRuntimeConditions
     ) -> AdRemovalBlockingReason? {
-        guard stage == .transcribing || stage == .classifying else { return nil }
-        if conditions.playbackActive { return .playbackActive }
+        guard stage == .transcribing else { return nil }
         if conditions.lowPowerMode { return .lowPower }
         if conditions.seriousThermalPressure { return .thermalPressure }
         return nil

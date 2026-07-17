@@ -259,7 +259,10 @@ struct AdRemovalDownloadFinalizer {
         let contentType = response.value(forHTTPHeaderField: "Content-Type")?
             .split(separator: ";", maxSplits: 1)
             .first.map(String.init)?.lowercased() ?? ""
-        guard contentType.hasPrefix("audio/") || contentType == "application/octet-stream" || contentType.isEmpty else {
+        guard contentType.hasPrefix("audio/")
+                || contentType == "application/octet-stream"
+                || contentType == "binary/octet-stream"
+                || contentType.isEmpty else {
             throw AdRemovalDownloadError.unsupportedContentType(contentType)
         }
         let byteCount = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? 0

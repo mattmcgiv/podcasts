@@ -18,7 +18,7 @@ func PodsDebugLog(_ message: String) {
 }
 
 enum PodsTemporaryDebugLog {
-    static let expiryISO8601 = "2026-07-04T23:59:59Z"
+    static let expiryISO8601 = "2026-08-17T23:59:59Z"
 
     private static let maxFileBytes: UInt64 = 5 * 1024 * 1024
     private static let queue = DispatchQueue(label: "dev.mcgiv.pods.temporary-debug-log")

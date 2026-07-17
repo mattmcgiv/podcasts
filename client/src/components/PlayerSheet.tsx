@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { SPEEDS } from "../config";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
@@ -8,8 +9,15 @@ function shortName(name: string): string {
   return name.replace(/^Pods Speaker\s*\(/, "").replace(/\)$/, "").slice(0, 22);
 }
 
+let nextSpeedInteraction = 1;
+
+function speedCorrelationID(): string {
+  return `speed-${Date.now().toString(36)}-${nextSpeedInteraction++}`;
+}
+
 export function PlayerSheet() {
   const p = usePlayer();
+  const pendingSpeedInteraction = useRef<string | null>(null);
   if (!p.current || !p.expanded) return null;
   const ep = p.current;
 
@@ -25,7 +33,7 @@ export function PlayerSheet() {
         <span className="sheet-spacer" />
       </header>
 
-      <div className="sheet-body">
+      <div className="sheet-body sheet-scroll-region">
         <div className="sheet-art">
           <Artwork src={ep.image_url || ep.podcast_image} size={224} />
         </div>
@@ -84,8 +92,19 @@ export function PlayerSheet() {
           {SPEEDS.map((s) => (
             <button
               key={s}
-              className={`chip${p.speed === s ? " active" : ""}`}
-              onClick={() => p.setSpeed(s)}
+              type="button"
+              className={`chip speed-chip${p.speed === s ? " active" : ""}`}
+              onPointerDown={() => {
+                const correlationID = speedCorrelationID();
+                pendingSpeedInteraction.current = correlationID;
+                console.log(`speed_pointer_received correlation_id=${correlationID} requested_rate=${s}`);
+              }}
+              onClick={() => {
+                const correlationID = pendingSpeedInteraction.current ?? speedCorrelationID();
+                pendingSpeedInteraction.current = null;
+                console.log(`speed_click correlation_id=${correlationID} requested_rate=${s}`);
+                p.setSpeed(s, correlationID);
+              }}
             >
               {s}×
             </button>

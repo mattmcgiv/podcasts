@@ -234,3 +234,20 @@ final class AdRemovalPlaybackTests: XCTestCase {
         )
     }
 }
+
+final class PlaybackSpeedDiagnosticsTests: XCTestCase {
+    func testObservationConsumesThePendingCorrelationOnlyOnce() {
+        var tracker = PlaybackSpeedDiagnosticTracker()
+        tracker.begin(correlationID: "speed-123", requestedRate: 2.5)
+
+        XCTAssertEqual(tracker.takeObservation()?.correlationID, "speed-123")
+        XCTAssertNil(tracker.takeObservation())
+    }
+
+    func testTemporaryDiagnosticLogRemainsEnabledForSpeedInvestigation() throws {
+        let investigationDate = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-08-01T00:00:00Z")
+        )
+        XCTAssertTrue(PodsTemporaryDebugLog.isEnabled(now: investigationDate))
+    }
+}

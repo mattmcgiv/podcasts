@@ -15,6 +15,24 @@ enum PlaybackOutput: String {
     case mac
 }
 
+struct PlaybackSpeedDiagnosticObservation: Equatable {
+    let correlationID: String
+    let requestedRate: Float
+}
+
+struct PlaybackSpeedDiagnosticTracker {
+    private var pending: PlaybackSpeedDiagnosticObservation?
+
+    mutating func begin(correlationID: String, requestedRate: Float) {
+        pending = .init(correlationID: correlationID, requestedRate: requestedRate)
+    }
+
+    mutating func takeObservation() -> PlaybackSpeedDiagnosticObservation? {
+        defer { pending = nil }
+        return pending
+    }
+}
+
 /// Package-internal seam for forward-only MediaPlayer remote-command registration
 /// (Next Track / Skip Forward). Production uses `SystemRemoteForwardCommandRegistrar`;
 /// tests inject a fake that captures handlers. Play/Pause/Toggle stay on
@@ -100,7 +118,6 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     var diagnostics: AdRemovalDiagnostics?
     var adRemovalPlaybackProvider: AdRemovalPlaybackProviding?
     var adRemovalRangeServer: AdRemovalRangeServing?
-    var playbackActivityDidChange: ((Bool) -> Void)?
 
     private weak var webView: WKWebView?
     private var player: AVPlayer?
@@ -111,6 +128,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var lastRecordedEpisodeID: Int64?
     private var lastRecordedPosition: Double?
     private var requestedRate: Float = 1
+    private var speedDiagnosticTracker = PlaybackSpeedDiagnosticTracker()
     private var shouldResumeAfterInterruption = false
     private var nowPlayingMetadata: NowPlayingMetadata?
     private var nowPlayingArtwork: MPMediaItemArtwork?
@@ -220,7 +238,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             undoPendingAdSkip(id: id)
         case "rate":
             let rate = Self.normalizedRate(Self.floatValue(body["rate"]) ?? 1)
-            setRate(id: id, rate: rate)
+            let correlationID = body["correlationId"] as? String
+            if let correlationID {
+                PodsLog("speed_bridge_received correlation_id=\(correlationID) requested_rate=\(rate) player_id=\(id)")
+            }
+            setRate(id: id, rate: rate, correlationID: correlationID)
         case "stop":
             stop(id: id)
         case "castConnect":
@@ -752,8 +774,17 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         recordPlaybackProgress(position: safe, force: true, allowRegress: true)
     }
 
-    private func setRate(id: Int, rate: Float) {
+    private func setRate(id: Int, rate: Float, correlationID: String? = nil) {
         requestedRate = rate
+        if let correlationID {
+            speedDiagnosticTracker.begin(correlationID: correlationID, requestedRate: rate)
+            let actualRate = player?.rate ?? 0
+            let timeControlStatus = player.map { Self.timeControlStatusName($0.timeControlStatus) } ?? "no_player"
+            PodsLog(
+                "speed_apply_attempt correlation_id=\(correlationID) requested_rate=\(rate) actual_rate=\(actualRate) " +
+                "time_control_status=\(timeControlStatus) logical_paused=\(nowPlayingPaused) output=\(output.rawValue)"
+            )
+        }
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "rate", "rate": rate])
             if !nowPlayingPaused {
@@ -843,7 +874,25 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 playbackRate: player.rate,
                 paused: player.rate == 0
             )
+            self.logPendingSpeedObservation(actualRate: player.rate, source: "local_time_observer")
             self.recordPlaybackProgress(position: time.seconds)
+        }
+    }
+
+    private func logPendingSpeedObservation(actualRate: Float, source: String) {
+        guard let observation = speedDiagnosticTracker.takeObservation() else { return }
+        PodsLog(
+            "speed_apply_observed correlation_id=\(observation.correlationID) requested_rate=\(observation.requestedRate) " +
+            "actual_rate=\(actualRate) source=\(source)"
+        )
+    }
+
+    private static func timeControlStatusName(_ status: AVPlayer.TimeControlStatus) -> String {
+        switch status {
+        case .paused: return "paused"
+        case .waitingToPlayAtSpecifiedRate: return "waiting"
+        case .playing: return "playing"
+        @unknown default: return "unknown"
         }
     }
 
@@ -1296,7 +1345,6 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let active = isEpisodePlaybackActive
         guard active != lastReportedPlaybackActivity else { return }
         lastReportedPlaybackActivity = active
-        playbackActivityDidChange?(active)
         recordDiagnostic(
             eventName: "playback_activity_changed",
             severity: .info,

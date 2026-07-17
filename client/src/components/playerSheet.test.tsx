@@ -69,6 +69,18 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.getByRole("dialog", { name: "Player" })).toBeInTheDocument();
   });
 
+  it("keeps the minimize control outside the momentum-scrolling region", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+
+    const sheet = await screen.findByRole("dialog", { name: "Player" });
+    const scrollRegion = sheet.querySelector(".sheet-scroll-region");
+    const minimize = screen.getByRole("button", { name: "Minimize player" });
+
+    expect(scrollRegion).not.toBeNull();
+    expect(scrollRegion).not.toContainElement(minimize);
+  });
+
   it("speed chips set the playback rate", async () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));
@@ -77,6 +89,33 @@ describe("PlayerSheet + MiniPlayer", () => {
     await user.click(screen.getByRole("button", { name: "2.5×" }));
     expect(FakeAudio.last().playbackRate).toBe(2.5);
     expect(screen.getByRole("button", { name: "2.5×" })).toHaveClass("active");
+  });
+
+  it("gives every playback speed control a full-size touch target", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+
+    for (const speed of ["1×", "1.5×", "2×", "2.5×", "3×"]) {
+      expect(screen.getByRole("button", { name: speed })).toHaveClass("speed-chip");
+    }
+  });
+
+  it("correlates pointer receipt and click for a speed selection", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+
+    await user.click(await screen.findByRole("button", { name: "2×" }));
+
+    const pointer = log.mock.calls.find(([message]) => String(message).includes("speed_pointer_received"));
+    const click = log.mock.calls.find(([message]) => String(message).includes("speed_click"));
+    expect(pointer).toBeDefined();
+    expect(click).toBeDefined();
+    expect(String(click?.[0]).match(/correlation_id=([^ ]+)/)?.[1]).toBe(
+      String(pointer?.[0]).match(/correlation_id=([^ ]+)/)?.[1],
+    );
+    log.mockRestore();
   });
 
   it("scrubber seeks and time labels track", async () => {

@@ -3,6 +3,7 @@ export interface AudioEngine extends EventTarget {
   currentTime: number;
   duration: number;
   playbackRate: number;
+  setPlaybackRate?(rate: number, correlationId: string): void;
   paused: boolean;
   preload: string;
   loadSource?(src: string, position: number, episodeId?: number): void;
@@ -75,7 +76,7 @@ type NativeAudioCommandBody =
   | { command: "play" }
   | { command: "pause" }
   | { command: "seek"; seconds: number }
-  | { command: "rate"; rate: number }
+  | { command: "rate"; rate: number; correlationId?: string }
   | { command: "stop" }
   | { command: "castConnect" }
   | { command: "castDisconnect" }
@@ -170,6 +171,12 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     const rate = Number.isFinite(value) && value > 0 ? value : 1;
     this._playbackRate = rate;
     this.post({ command: "rate", rate });
+  }
+
+  setPlaybackRate(rate: number, correlationId: string): void {
+    const value = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    this._playbackRate = value;
+    this.post({ command: "rate", rate: value, correlationId });
   }
 
   get paused(): boolean {

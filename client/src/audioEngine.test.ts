@@ -33,6 +33,7 @@ describe("native audio bridge", () => {
       duration: 180,
     });
     audio.playbackRate = 2;
+    audio.setPlaybackRate?.(2.5, "speed-123");
     await audio.play();
     audio.currentTime = 42;
     audio.pause();
@@ -50,6 +51,7 @@ describe("native audio bridge", () => {
       }),
     );
     expect(messages).toContainEqual(expect.objectContaining({ command: "rate", rate: 2 }));
+    expect(messages).toContainEqual({ id: expect.any(Number), command: "rate", rate: 2.5, correlationId: "speed-123" });
     expect(messages).toContainEqual(expect.objectContaining({ command: "play" }));
     expect(messages).toContainEqual(expect.objectContaining({ command: "seek", seconds: 42 }));
     expect(messages).toContainEqual(expect.objectContaining({ command: "pause" }));

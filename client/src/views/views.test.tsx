@@ -147,6 +147,32 @@ describe("RecentView", () => {
     expect(FakeAudio.last().src).toBe("https://h.example/7.mp3");
   });
 
+  it("updates the Listen row progress from live playback", async () => {
+    installApi({
+      ...settings,
+      "GET /api/recent": page([
+        episode({
+          id: 8,
+          title: "Live progress",
+          audio_url: "https://h.example/8.mp3",
+          duration_secs: 100,
+          position_secs: 0,
+        }),
+      ]),
+      "GET /api/episodes/8": { ...episode({ id: 8 }), notes_html: "", archived_at: null },
+      "PUT /api/episodes/8/position": null,
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+    const row = (await screen.findByText("Live progress")).closest("li")!;
+
+    await user.click(within(row).getByRole("button", { name: /Live progress/ }));
+    act(() => FakeAudio.last().emitTime(25));
+
+    expect(within(row).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "25");
+    expect(row).toHaveTextContent("1m left");
+  });
+
   it("surfaces list errors", async () => {
     installApi({ ...settings, "GET /api/recent": new HttpError(500, { error: "db exploded" }) });
     wrap(<RecentView />);

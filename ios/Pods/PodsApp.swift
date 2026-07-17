@@ -105,13 +105,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 },
                 conditions: {
                     let thermalState = ProcessInfo.processInfo.thermalState
-                    let playbackActive = await MainActor.run {
-                        AudioBridge.shared.isEpisodePlaybackActive
-                    }
                     return AdRemovalRuntimeConditions(
                         lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-                        seriousThermalPressure: thermalState == .serious || thermalState == .critical,
-                        playbackActive: playbackActive
+                        seriousThermalPressure: thermalState == .serious || thermalState == .critical
                     )
                 },
                 diagnostics: adRemovalDiagnostics
@@ -163,9 +159,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             backend.setAdRemovalStopRequestHandler { [weak self, weak modelDownloader] in
                 await MainActor.run { self?.cancelAdRemovalWork() }
                 await modelDownloader?.cancel()
-            }
-            AudioBridge.shared.playbackActivityDidChange = { [weak self] active in
-                if !active { self?.requestAdRemovalRun() }
             }
             NotificationCenter.default.addObserver(
                 self,
