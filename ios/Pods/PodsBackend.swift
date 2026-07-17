@@ -478,7 +478,9 @@ final class PodsBackend: PlaybackProgressRecording {
             WHEN j.stage = 'failed' THEN 'retry'
             WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
             ELSE NULL
-        END AS ad_removal_action
+        END AS ad_removal_action,
+        j.stage AS ad_removal_stage,
+        j.blocking_reason AS ad_removal_blocking_reason
         FROM episodes e JOIN podcasts p ON p.id = e.podcast_id
         LEFT JOIN episode_state s ON s.episode_id = e.id
         LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
@@ -556,6 +558,7 @@ final class PodsBackend: PlaybackProgressRecording {
             model_download_state: modelDownloadState,
             episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
+            minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
             device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
             corrections: corrections
         )
@@ -1046,7 +1049,9 @@ final class PodsBackend: PlaybackProgressRecording {
         WHEN j.stage = 'failed' THEN 'retry'
         WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
         ELSE NULL
-    END AS ad_removal_action
+    END AS ad_removal_action,
+    j.stage AS ad_removal_stage,
+    j.blocking_reason AS ad_removal_blocking_reason
     FROM episodes e
     JOIN podcasts p ON p.id = e.podcast_id
     LEFT JOIN episode_state s ON s.episode_id = e.id
@@ -1075,7 +1080,9 @@ final class PodsBackend: PlaybackProgressRecording {
             position_secs: sqlite3_column_double(statement, 9),
             played_at: sqliteOptionalInt64(statement, 10),
             ad_removal_state: sqliteString(statement, 11),
-            ad_removal_action: sqliteOptionalString(statement, 12)
+            ad_removal_action: sqliteOptionalString(statement, 12),
+            ad_removal_stage: sqliteOptionalString(statement, 13),
+            ad_removal_blocking_reason: sqliteOptionalString(statement, 14)
         )
     }
 
@@ -1095,7 +1102,9 @@ final class PodsBackend: PlaybackProgressRecording {
             notes_html: sqliteString(statement, 11),
             archived_at: sqliteOptionalInt64(statement, 12),
             ad_removal_state: sqliteString(statement, 13),
-            ad_removal_action: sqliteOptionalString(statement, 14)
+            ad_removal_action: sqliteOptionalString(statement, 14),
+            ad_removal_stage: sqliteOptionalString(statement, 15),
+            ad_removal_blocking_reason: sqliteOptionalString(statement, 16)
         )
     }
 

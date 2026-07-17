@@ -16,6 +16,8 @@ struct EpisodeItem: Codable, Equatable {
     let played_at: Int64?
     let ad_removal_state: String
     let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
 }
 
 struct EpisodeDetail: Codable, Equatable {
@@ -34,6 +36,8 @@ struct EpisodeDetail: Codable, Equatable {
     let archived_at: Int64?
     let ad_removal_state: String
     let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
 }
 
 struct Show: Codable, Equatable {
@@ -78,6 +82,7 @@ struct AdRemovalSettingsPayload: Codable, Equatable {
     let model_download_state: String
     let episode_storage_bytes: Int64
     let episode_storage_limit_bytes: Int64
+    let minimum_free_bytes: Int64
     let device_available_bytes: Int64
     let corrections: [AdRemovalCorrectionCountPayload]
 }

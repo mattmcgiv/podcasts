@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { EpisodeItem } from "../types";
+import type { AdRemovalSettings, EpisodeItem } from "../types";
 
 type RouteValue =
   | unknown
@@ -73,6 +73,28 @@ export function episode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
     played_at: null,
     ad_removal_state: "unfiltered",
     ad_removal_action: "prepare",
+    ad_removal_stage: null,
+    ad_removal_blocking_reason: null,
+    ...overrides,
+  };
+}
+
+export function adRemovalSettings(
+  overrides: Partial<AdRemovalSettings> = {},
+): AdRemovalSettings {
+  return {
+    enabled: false,
+    enrollment_cutoff: null,
+    model_repository: "",
+    model_revision: "",
+    model_total_bytes: 3_060_000_000,
+    model_downloaded_bytes: 0,
+    model_download_state: "not_downloaded",
+    episode_storage_bytes: 0,
+    episode_storage_limit_bytes: 10_000_000_000,
+    device_available_bytes: 20_000_000_000,
+    minimum_free_bytes: 10_000_000_000,
+    corrections: [],
     ...overrides,
   };
 }

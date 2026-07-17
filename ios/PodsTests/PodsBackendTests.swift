@@ -205,6 +205,8 @@ final class PodsBackendTests: XCTestCase {
         let episode = try XCTUnwrap(try decode(Page<EpisodeItem>.self, from: recentResponse).items.first)
         XCTAssertEqual(episode.ad_removal_state, "unfiltered")
         XCTAssertEqual(episode.ad_removal_action, "prepare")
+        XCTAssertNil(episode.ad_removal_stage, "no job yet exposes nil stage")
+        XCTAssertNil(episode.ad_removal_blocking_reason, "no job yet exposes nil blocking reason")
 
         let prepared = try await call(
             harness.backend,
@@ -219,10 +221,22 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertEqual(detail.ad_removal_state, "preparing")
         XCTAssertNil(detail.ad_removal_action)
+        XCTAssertEqual(detail.ad_removal_stage, "queued", "freshly enqueued job reports exact queued stage")
+        XCTAssertNil(detail.ad_removal_blocking_reason)
 
         let store = AdRemovalJobStore(database: harness.database, retryBackoff: { _ in 0 })
         let job = try XCTUnwrap(try store.job(episodeID: episode.id))
         _ = try store.transition(jobID: job.id, to: .downloading)
+        let blocked = try store.setBlockingReason(jobID: job.id, reason: .storageLimit)
+        XCTAssertEqual(blocked.blockingReason, .storageLimit)
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_stage, "downloading", "downloading stage is exposed exactly")
+        XCTAssertEqual(detail.ad_removal_blocking_reason, "storage_limit", "storage_limit blocking reason is exposed")
+        _ = try store.setBlockingReason(jobID: job.id, reason: nil)
         for _ in 0..<3 {
             _ = try store.recordFailure(jobID: job.id, errorCode: "test", message: "failed")
         }
@@ -233,6 +247,8 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertEqual(detail.ad_removal_state, "failed")
         XCTAssertEqual(detail.ad_removal_action, "retry")
+        XCTAssertEqual(detail.ad_removal_stage, "failed", "failed stage is exposed exactly")
+        XCTAssertNil(detail.ad_removal_blocking_reason)
 
         let retried = try await call(
             harness.backend,
@@ -267,6 +283,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertNil(settings.enrollment_cutoff)
         XCTAssertEqual(settings.model_revision, AdModelManifest.qwen35FourBitV1.revision)
         XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen35FourBitV1.totalByteCount)
+        XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
 
         try harness.database.execute(
             "INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'ready'), ('ad_removal_model_downloaded_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

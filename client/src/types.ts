@@ -1,3 +1,20 @@
+export type AdRemovalStage =
+  | "queued"
+  | "downloading"
+  | "downloaded"
+  | "transcribing"
+  | "classifying"
+  | "ready"
+  | "failed"
+  | "cancelled";
+
+export type AdRemovalBlockingReason =
+  | "storage_limit"
+  | "model_required"
+  | "low_power"
+  | "thermal_pressure"
+  | "playback_active";
+
 export interface EpisodeItem {
   id: number;
   podcast_id: number;
@@ -12,6 +29,10 @@ export interface EpisodeItem {
   played_at: number | null;
   ad_removal_state: "preparing" | "ad-free" | "unfiltered" | "failed";
   ad_removal_action: "prepare" | "retry" | null;
+  /** Granular pipeline stage. Null when the backend only reports the coarse state. */
+  ad_removal_stage: AdRemovalStage | null;
+  /** Why an active stage is paused/waiting. Null when not blocked. */
+  ad_removal_blocking_reason: AdRemovalBlockingReason | null;
 }
 
 export interface EpisodeDetail extends EpisodeItem {
@@ -72,6 +93,8 @@ export interface AdRemovalSettings {
   episode_storage_bytes: number;
   episode_storage_limit_bytes: number;
   device_available_bytes: number;
+  /** Minimum free device bytes required to start new ad-removal work. */
+  minimum_free_bytes: number;
   corrections: AdRemovalCorrectionCount[];
 }
 

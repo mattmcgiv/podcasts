@@ -304,6 +304,27 @@ input {
   opacity: 0.5;
 }
 
+.ad-removal-retry {
+  color: var(--danger, #f06a6a);
+  font-weight: 800;
+  font-size: 12px;
+  padding: 0 8px;
+  border: 1px solid var(--danger, #f06a6a);
+  border-radius: 8px;
+}
+
+.low-storage-banner {
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid #6b4a1f;
+  background: #2a1d0e;
+  color: #ffd9a8;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .row-progress {
   height: 3px;
   border-radius: 2px;

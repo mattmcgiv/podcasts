@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { Api } from "../api";
 import { fmtDate, fmtRemaining, progressFraction } from "../lib";
-import type { EpisodeItem } from "../types";
+import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
+
+/** Bounded interval for polling an episode's ad-removal progress while nonterminal. */
+export const AD_POLL_INTERVAL_MS = 8_000;
 
 interface Props {
   item: EpisodeItem;
@@ -26,23 +29,90 @@ export function EpisodeRow({
 }: Props) {
   const progress = progressFraction(item);
   const [adState, setAdState] = useState(item.ad_removal_state);
+  const [adStage, setAdStage] = useState<AdRemovalStage | null>(item.ad_removal_stage);
+  const [adBlocking, setAdBlocking] = useState<AdRemovalBlockingReason | null>(
+    item.ad_removal_blocking_reason,
+  );
   const [adAction, setAdAction] = useState(item.ad_removal_action);
   const [adBusy, setAdBusy] = useState(false);
   const [adError, setAdError] = useState<string | null>(null);
 
   useEffect(() => {
     setAdState(item.ad_removal_state);
+    setAdStage(item.ad_removal_stage);
+    setAdBlocking(item.ad_removal_blocking_reason);
     setAdAction(item.ad_removal_action);
-  }, [item.ad_removal_action, item.ad_removal_state]);
+  }, [
+    item.ad_removal_action,
+    item.ad_removal_state,
+    item.ad_removal_stage,
+    item.ad_removal_blocking_reason,
+  ]);
+
+  // While the row is in a nonterminal ad-removal stage, poll the existing
+  // episode-detail API so backend stage/blocking/action changes appear without
+  // navigation. Polling is single-flight: the next request is scheduled only
+  // after the prior one settles, so at most one detail request is in flight per
+  // row and an older response can never apply after a newer one. Any same-id
+  // prop change (stage/blocking/action/state) re-runs this effect, which
+  // invalidates the active generation so a stale in-flight poll cannot
+  // overwrite newer props. Stop polling once terminal (ad-free, failed,
+  // unfiltered) or the row unmounts. Transient poll errors never replace the
+  // visible row state; they just reschedule.
+  useEffect(() => {
+    if (isTerminalAdState(adState)) return;
+    let active = true;
+    let generation = 0;
+    let timer: number | undefined;
+    const schedule = () => {
+      if (!active) return;
+      timer = window.setTimeout(tick, AD_POLL_INTERVAL_MS);
+    };
+    const tick = () => {
+      const mine = ++generation;
+      void Api.episode(item.id)
+        .then((detail) => {
+          if (!active || mine !== generation) return;
+          setAdState(detail.ad_removal_state);
+          setAdStage(detail.ad_removal_stage);
+          setAdBlocking(detail.ad_removal_blocking_reason);
+          setAdAction(detail.ad_removal_action);
+          schedule();
+        })
+        .catch(() => {
+          // Keep the last visible state; a transient poll error must not break the row.
+          if (!active) return;
+          schedule();
+        });
+    };
+    schedule();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+    // Re-run on any same-id prop advance so a stale in-flight poll is invalidated.
+  }, [
+    adState,
+    item.id,
+    item.ad_removal_state,
+    item.ad_removal_stage,
+    item.ad_removal_blocking_reason,
+    item.ad_removal_action,
+  ]);
 
   async function runAdRemovalAction() {
     if (!adAction || adBusy) return;
     setAdBusy(true);
     setAdError(null);
     try {
-      if (adAction === "retry") await Api.retryAdRemoval(item.id);
-      else await Api.prepareAdRemoval(item.id);
-      setAdState("preparing");
+      const result =
+        adAction === "retry"
+          ? await Api.retryAdRemoval(item.id)
+          : await Api.prepareAdRemoval(item.id);
+      // Use the returned stage immediately instead of collapsing to generic Preparing.
+      setAdStage(result.stage as AdRemovalStage);
+      setAdBlocking(null);
+      setAdState(stageToCoarseState(result.stage as AdRemovalStage));
       setAdAction(null);
     } catch (error) {
       setAdError(error instanceof Error ? error.message : String(error));
@@ -63,7 +133,7 @@ export function EpisodeRow({
             {fmtRemaining(item) && <> · {fmtRemaining(item)}</>}
           </span>
           <span className={`ad-removal-state is-${adState}`}>
-            {adStateLabel(adState)}
+            {adStageLabel(adState, adStage, adBlocking)}
           </span>
           {adError && <span className="ad-removal-error">{adError}</span>}
           {progress > 0 && !item.played_at && (
@@ -76,7 +146,7 @@ export function EpisodeRow({
       {adAction && (
         <button
           type="button"
-          className="ad-removal-action"
+          className={`ad-removal-action${adAction === "retry" ? " ad-removal-retry" : ""}`}
           aria-label={adAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
           title={adAction === "retry" ? "Retry ad-free preparation" : "Prepare ad-free"}
           disabled={adBusy}
@@ -107,11 +177,64 @@ export function EpisodeRow({
   );
 }
 
-function adStateLabel(state: EpisodeItem["ad_removal_state"]): string {
-  switch (state) {
-    case "preparing": return "Preparing";
-    case "ad-free": return "Ad-free";
-    case "failed": return "Failed";
-    case "unfiltered": return "Unfiltered";
+function isTerminalAdState(state: EpisodeItem["ad_removal_state"]): boolean {
+  return state === "ad-free" || state === "failed" || state === "unfiltered";
+}
+
+function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
+  switch (stage) {
+    case "ready":
+      return "ad-free";
+    case "failed":
+      return "failed";
+    // The backend cancelled job stage maps to the user-facing Unfiltered state.
+    case "cancelled":
+      return "unfiltered";
+    default:
+      return "preparing";
+  }
+}
+
+function adStageLabel(
+  state: EpisodeItem["ad_removal_state"],
+  stage: AdRemovalStage | null,
+  blocking: AdRemovalBlockingReason | null,
+): string {
+  // Terminal states always surface their own wording so Failed stays obvious.
+  if (state === "failed" || stage === "failed") return "Failed";
+  if (state === "ad-free" || stage === "ready") return "Ad-free";
+  // A cancelled job stage is deliberately rendered as the Unfiltered state.
+  if (state === "unfiltered" || stage === "cancelled") return "Unfiltered";
+
+  // An active stage may be paused/waiting; the blocking reason overrides wording.
+  if (blocking) {
+    switch (blocking) {
+      case "storage_limit":
+        return "Paused · low storage";
+      case "model_required":
+        return "Waiting for model";
+      case "low_power":
+        return "Paused · low power";
+      case "thermal_pressure":
+        return "Paused · thermal";
+      case "playback_active":
+        return "Paused during playback";
+    }
+  }
+
+  switch (stage) {
+    case "queued":
+      return "Queued";
+    case "downloading":
+      return "Downloading";
+    case "downloaded":
+      return "Downloaded";
+    case "transcribing":
+      return "Transcribing";
+    case "classifying":
+      return "Finding ads";
+    default:
+      // No granular stage reported; fall back to the coarse Preparing label.
+      return "Preparing";
   }
 }
