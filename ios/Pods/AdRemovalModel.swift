@@ -326,7 +326,9 @@ final class AdModelAssetStore {
         defer { try? handle.close() }
         var hasher = SHA256()
         while true {
-            let data = try handle.read(upToCount: 1_048_576) ?? Data()
+            // Drain Foundation's autoreleased file-read buffer per chunk so live
+            // memory stays bounded for files much larger than process memory.
+            let data = try autoreleasepool { try handle.read(upToCount: 1_048_576) ?? Data() }
             if data.isEmpty { break }
             hasher.update(data: data)
         }

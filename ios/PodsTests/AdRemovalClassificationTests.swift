@@ -1,3 +1,5 @@
+import CryptoKit
+import Darwin
 import XCTest
 @testable import Pods
 
@@ -291,6 +293,94 @@ final class AdRemovalClassificationTests: XCTestCase {
             "SELECT value FROM settings WHERE key = 'ad_removal_model_byte_count'",
             map: { sqliteString($0, 0) }
         ).first, "13")
+    }
+
+    func testStreamingHashKeepsPhysicalFootprintBoundedForLargeFile() throws {
+        // Regression for the physical-iPhone jetsam crash: verifying a multi-GiB
+        // model file must keep live chunk-buffer memory bounded instead of letting
+        // autoreleased Foundation read buffers accumulate for the whole file. The
+        // fixture is a sparse 256 MiB file (no written pages) so every read returns
+        // a freshly allocated 1 MiB buffer of zeros while disk and runtime stay
+        // small. The expected digest is computed independently from the known
+        // zero-byte pattern, not by reading the fixture through production code.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdRemovalStreamingHash-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try AdModelAssetStore(rootURL: directory.appendingPathComponent("Models"))
+
+        let totalBytes: Int64 = 256 * 1024 * 1024
+        let expectedHash = Self.sha256OfRepeatedByte(0, byteCount: totalBytes)
+        let manifest = AdModelManifest(
+            repository: "owner/model",
+            revision: "abc123",
+            files: [
+                AdModelFile(
+                    relativePath: "weights.bin",
+                    byteCount: totalBytes,
+                    sha256: expectedHash
+                )
+            ]
+        )
+
+        let url = try store.fileURL(for: manifest.files[0], manifest: manifest)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let writer = try FileHandle(forWritingTo: url)
+        try writer.truncate(atOffset: UInt64(totalBytes))
+        try writer.close()
+
+        let baseline = Self.physicalFootprintBytes()
+
+        // Only the lightweight physical-footprint sampler runs asynchronously. It
+        // polls process-wide phys_footprint (which includes the test thread's
+        // verify allocations) while a synchronized stop flag is set, tracks the
+        // peak under the lock, and signals a join semaphore when it exits.
+        let lock = NSLock()
+        var sampling = true
+        var peak = baseline
+        let samplerDone = DispatchSemaphore(value: 0)
+        let sampler = DispatchWorkItem {
+            while true {
+                lock.lock(); let go = sampling; lock.unlock()
+                if !go { break }
+                let footprint = Self.physicalFootprintBytes()
+                lock.lock()
+                if footprint > peak { peak = footprint }
+                lock.unlock()
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            samplerDone.signal()
+        }
+        DispatchQueue.global(qos: .userInitiated).async(execute: sampler)
+
+        // Teardown: registered after the fixture-removal defer, so LIFO ordering
+        // joins the sampler before fixture deletion on both success and throw
+        // paths (including a throwing store.verify). The memory-bound assertion
+        // runs after samplerDone.wait() so `peak` is read only after the sampler
+        // has exited and can no longer write it.
+        defer {
+            lock.lock(); sampling = false; lock.unlock()
+            samplerDone.wait()
+            // Memory bound: a bounded streaming hash keeps at most a handful of
+            // 1 MiB chunk buffers live. Unbounded autoreleased read buffers
+            // accumulate the whole file (>= 256 MiB), blowing past this bound.
+            // Hash correctness is proven by verify completing without throwing on
+            // the known-pattern digest.
+            let delta = peak > baseline ? peak - baseline : 0
+            let maxDelta: UInt64 = 64 * 1024 * 1024
+            XCTAssertLessThan(
+                delta,
+                maxDelta,
+                "streaming hash retained \(delta / 1024 / 1024) MiB while verifying a 256 MiB file; expected bounded footprint"
+            )
+        }
+
+        // Verification runs synchronously on the XCTest thread: it has fully
+        // returned before any assertion or fixture teardown. Xcode's test runner
+        // owns the true hang timeout, so the test never tears down mid-work.
+        try store.verify(manifest: manifest)
     }
 
     func testModelDownloadsAreWiFiOnlyAndRequireExactSizeConsent() {
@@ -621,6 +711,32 @@ final class AdRemovalClassificationTests: XCTestCase {
             createdAt: createdAt,
             active: true
         )
+    }
+
+    private static func sha256OfRepeatedByte(_ byte: UInt8, byteCount: Int64) -> String {
+        // Independent source of truth: hash the known byte pattern directly from
+        // an in-memory chunk, never through the production file-read path.
+        var hasher = SHA256()
+        let chunk = Data(repeating: byte, count: 1_048_576)
+        var remaining = byteCount
+        while remaining > 0 {
+            let take = Int(min(Int64(chunk.count), remaining))
+            hasher.update(data: chunk.prefix(take))
+            remaining -= Int64(take)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func physicalFootprintBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kernReturn = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard kernReturn == KERN_SUCCESS else { return 0 }
+        return info.phys_footprint
     }
 
     private struct ClassificationHarness {
