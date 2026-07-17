@@ -33,6 +33,18 @@ final class PodsDatabase {
 
     func installSchemaIfNeeded() throws {
         try executeScript(Self.schemaSQL)
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_relative_path", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_sha256", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_byte_count", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "downloaded_at", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "download_resume_relative_path", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "transcriber_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "transcribed_at", definition: "INTEGER")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classification_run_id", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classifier_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "prompt_version", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classifier_quantization", definition: "TEXT")
+        try addColumnIfMissing(table: "ad_removal_jobs", column: "classified_at", definition: "INTEGER")
     }
 
     func withTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -114,6 +126,14 @@ final class PodsDatabase {
         guard code == SQLITE_DONE || code == SQLITE_ROW else {
             throw PodsBackendError.database(lastErrorMessage())
         }
+    }
+
+    private func addColumnIfMissing(table: String, column: String, definition: String) throws {
+        let columns = try query("PRAGMA table_info(\(table))") { statement in
+            sqliteString(statement, 1)
+        }
+        guard !columns.contains(column) else { return }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)")
     }
 
     private func bind(_ values: [SQLiteValue], to statement: OpaquePointer?) throws {
@@ -208,6 +228,120 @@ final class PodsDatabase {
         podcast_id INTEGER PRIMARY KEY REFERENCES podcasts(id) ON DELETE CASCADE,
         etag TEXT,
         last_modified TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ad_removal_jobs (
+        id TEXT PRIMARY KEY,
+        episode_id INTEGER NOT NULL UNIQUE REFERENCES episodes(id) ON DELETE CASCADE,
+        podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        blocking_reason TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        failed_stage TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        retry_eligible INTEGER NOT NULL DEFAULT 1,
+        next_retry_at INTEGER,
+        audio_relative_path TEXT,
+        audio_sha256 TEXT,
+        audio_byte_count INTEGER,
+        downloaded_at INTEGER,
+        download_resume_relative_path TEXT,
+        transcriber_version TEXT,
+        transcribed_at INTEGER,
+        classification_run_id TEXT,
+        classifier_version TEXT,
+        prompt_version TEXT,
+        classifier_quantization TEXT,
+        classified_at INTEGER,
+        enrolled_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_removal_jobs_stage
+        ON ad_removal_jobs(stage, blocking_reason, enrolled_at);
+
+    CREATE TABLE IF NOT EXISTS ad_transcript_segments (
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        segment_id TEXT NOT NULL,
+        segment_index INTEGER NOT NULL,
+        language TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY (episode_id, segment_id),
+        UNIQUE (episode_id, segment_index)
+    );
+
+    CREATE TABLE IF NOT EXISTS ad_skip_ranges (
+        id TEXT PRIMARY KEY,
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        start_segment_id TEXT NOT NULL,
+        end_segment_id TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        end_time REAL NOT NULL,
+        confidence REAL NOT NULL,
+        reason TEXT NOT NULL,
+        classifier_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (episode_id, start_segment_id)
+            REFERENCES ad_transcript_segments(episode_id, segment_id) ON DELETE CASCADE,
+        FOREIGN KEY (episode_id, end_segment_id)
+            REFERENCES ad_transcript_segments(episode_id, segment_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_skip_ranges_episode_time
+        ON ad_skip_ranges(episode_id, start_time, end_time);
+
+    CREATE TABLE IF NOT EXISTS ad_classification_windows (
+        run_id TEXT NOT NULL,
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        window_index INTEGER NOT NULL,
+        segment_ids_json TEXT NOT NULL,
+        correction_ids_json TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        raw_output TEXT NOT NULL,
+        schema_valid INTEGER NOT NULL,
+        validation_error TEXT,
+        labels_json TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        model_revision TEXT NOT NULL,
+        quantization TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        max_context_tokens INTEGER NOT NULL,
+        max_output_tokens INTEGER NOT NULL,
+        temperature REAL NOT NULL,
+        top_p REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, window_index)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_classification_windows_episode
+        ON ad_classification_windows(episode_id, created_at, window_index);
+
+    CREATE TABLE IF NOT EXISTS ad_corrections (
+        id TEXT PRIMARY KEY,
+        podcast_id INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+        source_episode_id INTEGER NOT NULL,
+        transcript_window TEXT NOT NULL,
+        classification_context TEXT NOT NULL,
+        classifier_version TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ad_corrections_podcast_active
+        ON ad_corrections(podcast_id, active, created_at);
+
+    CREATE TABLE IF NOT EXISTS ad_artifact_cleanup (
+        relative_path TEXT PRIMARY KEY,
+        reason TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);

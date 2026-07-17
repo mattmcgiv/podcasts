@@ -11,6 +11,8 @@
 		20A000000000000000000002 /* CastServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000012 /* CastServer.swift */; };
 		20A000000000000000000003 /* SpeakerPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000013 /* SpeakerPlayer.swift */; };
 		20A000000000000000000004 /* CastProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A000000000000000000014 /* CastProtocol.swift */; };
+		20E000000000000000000001 /* AdRemovalDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20E000000000000000000011 /* AdRemovalDiagnostics.swift */; };
+		20F000000000000000000001 /* PodsSpeakerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F000000000000000000011 /* PodsSpeakerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,10 +22,30 @@
 		20A000000000000000000013 /* SpeakerPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakerPlayer.swift; sourceTree = "<group>"; };
 		20A000000000000000000014 /* CastProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastProtocol.swift; sourceTree = "<group>"; };
 		20A000000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		20E000000000000000000011 /* AdRemovalDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AdRemovalDiagnostics.swift; path = ../../shared/AdRemovalDiagnostics.swift; sourceTree = "<group>"; };
+		20F000000000000000000010 /* PodsSpeakerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PodsSpeakerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		20F000000000000000000011 /* PodsSpeakerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsSpeakerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		20F000000000000000000020 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 20A000000000000000000060 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 20A000000000000000000040;
+			remoteInfo = PodsSpeaker;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		20A000000000000000000020 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		20F000000000000000000021 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -37,13 +59,23 @@
 			isa = PBXGroup;
 			children = (
 				20A000000000000000000031 /* PodsSpeaker */,
+				20F000000000000000000030 /* PodsSpeakerTests */,
 				20A000000000000000000033 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		20F000000000000000000030 /* PodsSpeakerTests */ = {
+			isa = PBXGroup;
+			children = (
+				20F000000000000000000011 /* PodsSpeakerTests.swift */,
+			);
+			path = PodsSpeakerTests;
 			sourceTree = "<group>";
 		};
 		20A000000000000000000031 /* PodsSpeaker */ = {
 			isa = PBXGroup;
 			children = (
+				20E000000000000000000011 /* AdRemovalDiagnostics.swift */,
 				20A000000000000000000011 /* PodsSpeakerApp.swift */,
 				20A000000000000000000012 /* CastServer.swift */,
 				20A000000000000000000013 /* SpeakerPlayer.swift */,
@@ -57,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				20A000000000000000000010 /* Pods Speaker.app */,
+				20F000000000000000000010 /* PodsSpeakerTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -80,6 +113,23 @@
 			productReference = 20A000000000000000000010 /* Pods Speaker.app */;
 			productType = "com.apple.product-type.application";
 		};
+		20F000000000000000000040 /* PodsSpeakerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 20F000000000000000000070 /* Build configuration list for PBXNativeTarget "PodsSpeakerTests" */;
+			buildPhases = (
+				20F000000000000000000050 /* Sources */,
+				20F000000000000000000021 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				20F000000000000000000060 /* PBXTargetDependency */,
+			);
+			name = PodsSpeakerTests;
+			productName = PodsSpeakerTests;
+			productReference = 20F000000000000000000010 /* PodsSpeakerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -93,6 +143,9 @@
 					20A000000000000000000040 = {
 						CreatedOnToolsVersion = 16.0;
 						ProvisioningStyle = Automatic;
+					};
+					20F000000000000000000040 = {
+						CreatedOnToolsVersion = 16.0;
 					};
 				};
 			};
@@ -110,6 +163,7 @@
 			projectRoot = "";
 			targets = (
 				20A000000000000000000040 /* PodsSpeaker */,
+				20F000000000000000000040 /* PodsSpeakerTests */,
 			);
 		};
 /* End PBXProject section */
@@ -119,6 +173,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				20E000000000000000000001 /* AdRemovalDiagnostics.swift in Sources */,
 				20A000000000000000000001 /* PodsSpeakerApp.swift in Sources */,
 				20A000000000000000000002 /* CastServer.swift in Sources */,
 				20A000000000000000000003 /* SpeakerPlayer.swift in Sources */,
@@ -126,7 +181,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		20F000000000000000000050 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				20F000000000000000000001 /* PodsSpeakerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		20F000000000000000000060 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 20A000000000000000000040 /* PodsSpeaker */;
+			targetProxy = 20F000000000000000000020 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		20A000000000000000000062 /* Debug */ = {
@@ -164,6 +235,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 7626CK2W2G;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = PodsSpeaker/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -201,6 +273,38 @@
 			};
 			name = Release;
 		};
+		20F000000000000000000071 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 7626CK2W2G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods.speaker.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pods Speaker.app/Contents/MacOS/Pods Speaker";
+			};
+			name = Debug;
+		};
+		20F000000000000000000072 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 7626CK2W2G;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.mcgiv.pods.speaker.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Pods Speaker.app/Contents/MacOS/Pods Speaker";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -218,6 +322,15 @@
 			buildConfigurations = (
 				20A000000000000000000071 /* Debug */,
 				20A000000000000000000072 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		20F000000000000000000070 /* Build configuration list for PBXNativeTarget "PodsSpeakerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				20F000000000000000000071 /* Debug */,
+				20F000000000000000000072 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

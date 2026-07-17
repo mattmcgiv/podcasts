@@ -1,3 +1,20 @@
+export type AdRemovalStage =
+  | "queued"
+  | "downloading"
+  | "downloaded"
+  | "transcribing"
+  | "classifying"
+  | "ready"
+  | "failed"
+  | "cancelled";
+
+export type AdRemovalBlockingReason =
+  | "storage_limit"
+  | "model_required"
+  | "low_power"
+  | "thermal_pressure"
+  | "playback_active";
+
 export interface EpisodeItem {
   id: number;
   podcast_id: number;
@@ -10,6 +27,14 @@ export interface EpisodeItem {
   image_url: string;
   position_secs: number;
   played_at: number | null;
+  ad_removal_state: "preparing" | "ad-free" | "unfiltered" | "failed";
+  ad_removal_action: "prepare" | "retry" | null;
+  /** Granular pipeline stage. Null when the backend only reports the coarse state. */
+  ad_removal_stage: AdRemovalStage | null;
+  /** Why an active stage is paused/waiting. Null when not blocked. */
+  ad_removal_blocking_reason: AdRemovalBlockingReason | null;
+  ad_removal_completed_windows?: number | null;
+  ad_removal_total_windows?: number | null;
 }
 
 export interface EpisodeDetail extends EpisodeItem {
@@ -53,6 +78,29 @@ export interface Settings {
   autoplay: boolean;
 }
 
+export interface AdRemovalCorrectionCount {
+  podcast_id: number;
+  podcast_title: string;
+  count: number;
+}
+
+export interface AdRemovalSettings {
+  enabled: boolean;
+  enrollment_cutoff: number | null;
+  cloud_classifier_configured: boolean;
+  model_repository: string;
+  model_revision: string;
+  model_total_bytes: number;
+  model_downloaded_bytes: number;
+  model_download_state: string;
+  episode_storage_bytes: number;
+  episode_storage_limit_bytes: number;
+  device_available_bytes: number;
+  /** Minimum free device bytes required to start new ad-removal work. */
+  minimum_free_bytes: number;
+  corrections: AdRemovalCorrectionCount[];
+}
+
 export interface RefreshStatus {
   last_attempt_at: number | null;
   last_success_at: number | null;
@@ -67,3 +115,18 @@ export interface ShowDetailResponse {
 }
 
 export type PlayContext = "recent" | "show";
+
+/** Lightweight ad-removal status record returned by the batch statuses poll. */
+export interface AdRemovalStatusItem {
+  id: number;
+  ad_removal_state: EpisodeItem["ad_removal_state"];
+  ad_removal_action: EpisodeItem["ad_removal_action"];
+  ad_removal_stage: EpisodeItem["ad_removal_stage"];
+  ad_removal_blocking_reason: EpisodeItem["ad_removal_blocking_reason"];
+  ad_removal_completed_windows: number | null;
+  ad_removal_total_windows: number | null;
+}
+
+export interface AdRemovalStatusesPayload {
+  items: AdRemovalStatusItem[];
+}

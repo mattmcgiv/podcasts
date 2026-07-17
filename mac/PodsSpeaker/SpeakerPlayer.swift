@@ -8,6 +8,8 @@ import MediaPlayer
 /// callbacks are hopped to main — updating `@Published` off-main has crashed this app.
 @MainActor
 final class SpeakerPlayer: ObservableObject {
+    static let progressReportInterval: TimeInterval = 0.25
+
     var onEvent: (([String: Any]) -> Void)?
 
     @Published private(set) var isPlaying = false
@@ -25,6 +27,8 @@ final class SpeakerPlayer: ObservableObject {
     private var lastKnownPosition: Double = 0
     private var isStopping = false
     private var loadGeneration: UInt64 = 0
+    private var playbackSessionID: String?
+    private let diagnostics: AdRemovalDiagnostics?
 
     /// Last finite playback position, for disconnect/stop events that must not report 0.
     var currentPositionSeconds: Double {
@@ -34,11 +38,18 @@ final class SpeakerPlayer: ObservableObject {
         return lastKnownPosition.isFinite ? max(0, lastKnownPosition) : 0
     }
 
-    init() {
+    init(diagnostics: AdRemovalDiagnostics? = nil) {
+        self.diagnostics = diagnostics
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(itemEnded(_:)),
             name: .AVPlayerItemDidPlayToEndTime,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(itemStalled(_:)),
+            name: .AVPlayerItemPlaybackStalled,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -58,6 +69,14 @@ final class SpeakerPlayer: ObservableObject {
 
     func handle(command body: [String: Any]) {
         guard let cmd = body["cmd"] as? String else { return }
+        if cmd == "load" {
+            playbackSessionID = AdRemovalPlaybackSession.sessionID(from: body)
+        }
+        recordDiagnostic(
+            eventName: "mac_playback_command",
+            severity: .debug,
+            fields: ["command": cmd]
+        )
         switch cmd {
         case "load":
             guard let src = body["src"] as? String, let url = URL(string: src) else { return }
@@ -124,6 +143,11 @@ final class SpeakerPlayer: ObservableObject {
         }
 
         let item = AVPlayerItem(url: url)
+        recordDiagnostic(
+            eventName: "mac_player_source_load",
+            severity: .notice,
+            fields: ["source": Self.logSafeSource(url), "position": "\(max(0, position))"]
+        )
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         player = newPlayer
@@ -260,7 +284,7 @@ final class SpeakerPlayer: ObservableObject {
         removeTimeObserver()
         observedPlayer = player
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+            forInterval: CMTime(seconds: Self.progressReportInterval, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
             Task { @MainActor [weak self] in
@@ -328,12 +352,38 @@ final class SpeakerPlayer: ObservableObject {
                 return
             }
             let message = failed.error?.localizedDescription ?? "playback failed"
+            self.player?.pause()
             self.publishUI(playing: false)
             self.updateNowPlaying(rate: 0, paused: true)
             self.emit([
                 "type": "error",
                 "message": message,
                 "position": self.player?.currentTime().seconds ?? 0,
+                "paused": true,
+            ])
+        }
+    }
+
+    @objc private func itemStalled(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let stalled = notification.object as? AVPlayerItem,
+                  stalled === self.player?.currentItem else {
+                return
+            }
+            let position = self.currentPositionSeconds
+            self.player?.pause()
+            self.publishUI(playing: false)
+            self.updateNowPlaying(position: position, rate: 0, paused: true)
+            self.recordDiagnostic(
+                eventName: "mac_stream_stalled",
+                severity: .warning,
+                fields: ["position": String(position)]
+            )
+            self.emit([
+                "type": "error",
+                "message": "iPhone audio stream stalled",
+                "position": position,
                 "paused": true,
             ])
         }
@@ -391,6 +441,15 @@ final class SpeakerPlayer: ObservableObject {
         return value
     }
 
+    private static func logSafeSource(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return "invalid"
+        }
+        components.query = nil
+        components.fragment = nil
+        return components.string ?? "invalid"
+    }
+
     private func emit(_ fields: [String: Any]) {
         var payload: [String: Any] = ["v": CastProtocol.version]
         for (k, v) in fields {
@@ -400,7 +459,32 @@ final class SpeakerPlayer: ObservableObject {
             // JSONSerialization is happiest with NSNumber-friendly ints.
             payload["episodeId"] = NSNumber(value: episodeID)
         }
+        if let playbackSessionID {
+            payload = AdRemovalPlaybackSession.attaching(sessionID: playbackSessionID, to: payload)
+        }
+        let eventType = fields["type"] as? String ?? "unknown"
+        recordDiagnostic(
+            eventName: "mac_playback_event",
+            severity: eventType == "error" ? .error : .debug,
+            fields: [
+                "event_type": eventType,
+                "position": CastProtocol.doubleValue(fields["position"]).map { String($0) } ?? "unknown"
+            ]
+        )
         onEvent?(payload)
+    }
+
+    private func recordDiagnostic(
+        eventName: String,
+        severity: AdRemovalDiagnosticSeverity,
+        fields: [String: String] = [:]
+    ) {
+        try? diagnostics?.record(
+            eventName: eventName,
+            severity: severity,
+            context: .init(episodeID: episodeID, playbackSessionID: playbackSessionID),
+            fields: fields
+        )
     }
 
     // MARK: - Now Playing

@@ -2,6 +2,7 @@ node_modules/
 dist/
 target/
 coverage/
+.local/ad-removal-corpus/
 *.env
 .env*
 !.env.example

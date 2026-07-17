@@ -47,6 +47,8 @@ final class PodsBackendTests: XCTestCase {
         let backend: PodsBackend
         let fetcher: MockFeedFetcher
         let directory: URL
+        let database: PodsDatabase
+        let adRemovalArtifactStore: AdRemovalArtifactStore
     }
 
     private func makeHarness(directorySearcher: PodcastDirectorySearching? = nil) throws -> Harness {
@@ -54,13 +56,23 @@ final class PodsBackendTests: XCTestCase {
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        let adRemovalArtifactStore = try AdRemovalArtifactStore(
+            rootURL: directory.appendingPathComponent("AdRemoval", isDirectory: true)
+        )
         let fetcher = MockFeedFetcher()
         let backend = PodsBackend(
             database: database,
             feedFetcher: fetcher,
-            directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher()
+            directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: adRemovalArtifactStore
         )
-        return Harness(backend: backend, fetcher: fetcher, directory: directory)
+        return Harness(
+            backend: backend,
+            fetcher: fetcher,
+            directory: directory,
+            database: database,
+            adRemovalArtifactStore: adRemovalArtifactStore
+        )
     }
 
     private func call(
@@ -178,6 +190,495 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(saved, SettingsPayload(speed: 2.5, autoplay: false))
         let invalidSettings = try await call(harness.backend, "PUT", "/api/settings", json: ["speed": 9.9, "autoplay": true])
         XCTAssertEqual(invalidSettings.statusCode, 422)
+    }
+
+    func testEpisodeAdRemovalStatePrepareAndRetryRoundTrip() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/ad-state.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Ad State",
+            items: [("Episode", "ad-state-1", "https://h.example/ad-state.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let recentResponse = try await call(harness.backend, "GET", "/api/recent")
+        let episode = try XCTUnwrap(try decode(Page<EpisodeItem>.self, from: recentResponse).items.first)
+        XCTAssertEqual(episode.ad_removal_state, "unfiltered")
+        XCTAssertEqual(episode.ad_removal_action, "prepare")
+        XCTAssertNil(episode.ad_removal_stage, "no job yet exposes nil stage")
+        XCTAssertNil(episode.ad_removal_blocking_reason, "no job yet exposes nil blocking reason")
+
+        let prepared = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episode.id)/ad-removal/prepare"
+        )
+        XCTAssertEqual(prepared.statusCode, 202)
+        var detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "preparing")
+        XCTAssertNil(detail.ad_removal_action)
+        XCTAssertEqual(detail.ad_removal_stage, "queued", "freshly enqueued job reports exact queued stage")
+        XCTAssertNil(detail.ad_removal_blocking_reason)
+
+        let store = AdRemovalJobStore(database: harness.database, retryBackoff: { _ in 0 })
+        let job = try XCTUnwrap(try store.job(episodeID: episode.id))
+        _ = try store.transition(jobID: job.id, to: .downloading)
+        let blocked = try store.setBlockingReason(jobID: job.id, reason: .storageLimit)
+        XCTAssertEqual(blocked.blockingReason, .storageLimit)
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_stage, "downloading", "downloading stage is exposed exactly")
+        XCTAssertEqual(detail.ad_removal_blocking_reason, "storage_limit", "storage_limit blocking reason is exposed")
+        _ = try store.setBlockingReason(jobID: job.id, reason: nil)
+        for _ in 0..<3 {
+            _ = try store.recordFailure(jobID: job.id, errorCode: "test", message: "failed")
+        }
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "failed")
+        XCTAssertEqual(detail.ad_removal_action, "retry")
+        XCTAssertEqual(detail.ad_removal_stage, "failed", "failed stage is exposed exactly")
+        XCTAssertNil(detail.ad_removal_blocking_reason)
+
+        let retried = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episode.id)/ad-removal/retry"
+        )
+        XCTAssertEqual(retried.statusCode, 202)
+        detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(episode.id)"
+        ))
+        XCTAssertEqual(detail.ad_removal_state, "preparing")
+        XCTAssertNil(detail.ad_removal_action)
+    }
+
+    func testAdRemovalStatusesReturnsLightweightOrderedRecordsForExistingEpisodes() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/statuses.xml"
+        // Three episodes; the subscription backfill keeps only the newest two in
+        // Listen (the oldest is archived). The two recent episodes are the ones
+        // the batch endpoint is meant to serve.
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Statuses",
+            items: [
+                ("Ep A", "status-a", "https://h.example/a.mp3", Self.d1),
+                ("Ep B", "status-b", "https://h.example/b.mp3", Self.d2),
+                ("Ep C", "status-c", "https://h.example/c.mp3", Self.d3),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        // The two newest episodes (B and C) remain in Listen; the oldest (A) is archived.
+        let episodes = recent.items.sorted { $0.id < $1.id }
+        XCTAssertEqual(episodes.count, 2, "newest two episodes are kept in Listen")
+        let bID = episodes[0].id
+        let cID = episodes[1].id
+
+        // Enqueue a job for B so it reports a preparing stage; leave C unfiltered.
+        _ = try await call(harness.backend, "POST", "/api/episodes/\(bID)/ad-removal/prepare")
+        let store = AdRemovalJobStore(database: harness.database, retryBackoff: { _ in 0 })
+        let bJob = try XCTUnwrap(try store.job(episodeID: bID))
+        _ = try store.transition(jobID: bJob.id, to: .downloading)
+        _ = try store.setBlockingReason(jobID: bJob.id, reason: .storageLimit)
+
+        // Request in a deliberately non-sorted, deduplicated order including a
+        // non-existent id and an archived id. Existing recent records must come
+        // back in REQUESTED order, missing/non-recent ids are omitted, and
+        // duplicates collapse to one record.
+        let archivedID = try XCTUnwrap(try harness.database.scalarInt64("SELECT id FROM episodes WHERE title = 'Ep A'"))
+        let requestedIDs = [cID, bID, cID, 9_999_999, archivedID]
+        let target = "/api/ad-removal/statuses?episode_ids=\(requestedIDs.map(String.init).joined(separator: ","))"
+        let response = try await call(harness.backend, "GET", target)
+        XCTAssertEqual(response.statusCode, 200)
+        let payload = try decode(AdRemovalStatusesPayload.self, from: response)
+
+        // Deduplicated requested order, minus the non-existent id. The archived
+        // episode still exists in the episodes table, so it is returned too —
+        // preserving requested order across all existing ids.
+        let expectedOrder = [cID, bID, archivedID]
+        XCTAssertEqual(payload.items.map { $0.id }, expectedOrder, "records preserve requested order and omit missing ids")
+
+        let byID = Dictionary(uniqueKeysWithValues: payload.items.map { ($0.id, $0) })
+        XCTAssertEqual(byID[bID]?.ad_removal_state, "preparing")
+        XCTAssertNil(byID[bID]?.ad_removal_action)
+        XCTAssertEqual(byID[bID]?.ad_removal_stage, "downloading")
+        XCTAssertEqual(byID[bID]?.ad_removal_blocking_reason, "storage_limit")
+
+        XCTAssertEqual(byID[cID]?.ad_removal_state, "unfiltered")
+        XCTAssertEqual(byID[cID]?.ad_removal_action, "prepare")
+        XCTAssertNil(byID[cID]?.ad_removal_stage)
+        XCTAssertNil(byID[cID]?.ad_removal_blocking_reason)
+
+        // Lightweight: the response must not contain notes_html anywhere.
+        let raw = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertFalse(raw.contains("notes_html"), "batch statuses must not serialize notes_html")
+    }
+
+    func testAdRemovalStatusesRejectsMalformedEmptyNonPositiveAndOverLimitInput() async throws {
+        let harness = try makeHarness()
+
+        // Missing query parameter entirely.
+        let missing = try await call(harness.backend, "GET", "/api/ad-removal/statuses")
+        XCTAssertEqual(missing.statusCode, 422)
+
+        // Empty value.
+        let empty = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=")
+        XCTAssertEqual(empty.statusCode, 422)
+
+        // Non-numeric token.
+        let nonNumeric = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=abc")
+        XCTAssertEqual(nonNumeric.statusCode, 422)
+
+        // Mixed valid + non-numeric token.
+        let mixed = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,abc")
+        XCTAssertEqual(mixed.statusCode, 422)
+
+        // Malformed CSV with an empty interior token. The default split would
+        // silently omit the empty field and accept this as [1, 2].
+        let emptyInterior = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,,2")
+        XCTAssertEqual(emptyInterior.statusCode, 422)
+
+        // Trailing comma yields a trailing empty token.
+        let trailingComma = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1,")
+        XCTAssertEqual(trailingComma.statusCode, 422)
+
+        // Leading comma yields a leading empty token.
+        let leadingComma = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=,1")
+        XCTAssertEqual(leadingComma.statusCode, 422)
+
+        // Whitespace-only token is not a valid integer.
+        let whitespaceToken = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=1, ,2")
+        XCTAssertEqual(whitespaceToken.statusCode, 422)
+
+        // Non-positive id.
+        let zero = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=0")
+        XCTAssertEqual(zero.statusCode, 422)
+        let negative = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=-5")
+        XCTAssertEqual(negative.statusCode, 422)
+
+        // Over the 50-id limit (51 unique ids).
+        let tooMany = (1...51).map(String.init).joined(separator: ",")
+        let overLimit = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=\(tooMany)")
+        XCTAssertEqual(overLimit.statusCode, 422)
+
+        // Exactly 50 unique ids is accepted (no episodes exist, so empty items).
+        let exactlyFifty = (1...50).map(String.init).joined(separator: ",")
+        let atLimit = try await call(harness.backend, "GET", "/api/ad-removal/statuses?episode_ids=\(exactlyFifty)")
+        XCTAssertEqual(atLimit.statusCode, 200)
+        let atLimitPayload = try decode(AdRemovalStatusesPayload.self, from: atLimit)
+        XCTAssertTrue(atLimitPayload.items.isEmpty)
+    }
+
+    func testAdRemovalEnableConsentCutoffAndNewEpisodeEnrollment() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/enrollment.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Enrollment",
+            items: [("Existing", "existing", "https://h.example/existing.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        var settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertFalse(settings.enabled)
+        XCTAssertNil(settings.enrollment_cutoff)
+        XCTAssertEqual(settings.model_revision, AdModelManifest.qwen3OneSevenBFourBitV1.revision)
+        XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount)
+        XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
+
+        try harness.database.execute(
+            "INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'ready'), ('ad_removal_model_downloaded_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [.text(String(AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount))]
+        )
+        settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertEqual(settings.model_downloaded_bytes, 0, "ready state must reflect files actually present")
+        try harness.database.execute(
+            "UPDATE settings SET value = 'not_downloaded' WHERE key = 'ad_removal_model_download_state'"
+        )
+        try harness.database.execute(
+            "UPDATE settings SET value = '0' WHERE key = 'ad_removal_model_downloaded_bytes'"
+        )
+
+        let wrongConsent = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": 1]
+        )
+        XCTAssertEqual(wrongConsent.statusCode, 422)
+
+        let enabled = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
+        )
+        XCTAssertEqual(enabled.statusCode, 202)
+        settings = try decode(AdRemovalSettingsPayload.self, from: enabled)
+        XCTAssertTrue(settings.enabled)
+        XCTAssertNotNil(settings.enrollment_cutoff)
+        XCTAssertEqual(settings.model_download_state, "consented")
+
+        let existingID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'existing'"
+        ))
+        XCTAssertNil(try AdRemovalJobStore(database: harness.database).job(episodeID: existingID))
+
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Enrollment",
+            items: [
+                ("Existing", "existing", "https://h.example/existing.mp3", Self.d1),
+                ("New", "new", "https://h.example/new.mp3", Self.d2),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/refresh")
+        let newID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'new'"
+        ))
+        XCTAssertEqual(
+            try AdRemovalJobStore(database: harness.database).job(episodeID: newID)?.stage,
+            .queued
+        )
+
+        let disabled = try await call(harness.backend, "POST", "/api/ad-removal/disable")
+        XCTAssertEqual(disabled.statusCode, 200)
+        XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
+    }
+
+    func testAdRemovalLifecycleHandlersWakeAndStopRuntimeWork() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/runtime-hooks.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Runtime Hooks",
+            items: [("Episode", "runtime-1", "https://h.example/runtime.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'runtime-1'"
+        ))
+        let modelRequested = expectation(description: "pinned model requested")
+        let pipelineRequested = expectation(description: "pipeline requested")
+        pipelineRequested.expectedFulfillmentCount = 2
+        let runtimeStopped = expectation(description: "runtime stopped")
+        harness.backend.setAdRemovalModelDownloadRequestHandler { manifest in
+            XCTAssertEqual(manifest, .qwen3OneSevenBFourBitV1)
+            modelRequested.fulfill()
+        }
+        harness.backend.setAdRemovalRunRequestHandler {
+            pipelineRequested.fulfill()
+        }
+        harness.backend.setAdRemovalStopRequestHandler {
+            runtimeStopped.fulfill()
+        }
+
+        _ = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
+        )
+        _ = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episodeID)/ad-removal/prepare"
+        )
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Runtime Hooks",
+            items: [
+                ("Episode", "runtime-1", "https://h.example/runtime.mp3", Self.d1),
+                ("New Episode", "runtime-2", "https://h.example/runtime-2.mp3", Self.d2),
+            ]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/refresh")
+        _ = try await call(harness.backend, "POST", "/api/ad-removal/disable")
+
+        await fulfillment(of: [modelRequested, pipelineRequested, runtimeStopped], timeout: 1)
+    }
+
+    func testAdRemovalSettingsCanResetCorrectionsExportDiagnosticsAndDeleteFeatureData() async throws {
+        let harness = try makeHarness()
+        let diagnostics = try AdRemovalDiagnostics(configuration: .init(
+            rootDirectory: harness.directory.appendingPathComponent("Diagnostics", isDirectory: true),
+            appVersion: "1.0",
+            buildVersion: "1"
+        ))
+        let backend = PodsBackend(
+            database: harness.database,
+            feedFetcher: harness.fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: harness.adRemovalArtifactStore,
+            adRemovalDiagnostics: diagnostics
+        )
+        let feedURL = "https://feeds.example/data-controls.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Data Controls",
+            items: [("Episode", "data-1", "https://h.example/data.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'data-1'"
+        ))
+        let podcastID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT podcast_id FROM episodes WHERE id = ?",
+            [.int(episodeID)]
+        ))
+        let store = AdRemovalJobStore(database: harness.database)
+        _ = try store.enqueue(episodeID: episodeID)
+        _ = try store.addCorrection(
+            podcastID: podcastID,
+            sourceEpisodeID: episodeID,
+            transcriptWindow: "Editorial segment",
+            classificationContext: "false positive",
+            classifierVersion: "test",
+            promptVersion: "test"
+        )
+        let episodeMarker = harness.adRemovalArtifactStore.rootURL
+            .appendingPathComponent("episodes/orphan/marker.bin")
+        let modelMarker = harness.adRemovalArtifactStore.rootURL
+            .appendingPathComponent("models/revision/marker.bin")
+        try FileManager.default.createDirectory(
+            at: episodeMarker.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: modelMarker.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("episode".utf8).write(to: episodeMarker)
+        try Data("model".utf8).write(to: modelMarker)
+        try diagnostics.record(eventName: "export_probe", severity: .notice)
+
+        let reset = try await call(
+            backend,
+            "POST",
+            "/api/ad-removal/corrections/\(podcastID)/reset"
+        )
+        XCTAssertEqual(reset.statusCode, 200)
+        XCTAssertTrue(try store.corrections(podcastID: podcastID).isEmpty)
+
+        let exported = try await call(backend, "GET", "/api/ad-removal/diagnostics/export")
+        XCTAssertEqual(exported.statusCode, 200)
+        XCTAssertEqual(exported.headers["content-type"], "application/zip")
+        XCTAssertEqual(Array(exported.body.prefix(4)), [0x50, 0x4b, 0x03, 0x04])
+
+        let cleared = try await call(backend, "POST", "/api/ad-removal/diagnostics/clear")
+        XCTAssertEqual(cleared.statusCode, 204)
+        XCTAssertTrue(try diagnostics.readPersistedEvents().isEmpty)
+
+        let unconfirmed = try await call(backend, "POST", "/api/ad-removal/cleanup", json: [:])
+        XCTAssertEqual(unconfirmed.statusCode, 422)
+        let cleaned = try await call(
+            backend,
+            "POST",
+            "/api/ad-removal/cleanup",
+            json: ["confirm": "DELETE_AD_REMOVAL_DATA"]
+        )
+        XCTAssertEqual(cleaned.statusCode, 200)
+        XCTAssertNil(try store.job(episodeID: episodeID))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: episodeMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: modelMarker.path))
+        let settings = try decode(AdRemovalSettingsPayload.self, from: cleaned)
+        XCTAssertFalse(settings.enabled)
+        XCTAssertEqual(settings.model_download_state, "not_downloaded")
+        XCTAssertEqual(settings.model_downloaded_bytes, 0)
+    }
+
+    func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/ad-cleanup.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Cleanup Show",
+            items: [("Cleanup Episode", "cleanup-1", "https://h.example/cleanup.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let recentResponse = try await call(harness.backend, "GET", "/api/recent")
+        let recent = try decode(Page<EpisodeItem>.self, from: recentResponse)
+        let episode = try XCTUnwrap(recent.items.first)
+        let podcastID = episode.podcast_id
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let job = try store.enqueue(episodeID: episode.id)
+        let temporaryAudio = harness.directory.appendingPathComponent("downloaded-audio.tmp")
+        try Data("downloaded audio".utf8).write(to: temporaryAudio)
+        let audioArtifact = try harness.adRemovalArtifactStore.installDownloadedAudio(
+            from: temporaryAudio,
+            episodeID: episode.id,
+            fileExtension: "mp3"
+        )
+        _ = try store.recordAudioArtifact(jobID: job.id, artifact: audioArtifact)
+        let resumePath = try harness.adRemovalArtifactStore.writeResumeData(Data("resume".utf8), jobID: job.id)
+        _ = try store.recordDownloadResumePath(jobID: job.id, relativePath: resumePath)
+        try store.replaceTranscriptSegments(episodeID: episode.id, segments: [
+            AdTranscriptSegment(
+                id: "segment-0",
+                index: 0,
+                language: "en",
+                startTime: 10,
+                endTime: 20,
+                text: "Advertisement"
+            )
+        ])
+        try store.replaceSkipRanges(episodeID: episode.id, ranges: [
+            AdSkipRange(
+                id: "range-0",
+                startSegmentID: "segment-0",
+                endSegmentID: "segment-0",
+                startTime: 10,
+                endTime: 20,
+                confidence: 0.99,
+                reason: "promotion",
+                classifierVersion: "test-model",
+                promptVersion: "test-prompt",
+                createdAt: 1_000,
+                disabled: false
+            )
+        ])
+        _ = try store.addCorrection(
+            podcastID: podcastID,
+            sourceEpisodeID: episode.id,
+            transcriptWindow: "Not an ad",
+            classificationContext: "undo",
+            classifierVersion: "test-model",
+            promptVersion: "test-prompt"
+        )
+
+        let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
+        XCTAssertEqual(played.statusCode, 204)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: try harness.adRemovalArtifactStore.url(for: audioArtifact.relativePath).path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: try harness.adRemovalArtifactStore.url(for: resumePath).path
+        ))
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM ad_artifact_cleanup"), 0)
+        XCTAssertNil(try store.job(episodeID: episode.id))
+        XCTAssertTrue(try store.transcriptSegments(episodeID: episode.id).isEmpty)
+        XCTAssertTrue(try store.skipRanges(episodeID: episode.id).isEmpty)
+        XCTAssertEqual(try store.corrections(podcastID: podcastID).count, 1)
+
+        let unsubscribed = try await call(harness.backend, "DELETE", "/api/shows/\(podcastID)")
+        XCTAssertEqual(unsubscribed.statusCode, 204)
+        XCTAssertTrue(try store.corrections(podcastID: podcastID).isEmpty)
     }
 
     func testNativePlaybackProgressRecordingUpdatesEpisodePosition() async throws {
@@ -577,6 +1078,26 @@ final class PodsBackendTests: XCTestCase {
             force: true,
             allowRegress: false,
             strideSeconds: 5
+        ))
+    }
+
+    func testFailedMacStreamReloadsOnlyAfterFailure() {
+        XCTAssertTrue(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: true))
+        XCTAssertFalse(PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: false))
+    }
+
+    func testAdRemovalPlaybackActivityRequiresAnEpisodeAndActivePlayIntent() {
+        XCTAssertTrue(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: 42,
+            paused: false
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: 42,
+            paused: true
+        ))
+        XCTAssertFalse(PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: nil,
+            paused: false
         ))
     }
 

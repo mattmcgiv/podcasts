@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { EpisodeItem } from "../types";
+import type { AdRemovalSettings, AdRemovalStatusItem, EpisodeItem } from "../types";
 
 type RouteValue =
   | unknown
@@ -42,6 +42,12 @@ export function installApi(routes: MockRoutes) {
     if (typeof value === "string") {
       return new Response(value, { status: 200, headers: { "content-type": "text/plain" } });
     }
+    if (value instanceof Blob) {
+      return new Response(await value.arrayBuffer(), {
+        status: 200,
+        headers: { "content-type": value.type },
+      });
+    }
     return new Response(JSON.stringify(value), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -65,10 +71,56 @@ export function episode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
     image_url: "",
     position_secs: 0,
     played_at: null,
+    ad_removal_state: "unfiltered",
+    ad_removal_action: "prepare",
+    ad_removal_stage: null,
+    ad_removal_blocking_reason: null,
+    ad_removal_completed_windows: null,
+    ad_removal_total_windows: null,
+    ...overrides,
+  };
+}
+
+export function adRemovalSettings(
+  overrides: Partial<AdRemovalSettings> = {},
+): AdRemovalSettings {
+  return {
+    enabled: false,
+    enrollment_cutoff: null,
+    cloud_classifier_configured: false,
+    model_repository: "",
+    model_revision: "",
+    model_total_bytes: 3_060_000_000,
+    model_downloaded_bytes: 0,
+    model_download_state: "not_downloaded",
+    episode_storage_bytes: 0,
+    episode_storage_limit_bytes: 10_000_000_000,
+    device_available_bytes: 20_000_000_000,
+    minimum_free_bytes: 10_000_000_000,
+    corrections: [],
     ...overrides,
   };
 }
 
 export function page<T>(items: T[], next_offset: number | null = null) {
   return { items, next_offset };
+}
+
+export function adRemovalStatusItem(
+  overrides: Partial<AdRemovalStatusItem> = {},
+): AdRemovalStatusItem {
+  return {
+    id: 1,
+    ad_removal_state: "unfiltered",
+    ad_removal_action: "prepare",
+    ad_removal_stage: null,
+    ad_removal_blocking_reason: null,
+    ad_removal_completed_windows: null,
+    ad_removal_total_windows: null,
+    ...overrides,
+  };
+}
+
+export function adRemovalStatuses(items: AdRemovalStatusItem[]) {
+  return { items };
 }

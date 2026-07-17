@@ -58,7 +58,11 @@ struct PodsStaticAssets {
         let body = includeBody ? data : Data()
         return HTTPResponse(
             statusCode: 200,
-            headers: ["content-type": contentType(for: url.pathExtension)],
+            headers: [
+                "content-type": contentType(for: url.pathExtension),
+                "cache-control": "no-store, max-age=0",
+                "pragma": "no-cache"
+            ],
             body: body
         )
     }

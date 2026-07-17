@@ -13,6 +13,7 @@ import {
   createAudioEngine,
   type AudioEngine,
   type AudioMetadata,
+  type AdSkipNotice,
   type CastInfo,
 } from "./audioEngine";
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
@@ -24,12 +25,14 @@ export type PlayerEpisode = EpisodeItem & { notes_html?: string };
 export interface PlayerApi {
   current: PlayerEpisode | null;
   playing: boolean;
+  initializing: boolean;
   expanded: boolean;
   position: number;
   duration: number;
   speed: number;
   autoplay: boolean;
   cast: CastInfo;
+  pendingAdSkip: AdSkipNotice | null;
   playEpisode: (item: EpisodeItem, context: PlayContext) => void;
   toggle: () => void;
   seekTo: (secs: number) => void;
@@ -39,6 +42,7 @@ export interface PlayerApi {
   setAutoplay: (on: boolean) => void;
   setExpanded: (on: boolean) => void;
   setCastOutput: (target: "local" | "mac") => void;
+  undoAdSkip: () => void;
   markPlayedAndClose: () => Promise<void>;
   close: () => void;
 }
@@ -54,12 +58,14 @@ export function usePlayer(): PlayerApi {
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [current, setCurrent] = useState<PlayerEpisode | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [initializing, setInitializing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [speed, setSpeedState] = useState(1);
   const [autoplay, setAutoplayState] = useState(true);
   const [cast, setCast] = useState<CastInfo>({ available: false, connected: false, output: "local" });
+  const [pendingAdSkip, setPendingAdSkip] = useState<AdSkipNotice | null>(null);
 
   const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
@@ -90,9 +96,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
     setCurrent(null);
     setPlaying(false);
+    setInitializing(false);
     setExpanded(false);
     setPosition(0);
     setDuration(0);
+    setPendingAdSkip(null);
   }, [flushPosition]);
 
   const playEpisode = useCallback(
@@ -110,6 +118,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setExpanded(true);
       setPosition(item.position_secs);
       setDuration(item.duration_secs ?? 0);
+      setPendingAdSkip(null);
+      setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
       resumeAtRef.current = a.loadSource ? 0 : resumeAt;
       const metadata = audioMetadata(item);
@@ -120,7 +130,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         a.src = item.audio_url;
       }
-      void a.play().catch(() => setPlaying(false));
+      void a.play().catch(() => {
+        setPlaying(false);
+        setInitializing(false);
+      });
       updateMediaSessionMetadata(metadata);
       // Upgrade to the full detail (show notes) in the background.
       void Api.episode(item.id)
@@ -182,10 +195,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (Number.isFinite(a.duration) && a.duration > 0) setDuration(a.duration);
     };
     a.addEventListener("timeupdate", () => {
+      setInitializing(false);
       setPosition(a.currentTime);
       adoptDuration();
     });
     a.addEventListener("loadedmetadata", () => {
+      setInitializing(false);
       adoptDuration();
       if (resumeAtRef.current > 0) {
         a.currentTime = resumeAtRef.current;
@@ -194,10 +209,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.playbackRate = speedRef.current;
     });
     a.addEventListener("ended", () => void endedRef.current());
+    a.addEventListener("error", () => setInitializing(false));
     a.addEventListener("cast", ((e: Event) => {
       const detail = (e as CustomEvent<CastInfo>).detail;
       if (detail) setCast(detail);
     }) as EventListener);
+    a.addEventListener("adSkip", ((e: Event) => {
+      const detail = (e as CustomEvent<AdSkipNotice>).detail;
+      if (detail) setPendingAdSkip(detail);
+      setPosition(a.currentTime);
+    }) as EventListener);
+    a.addEventListener("adSkipUndone", () => {
+      setPendingAdSkip(null);
+      setPosition(a.currentTime);
+    });
     a.requestCastStatus?.();
     audioRef.current = a;
     return a;
@@ -293,6 +318,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const undoAdSkip = useCallback(() => {
+    audioRef.current?.undoAdSkip?.();
+  }, []);
+
   // Lock-screen / hardware controls.
   useEffect(() => {
     const ms = navigator.mediaSession;
@@ -314,12 +343,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     () => ({
       current,
       playing,
+      initializing,
       expanded,
       position,
       duration,
       speed,
       autoplay,
       cast,
+      pendingAdSkip,
       playEpisode,
       toggle,
       seekTo,
@@ -329,18 +360,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setAutoplay,
       setExpanded,
       setCastOutput,
+      undoAdSkip,
       markPlayedAndClose,
       close,
     }),
     [
       current,
       playing,
+      initializing,
       expanded,
       position,
       duration,
       speed,
       autoplay,
       cast,
+      pendingAdSkip,
       playEpisode,
       toggle,
       seekTo,
@@ -349,6 +383,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setSpeed,
       setAutoplay,
       setCastOutput,
+      undoAdSkip,
       markPlayedAndClose,
       close,
     ],

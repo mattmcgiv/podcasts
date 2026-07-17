@@ -72,16 +72,32 @@ final class PodsBackend: PlaybackProgressRecording {
     private let database: PodsDatabase
     private let feedFetcher: FeedFetching
     private let directorySearcher: PodcastDirectorySearching
+    private let adRemovalFileCleanup: AdRemovalFileCleanup?
+    private let adRemovalArtifactStore: AdRemovalArtifactStore?
+    private let adRemovalDiagnostics: AdRemovalDiagnostics?
+    private let deepSeekCredentialStore: DeepSeekCredentialStoring
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
+    private var adRemovalRunRequestHandler: (() async -> Void)?
+    private var adRemovalModelDownloadRequestHandler: ((AdModelManifest) async -> Void)?
+    private var adRemovalStopRequestHandler: (() async -> Void)?
 
     init(
         database: PodsDatabase,
         feedFetcher: FeedFetching = URLSessionFeedFetcher(),
-        directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher()
+        directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
+        adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
+        adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
+        deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore()
     ) {
         self.database = database
         self.feedFetcher = feedFetcher
         self.directorySearcher = directorySearcher
+        self.adRemovalArtifactStore = adRemovalArtifactStore
+        self.adRemovalDiagnostics = adRemovalDiagnostics
+        self.deepSeekCredentialStore = deepSeekCredentialStore
+        self.adRemovalFileCleanup = adRemovalArtifactStore.map {
+            AdRemovalFileCleanup(database: database, artifactStore: $0)
+        }
     }
 
     func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
@@ -96,6 +112,20 @@ final class PodsBackend: PlaybackProgressRecording {
     /// Tests and standalone backend use retain a direct, audited fallback.
     func setRefreshRequestHandler(_ handler: @escaping (RefreshSource) async -> RefreshResult) {
         refreshRequestHandler = handler
+    }
+
+    func setAdRemovalRunRequestHandler(_ handler: @escaping () async -> Void) {
+        adRemovalRunRequestHandler = handler
+    }
+
+    func setAdRemovalModelDownloadRequestHandler(
+        _ handler: @escaping (AdModelManifest) async -> Void
+    ) {
+        adRemovalModelDownloadRequestHandler = handler
+    }
+
+    func setAdRemovalStopRequestHandler(_ handler: @escaping () async -> Void) {
+        adRemovalStopRequestHandler = handler
     }
 
     func refreshStatus() -> RefreshStatus {
@@ -125,6 +155,10 @@ final class PodsBackend: PlaybackProgressRecording {
         recordRefreshCompletion(source: source, startedAt: startedAt, finishedAt: finishedAt, result: result)
         PodsLog("Pods feed refresh source=\(source.rawValue) refreshed=\(result.refreshed) errors=\(result.errors)")
         NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
+        if (try? settingValues()["ad_removal_enabled"]) == "true",
+           let adRemovalRunRequestHandler {
+            Task { await adRemovalRunRequestHandler() }
+        }
         return result
     }
 
@@ -207,6 +241,89 @@ final class PodsBackend: PlaybackProgressRecording {
             }
             try setPosition(id: id, seconds: seconds)
             return .noContent()
+        }
+        if parts.count == 5,
+           parts[0] == "api",
+           parts[1] == "episodes",
+           parts[3] == "ad-removal",
+           let id = Int64(parts[2]),
+           request.method == "POST" {
+            let job: AdRemovalJob
+            if parts[4] == "prepare" {
+                job = try prepareAdRemoval(id: id)
+            } else if parts[4] == "retry" {
+                job = try retryAdRemoval(id: id)
+            } else {
+                throw PodsBackendError.notFound
+            }
+            if let adRemovalRunRequestHandler {
+                Task { await adRemovalRunRequestHandler() }
+            }
+            return .json(["stage": job.stage.rawValue], statusCode: 202)
+        }
+        if path == "/api/ad-removal/settings", request.method == "GET" {
+            return .json(try adRemovalSettings())
+        }
+        if path == "/api/ad-removal/deepseek-key", request.method == "PUT" {
+            let body = try request.jsonObject()
+            guard let apiKey = body["api_key"] as? String else {
+                throw PodsBackendError.invalid("api_key is required")
+            }
+            try deepSeekCredentialStore.saveAPIKey(apiKey)
+            try AdRemovalJobStore(database: database).clearBlockingReasons([.modelRequired])
+            if let adRemovalRunRequestHandler { Task { await adRemovalRunRequestHandler() } }
+            return .json(try adRemovalSettings())
+        }
+        if path == "/api/ad-removal/statuses", request.method == "GET" {
+            return .json(try adRemovalStatuses(request: request))
+        }
+        if path == "/api/ad-removal/enable", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard let confirmedBytes = (body["confirmed_bytes"] as? NSNumber)?.int64Value else {
+                throw PodsBackendError.invalid("confirmed_bytes is required")
+            }
+            let settings = try enableAdRemoval(confirmedBytes: confirmedBytes)
+            if let adRemovalModelDownloadRequestHandler {
+                Task { await adRemovalModelDownloadRequestHandler(.qwen3OneSevenBFourBitV1) }
+            }
+            return .json(settings, statusCode: 202)
+        }
+        if path == "/api/ad-removal/disable", request.method == "POST" {
+            try setSetting(key: "ad_removal_enabled", value: "false")
+            try? adRemovalDiagnostics?.record(eventName: "feature_disabled", severity: .notice)
+            if let adRemovalStopRequestHandler {
+                Task { await adRemovalStopRequestHandler() }
+            }
+            return .json(try adRemovalSettings())
+        }
+        if parts.count == 5,
+           parts[0] == "api",
+           parts[1] == "ad-removal",
+           parts[2] == "corrections",
+           let podcastID = Int64(parts[3]),
+           parts[4] == "reset",
+           request.method == "POST" {
+            try resetAdRemovalCorrections(podcastID: podcastID)
+            return .json(try adRemovalSettings())
+        }
+        if path == "/api/ad-removal/diagnostics/export", request.method == "GET" {
+            return try exportAdRemovalDiagnostics()
+        }
+        if path == "/api/ad-removal/diagnostics/clear", request.method == "POST" {
+            guard let adRemovalDiagnostics else { throw PodsBackendError.notFound }
+            try adRemovalDiagnostics.clear()
+            return .noContent()
+        }
+        if path == "/api/ad-removal/cleanup", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard body["confirm"] as? String == "DELETE_AD_REMOVAL_DATA" else {
+                throw PodsBackendError.invalid("destructive cleanup confirmation does not match")
+            }
+            if let adRemovalStopRequestHandler {
+                await adRemovalStopRequestHandler()
+            }
+            try cleanupAdRemovalData()
+            return .json(try adRemovalSettings())
         }
         if path == "/api/settings", request.method == "GET" {
             return .json(try settings())
@@ -354,9 +471,11 @@ final class PodsBackend: PlaybackProgressRecording {
     private func unsubscribe(id: Int64) throws {
         _ = try fetchShow(id: id)
         try database.withTransaction {
+            try AdRemovalJobStore.enqueuePodcastArtifactCleanup(in: database, podcastID: id)
             try database.execute("DELETE FROM episodes_fts WHERE rowid IN (SELECT id FROM episodes WHERE podcast_id = ?)", [.int(id)])
             try database.execute("DELETE FROM podcasts WHERE id = ?", [.int(id)])
         }
+        try adRemovalFileCleanup?.drain()
     }
 
     private func episodeDetail(id: Int64) throws -> EpisodeDetail {
@@ -364,9 +483,40 @@ final class PodsBackend: PlaybackProgressRecording {
         SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image,
         e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url,
         CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at,
-        e.notes_html, s.archived_at
+        e.notes_html, s.archived_at,
+        CASE
+            WHEN j.stage = 'ready' THEN 'ad-free'
+            WHEN j.stage = 'failed' THEN 'failed'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered'
+            ELSE 'preparing'
+        END AS ad_removal_state,
+        CASE
+            WHEN j.stage = 'failed' THEN 'retry'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
+            ELSE NULL
+        END AS ad_removal_action,
+        j.stage AS ad_removal_stage,
+        j.blocking_reason AS ad_removal_blocking_reason,
+        CASE WHEN j.stage = 'classifying' THEN (
+            SELECT COUNT(*) FROM ad_classification_windows w
+            WHERE w.episode_id = e.id AND w.schema_valid = 1
+              AND w.run_id = (
+                  SELECT latest.run_id FROM ad_classification_windows latest
+                  WHERE latest.episode_id = e.id
+                  ORDER BY latest.created_at DESC LIMIT 1
+              )
+        ) ELSE NULL END AS completed_windows,
+        CASE WHEN j.stage = 'classifying' THEN (
+            CASE
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
+            END
+        ) ELSE NULL END AS total_windows
         FROM episodes e JOIN podcasts p ON p.id = e.podcast_id
-        LEFT JOIN episode_state s ON s.episode_id = e.id WHERE e.id = ?
+        LEFT JOIN episode_state s ON s.episode_id = e.id
+        LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
+        WHERE e.id = ?
         """
         guard let detail = try database.query(sql, [.int(id)], map: Self.mapEpisodeDetail).first else {
             throw PodsBackendError.notFound
@@ -380,16 +530,288 @@ final class PodsBackend: PlaybackProgressRecording {
         }
     }
 
+    private func prepareAdRemoval(id: Int64) throws -> AdRemovalJob {
+        try episodeExists(id: id)
+        let store = AdRemovalJobStore(database: database)
+        if let existing = try store.job(episodeID: id) {
+            if existing.stage == .failed {
+                throw PodsBackendError.conflict("failed preparation must be retried")
+            }
+            return existing
+        }
+        return try store.enqueue(episodeID: id)
+    }
+
+    private func retryAdRemoval(id: Int64) throws -> AdRemovalJob {
+        try episodeExists(id: id)
+        let store = AdRemovalJobStore(database: database)
+        guard let existing = try store.job(episodeID: id) else {
+            throw PodsBackendError.notFound
+        }
+        guard existing.stage == .failed else {
+            throw PodsBackendError.conflict("preparation has not failed")
+        }
+        return try store.retry(jobID: existing.id)
+    }
+
+    private func adRemovalSettings() throws -> AdRemovalSettingsPayload {
+        let values = try settingValues()
+        let manifest = AdModelManifest.qwen3OneSevenBFourBitV1
+        let modelDownloadState = values["ad_removal_model_download_state"] ?? "not_downloaded"
+        let modelBytesOnDisk = try modelDownloadedBytes(manifest: manifest)
+        let modelDownloadedBytes = modelDownloadState == "ready"
+            ? modelBytesOnDisk
+            : max(
+                modelBytesOnDisk,
+                Int64(values["ad_removal_model_downloaded_bytes"] ?? "") ?? 0
+            )
+        let corrections = try database.query(
+            """
+            SELECT p.id, p.title, COUNT(c.id)
+            FROM podcasts p
+            JOIN ad_corrections c ON c.podcast_id = p.id AND c.active = 1
+            GROUP BY p.id, p.title
+            ORDER BY p.title COLLATE NOCASE, p.id
+            """
+        ) { statement in
+            AdRemovalCorrectionCountPayload(
+                podcast_id: sqlite3_column_int64(statement, 0),
+                podcast_title: sqliteString(statement, 1),
+                count: sqlite3_column_int64(statement, 2)
+            )
+        }
+        return AdRemovalSettingsPayload(
+            enabled: values["ad_removal_enabled"] == "true",
+            enrollment_cutoff: values["ad_removal_enrollment_cutoff"].flatMap(Int64.init),
+            cloud_classifier_configured: deepSeekCredentialStore.hasAPIKey,
+            model_repository: "deepseek/deepseek-v4-pro",
+            model_revision: "api",
+            model_total_bytes: 0,
+            model_downloaded_bytes: 0,
+            model_download_state: deepSeekCredentialStore.hasAPIKey ? "ready" : "api_key_required",
+            episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
+            episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
+            minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
+            device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
+            corrections: corrections
+        )
+    }
+
+    /// Bounded, lightweight batch ad-removal status for the Listen view. Accepts
+    /// at most 50 unique positive episode ids via `episode_ids` (comma-separated),
+    /// preserves the deduplicated requested order, omits non-existent ids, and
+    /// returns only the ad-removal status fields — never `notes_html`.
+    private func adRemovalStatuses(request: HTTPRequest) throws -> AdRemovalStatusesPayload {
+        let raw = request.query("episode_ids") ?? ""
+        guard !raw.isEmpty else {
+            throw PodsBackendError.invalid("episode_ids must not be empty")
+        }
+        var ids: [Int64] = []
+        var seen = Set<Int64>()
+        // Preserve empty subsequences so malformed CSV like `1,,2`, `1,`, and
+        // `,1` is rejected instead of silently accepted by omitting empties.
+        for token in raw.split(separator: ",", omittingEmptySubsequences: false) {
+            let trimmed = token.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else {
+                throw PodsBackendError.invalid("episode_ids must not contain empty tokens")
+            }
+            guard let id = Int64(trimmed) else {
+                throw PodsBackendError.invalid("episode_ids must be comma-separated integers")
+            }
+            guard id > 0 else {
+                throw PodsBackendError.invalid("episode_ids must be positive")
+            }
+            if seen.insert(id).inserted {
+                ids.append(id)
+            }
+        }
+        guard ids.count <= 50 else {
+            throw PodsBackendError.invalid("episode_ids must contain at most 50 unique ids")
+        }
+        guard !ids.isEmpty else {
+            throw PodsBackendError.invalid("episode_ids must not be empty")
+        }
+
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ", ")
+        let sql = """
+        SELECT e.id,
+        CASE
+            WHEN j.stage = 'ready' THEN 'ad-free'
+            WHEN j.stage = 'failed' THEN 'failed'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered'
+            ELSE 'preparing'
+        END AS ad_removal_state,
+        CASE
+            WHEN j.stage = 'failed' THEN 'retry'
+            WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
+            ELSE NULL
+        END AS ad_removal_action,
+        j.stage AS ad_removal_stage,
+        j.blocking_reason AS ad_removal_blocking_reason,
+        CASE WHEN j.stage = 'classifying' THEN (
+            SELECT COUNT(*) FROM ad_classification_windows w
+            WHERE w.episode_id = e.id AND w.schema_valid = 1
+              AND w.run_id = (
+                  SELECT latest.run_id FROM ad_classification_windows latest
+                  WHERE latest.episode_id = e.id
+                  ORDER BY latest.created_at DESC LIMIT 1
+              )
+        ) ELSE NULL END AS completed_windows,
+        CASE WHEN j.stage = 'classifying' THEN (
+            CASE
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
+            END
+        ) ELSE NULL END AS total_windows
+        FROM episodes e
+        LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
+        WHERE e.id IN (\(placeholders))
+        """
+        let values = ids.map { SQLiteValue.int($0) }
+        let byID = try Dictionary(uniqueKeysWithValues: database.query(sql, values) { statement in
+            (
+                sqlite3_column_int64(statement, 0),
+                AdRemovalStatusItem(
+                    id: sqlite3_column_int64(statement, 0),
+                    ad_removal_state: sqliteString(statement, 1),
+                    ad_removal_action: sqliteOptionalString(statement, 2),
+                    ad_removal_stage: sqliteOptionalString(statement, 3),
+                    ad_removal_blocking_reason: sqliteOptionalString(statement, 4),
+                    ad_removal_completed_windows: sqliteOptionalInt64(statement, 5),
+                    ad_removal_total_windows: sqliteOptionalInt64(statement, 6)
+                )
+            )
+        })
+        // Preserve deduplicated requested order, omitting non-existent ids.
+        let items = ids.compactMap { byID[$0] }
+        return AdRemovalStatusesPayload(items: items)
+    }
+
+    private func enableAdRemoval(confirmedBytes: Int64) throws -> AdRemovalSettingsPayload {
+        guard deepSeekCredentialStore.hasAPIKey else {
+            throw PodsBackendError.invalid("DeepSeek API key is required")
+        }
+        let values = try settingValues()
+        let cutoff = values["ad_removal_enrollment_cutoff"] ?? String(nowUnix())
+        try database.withTransaction {
+            try setSetting(key: "ad_removal_enabled", value: "true")
+            try setSetting(key: "ad_removal_enrollment_cutoff", value: cutoff)
+            try setSetting(key: "ad_removal_model_download_state", value: "ready")
+        }
+        try? adRemovalDiagnostics?.record(
+            eventName: "feature_enabled",
+            severity: .notice,
+            fields: [
+                "cutoff": cutoff,
+                "classifier": "deepseek-v4-pro"
+            ]
+        )
+        return try adRemovalSettings()
+    }
+
+    private func settingValues() throws -> [String: String] {
+        Dictionary(uniqueKeysWithValues: try database.query("SELECT key, value FROM settings") {
+            (sqliteString($0, 0), sqliteString($0, 1))
+        })
+    }
+
+    private func setSetting(key: String, value: String) throws {
+        try database.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [.text(key), .text(value)]
+        )
+    }
+
+    private func modelDownloadedBytes(manifest: AdModelManifest) throws -> Int64 {
+        guard let adRemovalArtifactStore else { return 0 }
+        let modelStore = try AdModelAssetStore(artifactStore: adRemovalArtifactStore)
+        var total: Int64 = 0
+        for file in manifest.files {
+            let url = try modelStore.fileURL(for: file, manifest: manifest)
+            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        return total
+    }
+
+    private func resetAdRemovalCorrections(podcastID: Int64) throws {
+        guard (try database.scalarInt64("SELECT COUNT(*) FROM podcasts WHERE id = ?", [.int(podcastID)])) ?? 0 > 0 else {
+            throw PodsBackendError.notFound
+        }
+        try AdRemovalJobStore(database: database).resetCorrections(podcastID: podcastID)
+        try? adRemovalDiagnostics?.record(
+            eventName: "corrections_reset",
+            severity: .notice,
+            fields: ["podcast_id": String(podcastID)]
+        )
+    }
+
+    private func exportAdRemovalDiagnostics() throws -> HTTPResponse {
+        guard let adRemovalDiagnostics else { throw PodsBackendError.notFound }
+        let values = try settingValues()
+        let stateSummary = [
+            "enabled": values["ad_removal_enabled"] ?? "false",
+            "model_revision": values["ad_removal_model_revision"] ?? "none",
+            "model_download_state": values["ad_removal_model_download_state"] ?? "not_downloaded",
+            "queued_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage NOT IN ('ready', 'failed', 'cancelled')"
+            )) ?? 0),
+            "ready_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage = 'ready'"
+            )) ?? 0),
+            "failed_jobs": String((try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_jobs WHERE stage = 'failed'"
+            )) ?? 0)
+        ]
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PodsAdRemovalDiagnosticExports", isDirectory: true)
+        let archive = try adRemovalDiagnostics.exportArchive(
+            to: directory,
+            stateSummary: stateSummary,
+            schemaVersions: [
+                "database": "1",
+                "classifier_output": "1",
+                "skip_manifest": "1",
+                "model_revision": AdModelManifest.qwen3OneSevenBFourBitV1.revision
+            ]
+        )
+        defer { try? FileManager.default.removeItem(at: archive) }
+        return HTTPResponse(
+            statusCode: 200,
+            headers: [
+                "content-type": "application/zip",
+                "content-disposition": "attachment; filename=\"\(archive.lastPathComponent)\""
+            ],
+            body: try Data(contentsOf: archive)
+        )
+    }
+
+    private func cleanupAdRemovalData() throws {
+        guard let adRemovalArtifactStore else { throw PodsBackendError.notFound }
+        let modelStore = try AdModelAssetStore(artifactStore: adRemovalArtifactStore)
+        try? adRemovalDiagnostics?.record(eventName: "feature_cleanup_started", severity: .notice)
+        try modelStore.removeAll()
+        let store = AdRemovalJobStore(database: database)
+        try store.cleanupAllFeatureMetadata()
+        try adRemovalFileCleanup?.drain()
+        try adRemovalArtifactStore.removeAllEpisodeArtifacts()
+        try? adRemovalDiagnostics?.record(eventName: "feature_cleanup_finished", severity: .notice)
+    }
+
     private func setPlayed(id: Int64) throws {
         try episodeExists(id: id)
         let ts = nowUnix()
-        try database.execute(
-            """
-            INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT (episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at
-            """,
-            [.int(id), .int(ts), .int(ts)]
-        )
+        try database.withTransaction {
+            try database.execute(
+                """
+                INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT (episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at
+                """,
+                [.int(id), .int(ts), .int(ts)]
+            )
+            try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
+        }
+        try adRemovalFileCleanup?.drain()
     }
 
     private func clearPlayed(id: Int64) throws {
@@ -704,6 +1126,9 @@ final class PodsBackend: PlaybackProgressRecording {
                 )
                 episodeID = database.lastInsertRowID()
                 newCount += 1
+                if try settingValues()["ad_removal_enabled"] == "true" {
+                    _ = try AdRemovalJobStore(database: database).enqueue(episodeID: episodeID)
+                }
             }
             try database.execute("DELETE FROM episodes_fts WHERE rowid = ?", [.int(episodeID)])
             try database.execute(
@@ -729,10 +1154,24 @@ final class PodsBackend: PlaybackProgressRecording {
     private static let episodeItemSelect = """
     SELECT e.id, e.podcast_id, p.title AS podcast_title, p.image_url AS podcast_image,
     e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url,
-    CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at
+    CAST(COALESCE(s.position_secs, 0) AS REAL) AS position_secs, s.played_at,
+    CASE
+        WHEN j.stage = 'ready' THEN 'ad-free'
+        WHEN j.stage = 'failed' THEN 'failed'
+        WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered'
+        ELSE 'preparing'
+    END AS ad_removal_state,
+    CASE
+        WHEN j.stage = 'failed' THEN 'retry'
+        WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare'
+        ELSE NULL
+    END AS ad_removal_action,
+    j.stage AS ad_removal_stage,
+    j.blocking_reason AS ad_removal_blocking_reason
     FROM episodes e
     JOIN podcasts p ON p.id = e.podcast_id
     LEFT JOIN episode_state s ON s.episode_id = e.id
+    LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
     """
 
     private static let showSelect = """
@@ -755,7 +1194,11 @@ final class PodsBackend: PlaybackProgressRecording {
             published_at: sqlite3_column_int64(statement, 7),
             image_url: sqliteString(statement, 8),
             position_secs: sqlite3_column_double(statement, 9),
-            played_at: sqliteOptionalInt64(statement, 10)
+            played_at: sqliteOptionalInt64(statement, 10),
+            ad_removal_state: sqliteString(statement, 11),
+            ad_removal_action: sqliteOptionalString(statement, 12),
+            ad_removal_stage: sqliteOptionalString(statement, 13),
+            ad_removal_blocking_reason: sqliteOptionalString(statement, 14)
         )
     }
 
@@ -773,7 +1216,11 @@ final class PodsBackend: PlaybackProgressRecording {
             position_secs: sqlite3_column_double(statement, 9),
             played_at: sqliteOptionalInt64(statement, 10),
             notes_html: sqliteString(statement, 11),
-            archived_at: sqliteOptionalInt64(statement, 12)
+            archived_at: sqliteOptionalInt64(statement, 12),
+            ad_removal_state: sqliteString(statement, 13),
+            ad_removal_action: sqliteOptionalString(statement, 14),
+            ad_removal_stage: sqliteOptionalString(statement, 15),
+            ad_removal_blocking_reason: sqliteOptionalString(statement, 16)
         )
     }
 

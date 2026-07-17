@@ -29,6 +29,28 @@
 		10C000000000000000000003 /* PlaybackProgressPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C000000000000000000013 /* PlaybackProgressPolicy.swift */; };
 		10D000000000000000000001 /* PodsRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10D000000000000000000011 /* PodsRefresh.swift */; };
 		10B000000000000000000001 /* PodsBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10B000000000000000000011 /* PodsBackendTests.swift */; };
+		10E000000000000000000001 /* AdRemovalDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */; };
+		10E000000000000000000002 /* AdRemovalDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E000000000000000000012 /* AdRemovalDiagnostics.swift */; };
+		10F000000000000000000001 /* AdRemovalPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10F000000000000000000011 /* AdRemovalPersistenceTests.swift */; };
+		10F000000000000000000002 /* AdRemovalPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10F000000000000000000012 /* AdRemovalPersistence.swift */; };
+		110000000000000000000001 /* AdRemovalStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000011 /* AdRemovalStorageTests.swift */; };
+		110000000000000000000002 /* AdRemovalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000012 /* AdRemovalStorage.swift */; };
+		110000000000000000000003 /* AdRemovalDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000013 /* AdRemovalDownload.swift */; };
+		110000000000000000000004 /* AdRemovalPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110000000000000000000014 /* AdRemovalPipeline.swift */; };
+		111000000000000000000001 /* AdRemovalTranscriptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111000000000000000000011 /* AdRemovalTranscriptionTests.swift */; };
+		111000000000000000000002 /* AdRemovalTranscription.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111000000000000000000012 /* AdRemovalTranscription.swift */; };
+		112000000000000000000001 /* AdRemovalClassificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 112000000000000000000011 /* AdRemovalClassificationTests.swift */; };
+		112000000000000000000002 /* AdRemovalClassification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 112000000000000000000012 /* AdRemovalClassification.swift */; };
+		112000000000000000000003 /* AdRemovalModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 112000000000000000000013 /* AdRemovalModel.swift */; };
+		113000000000000000000001 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 113000000000000000000011 /* MLXLLM */; };
+		113000000000000000000002 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 113000000000000000000012 /* MLXLMCommon */; };
+		113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 113000000000000000000013 /* AdRemovalMLXClassifier.swift */; };
+		114000000000000000000001 /* AdRemovalPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114000000000000000000011 /* AdRemovalPlaybackTests.swift */; };
+		114000000000000000000002 /* AdRemovalPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 114000000000000000000012 /* AdRemovalPlayback.swift */; };
+		115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000011 /* AdRemovalRangeServerTests.swift */; };
+		115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000012 /* AdRemovalRangeServer.swift */; };
+		116000000000000000000001 /* AdRemovalEvaluation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 116000000000000000000011 /* AdRemovalEvaluation.swift */; };
+		117000000000000000000001 /* DeepSeekAdClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117000000000000000000011 /* DeepSeekAdClassifier.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -67,6 +89,26 @@
 		10D000000000000000000011 /* PodsRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsRefresh.swift; sourceTree = "<group>"; };
 		10B000000000000000000010 /* PodsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PodsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		10B000000000000000000011 /* PodsBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodsBackendTests.swift; sourceTree = "<group>"; };
+		10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalDiagnosticsTests.swift; sourceTree = "<group>"; };
+		10E000000000000000000012 /* AdRemovalDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AdRemovalDiagnostics.swift; path = ../../shared/AdRemovalDiagnostics.swift; sourceTree = "<group>"; };
+		10F000000000000000000011 /* AdRemovalPersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPersistenceTests.swift; sourceTree = "<group>"; };
+		10F000000000000000000012 /* AdRemovalPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPersistence.swift; sourceTree = "<group>"; };
+		110000000000000000000011 /* AdRemovalStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalStorageTests.swift; sourceTree = "<group>"; };
+		110000000000000000000012 /* AdRemovalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalStorage.swift; sourceTree = "<group>"; };
+		110000000000000000000013 /* AdRemovalDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalDownload.swift; sourceTree = "<group>"; };
+		110000000000000000000014 /* AdRemovalPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPipeline.swift; sourceTree = "<group>"; };
+		111000000000000000000011 /* AdRemovalTranscriptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalTranscriptionTests.swift; sourceTree = "<group>"; };
+		111000000000000000000012 /* AdRemovalTranscription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalTranscription.swift; sourceTree = "<group>"; };
+		112000000000000000000011 /* AdRemovalClassificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalClassificationTests.swift; sourceTree = "<group>"; };
+		112000000000000000000012 /* AdRemovalClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalClassification.swift; sourceTree = "<group>"; };
+		112000000000000000000013 /* AdRemovalModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalModel.swift; sourceTree = "<group>"; };
+		113000000000000000000013 /* AdRemovalMLXClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalMLXClassifier.swift; sourceTree = "<group>"; };
+		117000000000000000000011 /* DeepSeekAdClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekAdClassifier.swift; sourceTree = "<group>"; };
+		114000000000000000000011 /* AdRemovalPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPlaybackTests.swift; sourceTree = "<group>"; };
+		114000000000000000000012 /* AdRemovalPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalPlayback.swift; sourceTree = "<group>"; };
+		115000000000000000000011 /* AdRemovalRangeServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServerTests.swift; sourceTree = "<group>"; };
+		115000000000000000000012 /* AdRemovalRangeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalRangeServer.swift; sourceTree = "<group>"; };
+		116000000000000000000011 /* AdRemovalEvaluation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalEvaluation.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,6 +117,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				10A000000000000000000007 /* libsqlite3.tbd in Frameworks */,
+				113000000000000000000001 /* MLXLLM in Frameworks */,
+				113000000000000000000002 /* MLXLMCommon in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -101,6 +145,19 @@
 		10A000000000000000000031 /* Pods */ = {
 			isa = PBXGroup;
 			children = (
+				10E000000000000000000012 /* AdRemovalDiagnostics.swift */,
+				10F000000000000000000012 /* AdRemovalPersistence.swift */,
+				110000000000000000000012 /* AdRemovalStorage.swift */,
+				110000000000000000000013 /* AdRemovalDownload.swift */,
+				110000000000000000000014 /* AdRemovalPipeline.swift */,
+				111000000000000000000012 /* AdRemovalTranscription.swift */,
+				112000000000000000000012 /* AdRemovalClassification.swift */,
+				112000000000000000000013 /* AdRemovalModel.swift */,
+				113000000000000000000013 /* AdRemovalMLXClassifier.swift */,
+				117000000000000000000011 /* DeepSeekAdClassifier.swift */,
+				114000000000000000000012 /* AdRemovalPlayback.swift */,
+				115000000000000000000012 /* AdRemovalRangeServer.swift */,
+				116000000000000000000011 /* AdRemovalEvaluation.swift */,
 				10A000000000000000000011 /* PodsApp.swift */,
 				10A000000000000000000012 /* PodsWebView.swift */,
 				10A000000000000000000013 /* AudioBridge.swift */,
@@ -147,6 +204,13 @@
 			isa = PBXGroup;
 			children = (
 				10B000000000000000000011 /* PodsBackendTests.swift */,
+				10E000000000000000000011 /* AdRemovalDiagnosticsTests.swift */,
+				10F000000000000000000011 /* AdRemovalPersistenceTests.swift */,
+				110000000000000000000011 /* AdRemovalStorageTests.swift */,
+				111000000000000000000011 /* AdRemovalTranscriptionTests.swift */,
+				112000000000000000000011 /* AdRemovalClassificationTests.swift */,
+				114000000000000000000011 /* AdRemovalPlaybackTests.swift */,
+				115000000000000000000011 /* AdRemovalRangeServerTests.swift */,
 			);
 			path = PodsTests;
 			sourceTree = "<group>";
@@ -168,6 +232,10 @@
 			dependencies = (
 			);
 			name = Pods;
+			packageProductDependencies = (
+				113000000000000000000011 /* MLXLLM */,
+				113000000000000000000012 /* MLXLMCommon */,
+			);
 			productName = Pods;
 			productReference = 10A000000000000000000010 /* Pods.app */;
 			productType = "com.apple.product-type.application";
@@ -219,6 +287,9 @@
 			);
 			mainGroup = 10A000000000000000000030;
 			productRefGroup = 10A000000000000000000033 /* Products */;
+			packageReferences = (
+				113000000000000000000010 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -269,6 +340,19 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				10E000000000000000000002 /* AdRemovalDiagnostics.swift in Sources */,
+				10F000000000000000000002 /* AdRemovalPersistence.swift in Sources */,
+				110000000000000000000002 /* AdRemovalStorage.swift in Sources */,
+				110000000000000000000003 /* AdRemovalDownload.swift in Sources */,
+				110000000000000000000004 /* AdRemovalPipeline.swift in Sources */,
+				111000000000000000000002 /* AdRemovalTranscription.swift in Sources */,
+				112000000000000000000002 /* AdRemovalClassification.swift in Sources */,
+				112000000000000000000003 /* AdRemovalModel.swift in Sources */,
+				113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */,
+				117000000000000000000001 /* DeepSeekAdClassifier.swift in Sources */,
+				114000000000000000000002 /* AdRemovalPlayback.swift in Sources */,
+				115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */,
+				116000000000000000000001 /* AdRemovalEvaluation.swift in Sources */,
 				10A000000000000000000001 /* PodsApp.swift in Sources */,
 				10A000000000000000000002 /* PodsWebView.swift in Sources */,
 				10A000000000000000000003 /* AudioBridge.swift in Sources */,
@@ -294,6 +378,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				10B000000000000000000001 /* PodsBackendTests.swift in Sources */,
+				10E000000000000000000001 /* AdRemovalDiagnosticsTests.swift in Sources */,
+				10F000000000000000000001 /* AdRemovalPersistenceTests.swift in Sources */,
+				110000000000000000000001 /* AdRemovalStorageTests.swift in Sources */,
+				111000000000000000000001 /* AdRemovalTranscriptionTests.swift in Sources */,
+				112000000000000000000001 /* AdRemovalClassificationTests.swift in Sources */,
+				114000000000000000000001 /* AdRemovalPlaybackTests.swift in Sources */,
+				115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -357,7 +448,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -410,7 +501,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
@@ -425,9 +516,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7626CK2W2G;
 				INFOPLIST_FILE = Pods/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -451,9 +542,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7626CK2W2G;
 				INFOPLIST_FILE = Pods/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -477,7 +568,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -501,7 +592,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -550,6 +641,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		113000000000000000000010 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = exactVersion;
+				version = 2.31.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		113000000000000000000011 /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 113000000000000000000010 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
+		};
+		113000000000000000000012 /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 113000000000000000000010 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 10A000000000000000000060 /* Project object */;
 }

@@ -1,0 +1,17 @@
+{
+  "schema_version": "pods-ad-removal-corpus-v1",
+  "episode_id": "synthetic-episode",
+  "duration_seconds": 60,
+  "ranges": [
+    {
+      "start_time": 0,
+      "end_time": 30,
+      "classification": "content"
+    },
+    {
+      "start_time": 30,
+      "end_time": 60,
+      "classification": "ad"
+    }
+  ]
+}

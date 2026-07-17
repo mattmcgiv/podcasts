@@ -97,12 +97,17 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     static let shared = AudioBridge()
 
     var progressRecorder: PlaybackProgressRecording?
+    var diagnostics: AdRemovalDiagnostics?
+    var adRemovalPlaybackProvider: AdRemovalPlaybackProviding?
+    var adRemovalRangeServer: AdRemovalRangeServing?
+    var playbackActivityDidChange: ((Bool) -> Void)?
 
     private weak var webView: WKWebView?
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var currentId: Int = 0
     private var currentEpisodeID: Int64?
+    private var playbackSessionID: String?
     private var lastRecordedEpisodeID: Int64?
     private var lastRecordedPosition: Double?
     private var requestedRate: Float = 1
@@ -115,13 +120,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var nowPlayingDuration: Double = 0
     private var nowPlayingRate: Float = 1
     private var nowPlayingPaused = true
+    private var lastReportedPlaybackActivity = false
     private let progressRecordStrideSeconds: Double = 5
+    private var downloadedEpisode: AdRemovalDownloadedEpisode?
+    private var publisherURL: URL?
+    private var macStreamURL: URL?
+    private var adRemovalSkipSession = AdRemovalSkipSession()
+    private var automaticSkipInFlight = false
 
     private var output: PlaybackOutput = .local
     /// User's chosen sink. Distinct from connection liveness — stays `.mac` while we reconnect.
     private var preferredOutput: PlaybackOutput = .local
     private var lastSrc: String?
     private var pendingPlayAfterCastConnect = false
+    private var macSourceFailed = false
     private var castWired = false
     /// Silent local loop so iOS keeps us alive while Mac is the exclusive audio sink.
     private var castKeepAlivePlayer: AVAudioPlayer?
@@ -204,6 +216,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "seek":
             let seconds = Self.doubleValue(body["seconds"]) ?? 0
             seek(id: id, seconds: seconds)
+        case "undoAdSkip":
+            undoPendingAdSkip(id: id)
         case "rate":
             let rate = Self.normalizedRate(Self.floatValue(body["rate"]) ?? 1)
             setRate(id: id, rate: rate)
@@ -227,6 +241,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let position = nowPlayingPosition
         let wasPlaying = !nowPlayingPaused
         let rate = requestedRate
+        recordDiagnostic(
+            eventName: "playback_output_selected",
+            severity: .notice,
+            fields: ["output": next.rawValue, "resume": resume ? "true" : "false"]
+        )
 
         if next == .mac {
             // Exclusive sink: local must never keep playing while Mac is chosen.
@@ -306,13 +325,25 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func pushLoadToMac(position: Double, rate: Float, autoplay: Bool) {
         guard preferredOutput == .mac else { return }
-        guard let lastSrc else { return }
+        guard let publisherURL,
+              let source = AdRemovalPlaybackSourcePolicy.macSource(
+                publisher: publisherURL,
+                downloaded: downloadedEpisode,
+                authenticatedStream: resolveMacStreamURL()
+              ) else {
+            var unavailable = CastSession.shared.currentStatus
+            unavailable.error = "Prepared audio is not reachable from this Mac. Keep Pods open and try again."
+            emitCastStatus(unavailable)
+            updateNowPlaying(paused: true)
+            recordDiagnostic(eventName: "mac_prepared_stream_unavailable", severity: .warning)
+            return
+        }
         // Exclusive: tear down local again in case anything recreated it.
         stopLocalPlayer(record: false)
         output = .mac
         var body: [String: Any] = [
             "cmd": "load",
-            "src": lastSrc,
+            "src": source.absoluteString,
             "position": max(0, position),
             "rate": rate,
         ]
@@ -331,7 +362,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         } else if nowPlayingDuration > 0 {
             body["duration"] = nowPlayingDuration
         }
+        if let playbackSessionID {
+            body = AdRemovalPlaybackSession.attaching(sessionID: playbackSessionID, to: body)
+        }
         CastSession.shared.sendCommand(body)
+        macSourceFailed = false
+        recordDiagnostic(
+            eventName: "mac_source_load_sent",
+            severity: .info,
+            fields: [
+                "source": downloadedEpisode == nil ? "publisher" : "authenticated_phone_stream",
+                "position": "\(max(0, position))",
+                "autoplay": autoplay ? "true" : "false"
+            ]
+        )
         if autoplay {
             CastSession.shared.sendCommand(["cmd": "play"])
             updateNowPlaying(position: position, rate: rate, paused: false)
@@ -341,8 +385,34 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func authorizeMacStream(for downloaded: AdRemovalDownloadedEpisode) -> URL? {
+        guard let playbackSessionID else { return nil }
+        return adRemovalRangeServer?.authorize(
+            fileURL: downloaded.audioURL,
+            episodeID: downloaded.episodeID,
+            playbackSessionID: playbackSessionID
+        )
+    }
+
+    private func resolveMacStreamURL() -> URL? {
+        guard let downloadedEpisode else { return nil }
+        if let macStreamURL { return macStreamURL }
+        let refreshed = authorizeMacStream(for: downloadedEpisode)
+        macStreamURL = refreshed
+        return refreshed
+    }
+
     private func handleCastEvent(_ event: [String: Any]) {
         let type = event["type"] as? String ?? ""
+        if let eventSessionID = AdRemovalPlaybackSession.sessionID(from: event),
+           eventSessionID != playbackSessionID {
+            recordDiagnostic(
+                eventName: "stale_mac_event_rejected",
+                severity: .warning,
+                fields: ["event_type": type]
+            )
+            return
+        }
         if type == "castDisconnected" {
             // Keep progress durable. Do NOT auto-start local while user still wants Mac —
             // that caused dual playback when Mac kept playing after a flaky TCP drop.
@@ -390,6 +460,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let duration = Self.doubleValue(event["duration"])
         let rate = Self.floatValue(event["playbackRate"]).map(Self.normalizedRate)
         let paused = event["paused"] as? Bool
+        recordDiagnostic(
+            eventName: "mac_transport_event",
+            severity: .debug,
+            fields: [
+                "event_type": type,
+                "position": position.map { String($0) } ?? "unknown",
+                "paused": paused.map { $0 ? "true" : "false" } ?? "unknown"
+            ]
+        )
 
         if let position {
             nowPlayingPosition = max(0, position)
@@ -440,6 +519,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
             emit(type: "pause", id: currentId, position: position ?? nowPlayingPosition, duration: duration ?? nowPlayingDuration, playbackRate: rate ?? requestedRate, paused: true)
         case "loadedmetadata":
+            macSourceFailed = false
             emit(
                 type: "loadedmetadata",
                 id: currentId,
@@ -456,6 +536,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 recordPlaybackProgress(position: position, force: true, allowRegress: false)
             }
             emit(type: "state", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: paused)
+        case "error":
+            macSourceFailed = true
+            nowPlayingPaused = true
+            if let position {
+                recordPlaybackProgress(position: position, force: true, allowRegress: false)
+            }
+            updateNowPlaying(position: position, rate: 0, paused: true)
+            var failed = CastSession.shared.currentStatus
+            failed.error = event["message"] as? String ?? "The iPhone audio stream is unavailable."
+            emitCastStatus(failed)
+            emit(type: "pause", id: currentId, position: position ?? nowPlayingPosition, playbackRate: requestedRate, paused: true)
+            recordDiagnostic(eventName: "mac_stream_unavailable", severity: .warning)
         default:
             break
         }
@@ -464,12 +556,52 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Transport
 
     private func load(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
-        lastSrc = url.absoluteString
+        playbackSessionID = AdRemovalPlaybackSession.makeID()
         currentEpisodeID = episodeID
+        publisherURL = url
+        downloadedEpisode = nil
+        macStreamURL = nil
+        macSourceFailed = false
+        adRemovalRangeServer?.revoke()
+        adRemovalSkipSession.clear()
+        automaticSkipInFlight = false
+        if let episodeID, let adRemovalPlaybackProvider {
+            do {
+                if let downloaded = try adRemovalPlaybackProvider.downloadedEpisode(episodeID: episodeID) {
+                    downloadedEpisode = downloaded
+                    if downloaded.manifestReady {
+                        adRemovalSkipSession.replaceRanges(downloaded.ranges)
+                    }
+                    macStreamURL = authorizeMacStream(for: downloaded)
+                }
+            } catch {
+                recordDiagnostic(
+                    eventName: "prepared_playback_source_rejected",
+                    severity: .warning,
+                    fields: ["error": String(describing: error)]
+                )
+            }
+        }
+        let selectedURL = AdRemovalPlaybackSourcePolicy.localSource(
+            publisher: url,
+            downloaded: downloadedEpisode
+        )
+        lastSrc = selectedURL.absoluteString
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         requestedRate = rate
         nowPlayingPosition = max(0, position)
+        recordDiagnostic(
+            eventName: "playback_source_selection",
+            severity: .notice,
+            fields: [
+                "request_url": selectedURL.isFileURL ? "local-prepared-audio" : url.absoluteString,
+                "source": downloadedEpisode == nil ? "publisher" : "downloaded_local",
+                "manifest_ready": downloadedEpisode?.manifestReady == true ? "true" : "false",
+                "output": preferredOutput.rawValue,
+                "position": "\(max(0, position))"
+            ]
+        )
 
         if preferredOutput == .mac || output == .mac {
             preferredOutput = .mac
@@ -510,7 +642,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
 
         updateCastKeepAlive()
-        loadLocal(id: id, url: url, episodeID: episodeID, position: position, rate: rate)
+        loadLocal(id: id, url: selectedURL, episodeID: episodeID, position: position, rate: rate)
     }
 
     private func loadLocal(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
@@ -529,6 +661,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         // After updateNowPlaying, prefer AV duration, else metadata-backed nowPlayingDuration.
         let resolved = Self.positiveDuration(initialDuration) ?? Self.positiveDuration(nowPlayingDuration)
         emit(type: "loadedmetadata", id: id, position: position, duration: resolved, playbackRate: rate, paused: true)
+        _ = applyAutomaticSkipIfNeeded(id: id, position: position)
     }
 
     private func play(id: Int) {
@@ -550,6 +683,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             pendingPlayAfterCastConnect = false
+            if PlaybackProgressPolicy.shouldReloadMacSource(sourceFailed: macSourceFailed) {
+                pushLoadToMac(position: nowPlayingPosition, rate: requestedRate, autoplay: true)
+                return
+            }
             CastSession.shared.sendCommand(["cmd": "play"])
             updateNowPlaying(rate: requestedRate, paused: false)
             emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
@@ -563,6 +700,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         guard preferredOutput == .local else {
             stopLocalPlayer(record: false)
             return
+        }
+        if let player {
+            let position = player.currentTime().seconds
+            if position.isFinite {
+                _ = applyAutomaticSkipIfNeeded(id: id, position: position)
+            }
         }
         configureSession()
         player?.rate = requestedRate
@@ -586,6 +729,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func seek(id: Int, seconds: Double) {
         let safe = max(0, seconds)
+        if applyAutomaticSkipIfNeeded(id: id, position: safe) {
+            return
+        }
         nowPlayingPosition = safe
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "seek", "seconds": safe])
@@ -636,6 +782,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         updateCastKeepAlive()
         stopLocalPlayer(record: false)
         currentEpisodeID = nil
+        downloadedEpisode = nil
+        publisherURL = nil
+        macStreamURL = nil
+        macSourceFailed = false
+        adRemovalRangeServer?.revoke()
+        adRemovalSkipSession.clear()
+        automaticSkipInFlight = false
+        playbackSessionID = nil
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         lastSrc = nil
@@ -666,12 +820,13 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private func addTimeObserver(id: Int) {
         guard let player else { return }
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
             guard let self else { return }
             // Only local clock writes progress when not casting.
             guard self.output == .local else { return }
+            guard !self.applyAutomaticSkipIfNeeded(id: id, position: time.seconds) else { return }
             let itemDuration = player.currentItem?.duration.seconds
             self.updateNowPlaying(
                 position: time.seconds,
@@ -689,6 +844,148 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 paused: player.rate == 0
             )
             self.recordPlaybackProgress(position: time.seconds)
+        }
+    }
+
+    @discardableResult
+    private func applyAutomaticSkipIfNeeded(id: Int, position: Double) -> Bool {
+        guard !automaticSkipInFlight,
+              downloadedEpisode?.manifestReady == true,
+              (output == .mac || player != nil),
+              let decision = adRemovalSkipSession.enter(position: position) else {
+            return false
+        }
+        automaticSkipInFlight = true
+        let started = Date()
+        recordDiagnostic(
+            eventName: "playback_ad_range_entered",
+            severity: .notice,
+            fields: [
+                "range_id": decision.rangeID,
+                "original_position": String(position),
+                "seek_target": String(decision.targetPosition),
+                "output": output.rawValue
+            ]
+        )
+
+        let completed: (Bool) -> Void = { [weak self] succeeded in
+            guard let self else { return }
+            self.automaticSkipInFlight = false
+            guard succeeded else {
+                self.recordDiagnostic(
+                    eventName: "playback_ad_seek_failed",
+                    severity: .warning,
+                    fields: ["range_id": decision.rangeID]
+                )
+                return
+            }
+            self.nowPlayingPosition = decision.targetPosition
+            self.updateNowPlaying(position: decision.targetPosition)
+            self.recordPlaybackProgress(
+                position: decision.targetPosition,
+                force: true,
+                allowRegress: false
+            )
+            self.emitAdRemovalEvent(type: "adSkip", id: id, decision: decision)
+            self.recordDiagnostic(
+                eventName: "playback_ad_seek_completed",
+                severity: .notice,
+                fields: [
+                    "range_id": decision.rangeID,
+                    "latency_ms": String(Int(Date().timeIntervalSince(started) * 1_000))
+                ]
+            )
+        }
+
+        if output == .mac || preferredOutput == .mac {
+            CastSession.shared.sendCommand(["cmd": "seek", "seconds": decision.targetPosition])
+            completed(true)
+        } else if let player {
+            player.seek(
+                to: CMTime(seconds: decision.targetPosition, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero,
+                completionHandler: completed
+            )
+        } else {
+            completed(false)
+            return false
+        }
+        return true
+    }
+
+    private func undoPendingAdSkip(id: Int) {
+        guard let decision = adRemovalSkipSession.pending,
+              let episodeID = currentEpisodeID,
+              let adRemovalPlaybackProvider else {
+            return
+        }
+        do {
+            let result = try adRemovalPlaybackProvider.undoSkip(
+                episodeID: episodeID,
+                rangeID: decision.rangeID
+            )
+            adRemovalSkipSession.didUndo(rangeID: result.disabledRangeID)
+            automaticSkipInFlight = false
+            nowPlayingPosition = result.seekPosition
+            if output == .mac || preferredOutput == .mac {
+                CastSession.shared.sendCommand(["cmd": "seek", "seconds": result.seekPosition])
+            } else {
+                player?.seek(
+                    to: CMTime(seconds: result.seekPosition, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+            }
+            updateNowPlaying(position: result.seekPosition)
+            recordPlaybackProgress(position: result.seekPosition, force: true, allowRegress: true)
+            emitAdRemovalEvent(
+                type: "adSkipUndone",
+                id: id,
+                decision: decision,
+                position: result.seekPosition
+            )
+            recordDiagnostic(
+                eventName: "playback_ad_skip_undone",
+                severity: .notice,
+                fields: [
+                    "range_id": result.disabledRangeID,
+                    "correction_id": result.correction.id
+                ]
+            )
+        } catch {
+            recordDiagnostic(
+                eventName: "playback_ad_skip_undo_failed",
+                severity: .error,
+                fields: ["error": String(describing: error)]
+            )
+        }
+    }
+
+    private func emitAdRemovalEvent(
+        type: String,
+        id: Int,
+        decision: AdRemovalSkipDecision,
+        position: Double? = nil
+    ) {
+        var payload: [String: Any] = [
+            "type": type,
+            "id": id,
+            "rangeId": decision.rangeID,
+            "rangeStart": decision.rangeStart,
+            "rangeEnd": decision.rangeEnd,
+            "skippedDuration": decision.skippedDuration,
+            "position": position ?? decision.targetPosition
+        ]
+        if let currentEpisodeID {
+            payload["episodeId"] = currentEpisodeID
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript("window.PodsAudioBridge && window.PodsAudioBridge.emit(\(json));")
         }
     }
 
@@ -843,6 +1140,22 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         recordPlaybackProgress(position: nowPlayingPosition, force: force, allowRegress: false)
     }
 
+    private func recordDiagnostic(
+        eventName: String,
+        severity: AdRemovalDiagnosticSeverity,
+        fields: [String: String] = [:]
+    ) {
+        try? diagnostics?.record(
+            eventName: eventName,
+            severity: severity,
+            context: .init(
+                episodeID: currentEpisodeID,
+                playbackSessionID: playbackSessionID
+            ),
+            fields: fields
+        )
+    }
+
     private func recordPlaybackProgress(position: Double, force: Bool = false, allowRegress: Bool = false) {
         guard let currentEpisodeID else {
             return
@@ -954,6 +1267,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             artwork: nowPlayingArtwork
         )
         MPNowPlayingInfoCenter.default().playbackState = nowPlayingPaused ? .paused : .playing
+        reportPlaybackActivityIfChanged()
     }
 
     private func clearNowPlaying() {
@@ -968,6 +1282,26 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         nowPlayingPaused = true
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
+        reportPlaybackActivityIfChanged()
+    }
+
+    var isEpisodePlaybackActive: Bool {
+        PlaybackProgressPolicy.isEpisodePlaybackActive(
+            episodeID: currentEpisodeID,
+            paused: nowPlayingPaused
+        )
+    }
+
+    private func reportPlaybackActivityIfChanged() {
+        let active = isEpisodePlaybackActive
+        guard active != lastReportedPlaybackActivity else { return }
+        lastReportedPlaybackActivity = active
+        playbackActivityDidChange?(active)
+        recordDiagnostic(
+            eventName: "playback_activity_changed",
+            severity: .info,
+            fields: ["active": active ? "true" : "false"]
+        )
     }
 
     private func loadNowPlayingArtwork(from url: URL?) {

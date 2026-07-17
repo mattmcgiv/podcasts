@@ -14,6 +14,10 @@ struct EpisodeItem: Codable, Equatable {
     let image_url: String
     let position_secs: Double
     let played_at: Int64?
+    let ad_removal_state: String
+    let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
 }
 
 struct EpisodeDetail: Codable, Equatable {
@@ -30,6 +34,10 @@ struct EpisodeDetail: Codable, Equatable {
     let played_at: Int64?
     let notes_html: String
     let archived_at: Int64?
+    let ad_removal_state: String
+    let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
 }
 
 struct Show: Codable, Equatable {
@@ -56,6 +64,46 @@ struct ShowDetail: Codable {
 struct SettingsPayload: Codable, Equatable {
     let speed: Double
     let autoplay: Bool
+}
+
+/// Lightweight ad-removal status for a single episode, with no notes_html or
+/// other heavy fields. Used by the batch `/api/ad-removal/statuses` endpoint so
+/// the Listen view can poll many active rows with one bounded request instead
+/// of one full episode-detail request per row.
+struct AdRemovalStatusItem: Codable, Equatable {
+    let id: Int64
+    let ad_removal_state: String
+    let ad_removal_action: String?
+    let ad_removal_stage: String?
+    let ad_removal_blocking_reason: String?
+    let ad_removal_completed_windows: Int64?
+    let ad_removal_total_windows: Int64?
+}
+
+struct AdRemovalStatusesPayload: Codable, Equatable {
+    let items: [AdRemovalStatusItem]
+}
+
+struct AdRemovalCorrectionCountPayload: Codable, Equatable {
+    let podcast_id: Int64
+    let podcast_title: String
+    let count: Int64
+}
+
+struct AdRemovalSettingsPayload: Codable, Equatable {
+    let enabled: Bool
+    let enrollment_cutoff: Int64?
+    let cloud_classifier_configured: Bool
+    let model_repository: String
+    let model_revision: String
+    let model_total_bytes: Int64
+    let model_downloaded_bytes: Int64
+    let model_download_state: String
+    let episode_storage_bytes: Int64
+    let episode_storage_limit_bytes: Int64
+    let minimum_free_bytes: Int64
+    let device_available_bytes: Int64
+    let corrections: [AdRemovalCorrectionCountPayload]
 }
 
 struct DirectoryPodcast: Codable, Equatable {

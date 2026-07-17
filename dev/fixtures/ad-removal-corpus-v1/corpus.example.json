@@ -1,0 +1,13 @@
+{
+  "schema_version": "pods-ad-removal-corpus-v1",
+  "episodes": [
+    {
+      "episode_id": "synthetic-episode",
+      "subscription_id": "synthetic-subscription",
+      "audio_file": "audio/synthetic-episode.m4a",
+      "labels_file": "labels/synthetic-episode.json",
+      "transcript_file": "transcripts/synthetic-episode.json",
+      "result_file": "results/synthetic-episode.json"
+    }
+  ]
+}

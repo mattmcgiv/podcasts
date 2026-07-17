@@ -16,37 +16,213 @@ struct PodsApp: App {
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
     private static let refreshTaskIdentifier = "dev.mcgiv.pods.feed-refresh"
+    private static let adRemovalTaskIdentifier = "dev.mcgiv.pods.ad-removal-processing"
     private var localServer: PodsLocalServer?
     private var refreshCoordinator: FeedRefreshCoordinator?
+    private var adRemovalDiagnostics: AdRemovalDiagnostics?
+    private var adRemovalDownloader: AdRemovalBackgroundDownloader?
+    private var adRemovalModelDownloader: AdModelBackgroundDownloader?
+    private var adRemovalCoordinator: AdRemovalCoordinator?
+    private var adRemovalScheduler: AdRemovalPipelineScheduler?
+    private var adRemovalRangeServer: AdRemovalRangeServer?
+    private var adRemovalWork: Task<Void, Never>?
+    private var adRemovalEnabled: (() -> Bool)?
+    private var pendingAdRemovalBackgroundEvents: [(String, () -> Void)] = []
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        registerBackgroundRefreshTask()
+        registerBackgroundTasks()
+        adRemovalDiagnostics = try? AdRemovalDiagnostics.applicationDefault(component: .iphone)
+        try? adRemovalDiagnostics?.record(
+            eventName: "application_launch",
+            severity: .notice,
+            fields: ["launch_options_present": launchOptions == nil ? "false" : "true"]
+        )
         PodsDebugLog("App launch bundle=\(Bundle.main.bundleIdentifier ?? "unknown") version=\(Self.bundleVersionSummary())")
+        AudioBridge.shared.diagnostics = adRemovalDiagnostics
+        let rangeServer = AdRemovalRangeServer(diagnostics: adRemovalDiagnostics)
+        rangeServer.start()
+        adRemovalRangeServer = rangeServer
+        AudioBridge.shared.adRemovalRangeServer = rangeServer
         AudioBridge.shared.configureSession()
         do {
             let databaseURL = try DatabaseBootstrap.prepare()
             PodsDebugLog("Database prepared at \(databaseURL.path)")
             let database = try PodsDatabase(url: databaseURL)
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
-            let backend = PodsBackend(database: database)
+            let artifactStore = try AdRemovalArtifactStore.applicationDefault()
+            let deepSeekCredentialStore = DeepSeekKeychainStore()
+            let modelStore = try AdModelAssetStore(artifactStore: artifactStore)
+            let cleanup = AdRemovalFileCleanup(
+                database: database,
+                artifactStore: artifactStore,
+                diagnostics: adRemovalDiagnostics
+            )
+            _ = try cleanup.drain()
+            let jobStore = AdRemovalJobStore(database: database)
+            try Self.repairAccidentalNextTenYearsSkipUndo(database: database)
+            AudioBridge.shared.adRemovalPlaybackProvider = AdRemovalPlaybackStore(
+                database: database,
+                jobStore: jobStore,
+                artifactStore: artifactStore
+            )
+            let storagePolicy = AdRemovalStoragePolicy(
+                usedBytes: { try artifactStore.episodeArtifactBytes() },
+                availableBytes: { try artifactStore.availableCapacity() }
+            )
+            let downloader = AdRemovalBackgroundDownloader(
+                jobStore: jobStore,
+                artifactStore: artifactStore,
+                storagePolicy: storagePolicy,
+                diagnostics: adRemovalDiagnostics
+            )
+            let pipeline = AdRemovalPipelineExecutor(
+                database: database,
+                jobStore: jobStore,
+                artifactStore: artifactStore,
+                audioDownloader: downloader,
+                transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
+                classifier: DeepSeekAdClassifier(
+                    credentialStore: deepSeekCredentialStore,
+                    diagnostics: adRemovalDiagnostics
+                ),
+                diagnostics: adRemovalDiagnostics
+            )
+            adRemovalDownloader = downloader
+            let adCoordinator = AdRemovalCoordinator(
+                store: jobStore,
+                executor: pipeline,
+                diagnostics: adRemovalDiagnostics
+            )
+            adRemovalCoordinator = adCoordinator
+            let scheduler = AdRemovalPipelineScheduler(
+                store: jobStore,
+                coordinator: adCoordinator,
+                isEnabled: {
+                    Self.isAdRemovalEnabled(database: database)
+                },
+                conditions: {
+                    let thermalState = ProcessInfo.processInfo.thermalState
+                    let playbackActive = await MainActor.run {
+                        AudioBridge.shared.isEpisodePlaybackActive
+                    }
+                    return AdRemovalRuntimeConditions(
+                        lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                        seriousThermalPressure: thermalState == .serious || thermalState == .critical,
+                        playbackActive: playbackActive
+                    )
+                },
+                diagnostics: adRemovalDiagnostics
+            )
+            adRemovalScheduler = scheduler
+            adRemovalEnabled = { Self.isAdRemovalEnabled(database: database) }
+            let modelDownloader = AdModelBackgroundDownloader(
+                database: database,
+                assetStore: modelStore,
+                diagnostics: adRemovalDiagnostics
+            )
+            modelDownloader.modelReadyHandler = { [weak self] in
+                try? jobStore.clearBlockingReasons([.modelRequired])
+                self?.requestAdRemovalRun()
+            }
+            adRemovalModelDownloader = modelDownloader
+            for (identifier, completion) in pendingAdRemovalBackgroundEvents {
+                if downloader.handleBackgroundEvents(
+                    identifier: identifier,
+                    completionHandler: completion
+                ) {
+                    continue
+                }
+                if modelDownloader.handleBackgroundEvents(
+                    identifier: identifier,
+                    completionHandler: completion
+                ) {
+                    continue
+                }
+                completion()
+            }
+            pendingAdRemovalBackgroundEvents.removeAll()
+            let backend = PodsBackend(
+                database: database,
+                adRemovalArtifactStore: artifactStore,
+                adRemovalDiagnostics: adRemovalDiagnostics,
+                deepSeekCredentialStore: deepSeekCredentialStore
+            )
             let coordinator = FeedRefreshCoordinator(backend: backend)
             backend.setRefreshRequestHandler { source in
                 await coordinator.refreshNow(source: source)
             }
+            backend.setAdRemovalRunRequestHandler { [weak self] in
+                await MainActor.run { self?.requestAdRemovalRun() }
+            }
+            backend.setAdRemovalModelDownloadRequestHandler { [weak modelDownloader] manifest in
+                await modelDownloader?.start(requestedManifest: manifest)
+            }
+            backend.setAdRemovalStopRequestHandler { [weak self, weak modelDownloader] in
+                await MainActor.run { self?.cancelAdRemovalWork() }
+                await modelDownloader?.cancel()
+            }
+            AudioBridge.shared.playbackActivityDidChange = { [weak self] active in
+                if !active { self?.requestAdRemovalRun() }
+            }
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(adRemovalConditionsDidChange),
+                name: .NSProcessInfoPowerStateDidChange,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(adRemovalConditionsDidChange),
+                name: ProcessInfo.thermalStateDidChangeNotification,
+                object: nil
+            )
             AudioBridge.shared.progressRecorder = backend
             let server = PodsLocalServer(backend: backend)
             try server.start()
             localServer = server
             refreshCoordinator = coordinator
             scheduleBackgroundRefresh()
+            Self.approveCrashRecoveryModelReplacement(database: database)
+            if Self.shouldResumeModelDownload(database: database) {
+                Task { await modelDownloader.start(requestedManifest: .qwen3OneSevenBFourBitV1) }
+            }
+            requestAdRemovalRun()
             PodsDebugLog("Local backend start requested")
         } catch {
             PodsLog("Pods local backend startup failed: \(error)")
         }
         return true
+    }
+
+    private static func repairAccidentalNextTenYearsSkipUndo(database: PodsDatabase) throws {
+        let marker = "repair_next_ten_years_skip_undo_20260717"
+        let alreadyApplied = try database.query(
+            "SELECT value FROM settings WHERE key = ?",
+            [.text(marker)],
+            map: { sqliteString($0, 0) }
+        ).first == "done"
+        guard !alreadyApplied else { return }
+
+        let correctionID = "36c497a6-37ae-4cfa-a6ef-ff4e3531b630"
+        let rangeID = "ad-segment-000143-000621780-000624780--segment-000179-000780120-000784620"
+        try database.withTransaction {
+            try database.execute(
+                "DELETE FROM ad_corrections WHERE id = ? AND source_episode_id = 15242",
+                [.text(correctionID)]
+            )
+            try database.execute(
+                "UPDATE ad_skip_ranges SET disabled = 0 WHERE id = ? AND episode_id = 15242",
+                [.text(rangeID)]
+            )
+            try database.execute(
+                "INSERT INTO settings (key, value) VALUES (?, 'done') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [.text(marker)]
+            )
+        }
+        PodsDebugLog("Applied ad-removal state repair \(marker)")
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
@@ -56,20 +232,53 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         Task { [weak self, refreshCoordinator] in
             _ = await refreshCoordinator.refreshIfDue()
             self?.scheduleBackgroundRefresh()
+            self?.requestAdRemovalRun()
         }
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         scheduleBackgroundRefresh()
+        scheduleAdRemovalProcessing()
     }
 
-    private func registerBackgroundRefreshTask() {
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        if let adRemovalDownloader, let adRemovalModelDownloader {
+            if adRemovalDownloader.handleBackgroundEvents(
+                identifier: identifier,
+                completionHandler: completionHandler
+            ) {
+                return
+            }
+            if adRemovalModelDownloader.handleBackgroundEvents(
+                identifier: identifier,
+                completionHandler: completionHandler
+            ) {
+                return
+            }
+            completionHandler()
+        } else {
+            pendingAdRemovalBackgroundEvents.append((identifier, completionHandler))
+        }
+    }
+
+    private func registerBackgroundTasks() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskIdentifier, using: nil) { [weak self] task in
             guard let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
             }
             self?.handleBackgroundRefresh(refreshTask)
+        }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.adRemovalTaskIdentifier, using: nil) { [weak self] task in
+            guard let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            self?.handleAdRemovalProcessing(processingTask)
         }
     }
 
@@ -105,6 +314,120 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             task.setTaskCompleted(success: !Task.isCancelled && result.errors == 0)
             self?.scheduleBackgroundRefresh()
         }
+    }
+
+    private func requestAdRemovalRun() {
+        guard adRemovalWork == nil, let adRemovalScheduler else { return }
+        scheduleAdRemovalProcessing()
+        adRemovalWork = Task { [weak self, adRemovalScheduler] in
+            await adRemovalScheduler.runUntilIdle()
+            await MainActor.run { self?.adRemovalWork = nil }
+        }
+    }
+
+    private func cancelAdRemovalWork() {
+        adRemovalWork?.cancel()
+        adRemovalWork = nil
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.adRemovalTaskIdentifier)
+    }
+
+    private func scheduleAdRemovalProcessing() {
+        guard adRemovalScheduler != nil, adRemovalEnabled?() == true else { return }
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.adRemovalTaskIdentifier)
+        let request = BGProcessingTaskRequest(identifier: Self.adRemovalTaskIdentifier)
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            try? adRemovalDiagnostics?.record(
+                eventName: "background_processing_scheduled",
+                severity: .info,
+                fields: ["earliest_begin": request.earliestBeginDate?.description ?? "unknown"]
+            )
+        } catch {
+            let nsError = error as NSError
+            try? adRemovalDiagnostics?.record(
+                eventName: "background_processing_schedule_failed",
+                severity: .warning,
+                fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
+            )
+        }
+    }
+
+    private func handleAdRemovalProcessing(_ task: BGProcessingTask) {
+        guard let adRemovalScheduler, adRemovalEnabled?() == true else {
+            task.setTaskCompleted(success: true)
+            return
+        }
+        try? adRemovalDiagnostics?.record(eventName: "background_processing_launch", severity: .notice)
+        var work: Task<Void, Never>?
+        task.expirationHandler = { [weak self] in
+            work?.cancel()
+            try? self?.adRemovalDiagnostics?.record(
+                eventName: "background_processing_expired",
+                severity: .warning
+            )
+        }
+        work = Task { [weak self, adRemovalScheduler] in
+            await adRemovalScheduler.runUntilIdle()
+            let success = !Task.isCancelled
+            task.setTaskCompleted(success: success)
+            try? self?.adRemovalDiagnostics?.record(
+                eventName: "background_processing_finished",
+                severity: success ? .notice : .warning
+            )
+            self?.scheduleAdRemovalProcessing()
+        }
+    }
+
+    @objc private func adRemovalConditionsDidChange() {
+        let process = ProcessInfo.processInfo
+        try? adRemovalDiagnostics?.record(
+            eventName: "processing_conditions_changed",
+            severity: .notice,
+            fields: [
+                "low_power": process.isLowPowerModeEnabled ? "true" : "false",
+                "thermal_state": String(process.thermalState.rawValue),
+                "playback_active": AudioBridge.shared.isEpisodePlaybackActive ? "true" : "false"
+            ]
+        )
+        requestAdRemovalRun()
+    }
+
+    private static func isAdRemovalEnabled(database: PodsDatabase) -> Bool {
+        (try? database.query(
+            "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
+            map: { sqliteString($0, 0) }
+        ).first) == "true"
+    }
+
+    private static func shouldResumeModelDownload(database: PodsDatabase) -> Bool {
+        guard isAdRemovalEnabled(database: database) else { return false }
+        let state = try? database.query(
+            "SELECT value FROM settings WHERE key = 'ad_removal_model_download_state'",
+            map: { sqliteString($0, 0) }
+        ).first
+        return state == "consented" || state == "downloading" || state == "failed"
+    }
+
+    /// The previously approved Qwen3.5-4B model deterministically exceeded the
+    /// iPhone's process-memory limit. Carry that existing approval forward only
+    /// for this pinned crash-recovery replacement; future model revisions still
+    /// require the normal explicit size consent flow.
+    private static func approveCrashRecoveryModelReplacement(database: PodsDatabase) {
+        guard isAdRemovalEnabled(database: database) else { return }
+        let priorRevision = try? database.query(
+            "SELECT value FROM settings WHERE key = 'ad_removal_model_revision'",
+            map: { sqliteString($0, 0) }
+        ).first
+        guard priorRevision == "32f3e8ecf65426fc3306969496342d504bfa13f3" else { return }
+        try? database.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'consented')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
     }
 
     private static func bundleVersionSummary() -> String {
