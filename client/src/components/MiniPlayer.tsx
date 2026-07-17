@@ -8,7 +8,7 @@ export function MiniPlayer() {
     <div className="miniplayer">
       <button className="mini-main" onClick={() => p.setExpanded(true)} aria-label="Open player">
         <Artwork src={p.current.image_url || p.current.podcast_image} size={40} />
-        <span className="mini-title">
+        <span className="mini-title episode-title-full">
           {p.cast.output === "mac" && p.cast.connected ? (
             <span className="mini-cast" aria-label="Playing on Mac">
               Mac ·{" "}

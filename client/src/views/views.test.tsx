@@ -147,6 +147,13 @@ describe("RecentView", () => {
     expect(FakeAudio.last().src).toBe("https://h.example/7.mp3");
   });
 
+  it("marks episode titles for full, non-ellipsized display", async () => {
+    installApi({ ...settings, "GET /api/recent": page([episode({ title: "A very long episode title" })]) });
+    wrap(<RecentView />);
+
+    expect(await screen.findByText("A very long episode title")).toHaveClass("episode-title-full");
+  });
+
   it("updates the Listen row progress from live playback", async () => {
     installApi({
       ...settings,
@@ -214,6 +221,18 @@ describe("RecentView", () => {
 
     expect(calls.some((call) => call.key === "POST /api/episodes/21/ad-removal/prepare")).toBe(true);
     expect(calls.some((call) => call.key === "POST /api/episodes/22/ad-removal/retry")).toBe(true);
+  });
+
+  it("renders the Ad-free badge in the same muted color as episode metadata", async () => {
+    installApi({
+      ...settings,
+      "GET /api/recent": page([
+        episode({ id: 23, title: "Prepared episode", ad_removal_state: "ad-free" }),
+      ]),
+    });
+    wrap(<RecentView />);
+
+    expect(await screen.findByText("Ad-free")).toHaveStyle({ color: "var(--text-dim)" });
   });
 
   it("shows a low-storage banner below the minimum-free threshold and hides it at/above or disabled", async () => {

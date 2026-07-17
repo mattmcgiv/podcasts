@@ -63,6 +63,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.queryByRole("dialog", { name: "Player" })).not.toBeInTheDocument();
     const mini = screen.getByRole("button", { name: "Open player" });
     expect(mini).toHaveTextContent("Sheet Episode");
+    expect(screen.getByText("Sheet Episode")).toHaveClass("episode-title-full");
 
     // re-expand
     await user.click(mini);

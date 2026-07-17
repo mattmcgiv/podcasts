@@ -266,6 +266,12 @@ input {
   overflow: hidden;
 }
 
+.row-title.episode-title-full {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
 .row-sub {
   color: var(--text-dim);
   font-size: 13px;
@@ -284,10 +290,6 @@ input {
   color: var(--text-dim);
   font-size: 11px;
   line-height: 1;
-}
-
-.ad-removal-state.is-ad-free {
-  color: var(--accent);
 }
 
 .ad-removal-state.is-failed,
@@ -612,7 +614,8 @@ input[type="search"]::-webkit-search-cancel-button {
   left: 8px;
   right: 8px;
   bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 6px);
-  height: var(--mini-h);
+  min-height: var(--mini-h);
+  height: auto;
   display: flex;
   align-items: center;
   background: var(--bg-overlay);
@@ -643,6 +646,12 @@ input[type="search"]::-webkit-search-cancel-button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mini-title.episode-title-full {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .mini-toggle {

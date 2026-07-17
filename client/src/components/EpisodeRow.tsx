@@ -119,13 +119,16 @@ export function EpisodeRow({
       <button className="row-main" onClick={() => onPlay(item)}>
         <Artwork src={item.image_url || item.podcast_image} size={56} />
         <span className="row-text">
-          <span className="row-title">{item.title}</span>
+          <span className="row-title episode-title-full">{item.title}</span>
           {showPodcast && <span className="row-sub">{item.podcast_title}</span>}
           <span className="row-meta">
             {fmtDate(item.published_at)}
             {fmtRemaining(item) && <> · {fmtRemaining(item)}</>}
           </span>
-          <span className={`ad-removal-state is-${effectiveState}`}>
+          <span
+            className={`ad-removal-state is-${effectiveState}`}
+            style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
+          >
             {adStageLabel(effectiveState, effectiveStage, effectiveBlocking)}
           </span>
           {adWindowProgress != null && (
