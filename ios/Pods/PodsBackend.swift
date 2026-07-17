@@ -433,7 +433,16 @@ final class PodsBackend: PlaybackProgressRecording {
                 """,
                 [.int(ts), .int(ts), .int(podcastID)]
             )
+            try AdRemovalJobStore.cleanupArchivedEpisodeMetadata(
+                in: database,
+                podcastID: podcastID,
+                now: ts
+            )
             return podcastID
+        }
+        if (try? settingValues()["ad_removal_enabled"]) == "true",
+           let adRemovalRunRequestHandler {
+            Task { await adRemovalRunRequestHandler() }
         }
         return try fetchShow(id: podcastID)
     }

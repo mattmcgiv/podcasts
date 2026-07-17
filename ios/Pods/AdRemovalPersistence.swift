@@ -84,6 +84,7 @@ struct AdCorrection: Equatable, Codable {
 
 enum AdRemovalJobStoreError: Error, Equatable {
     case episodeNotFound
+    case episodeArchived
     case jobNotFound
     case corruptState(String)
     case invalidTransition(from: AdRemovalJobStage, to: AdRemovalJobStage)
@@ -107,14 +108,21 @@ final class AdRemovalJobStore {
     }
 
     func enqueue(episodeID: Int64) throws -> AdRemovalJob {
-        if let existing = try job(episodeID: episodeID) {
-            return existing
-        }
         guard let podcastID = try database.scalarInt64(
             "SELECT podcast_id FROM episodes WHERE id = ?",
             [.int(episodeID)]
         ) else {
             throw AdRemovalJobStoreError.episodeNotFound
+        }
+        let archived = try database.scalarInt64(
+            "SELECT COUNT(*) FROM episode_state WHERE episode_id = ? AND archived_at IS NOT NULL",
+            [.int(episodeID)]
+        ) ?? 0
+        guard archived == 0 else {
+            throw AdRemovalJobStoreError.episodeArchived
+        }
+        if let existing = try job(episodeID: episodeID) {
+            return existing
         }
         let timestamp = now()
         let id = UUID().uuidString.lowercased()
@@ -302,6 +310,7 @@ final class AdRemovalJobStore {
               AND j.stage IN (?, ?, ?, ?, ?)
               AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?)
               AND s.played_at IS NULL
+              AND s.archived_at IS NULL
             ORDER BY e.published_at ASC, e.id ASC
             LIMIT 1
             """,
@@ -322,6 +331,7 @@ final class AdRemovalJobStore {
               AND j.next_retry_at IS NOT NULL
               AND j.stage IN (?, ?, ?, ?, ?)
               AND s.played_at IS NULL
+              AND s.archived_at IS NULL
             """,
             [
                 .text(AdRemovalJobStage.queued.rawValue),
@@ -851,6 +861,26 @@ final class AdRemovalJobStore {
         try database.execute("DELETE FROM ad_classification_windows WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_transcript_segments WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_removal_jobs WHERE episode_id = ?", [.int(episodeID)])
+    }
+
+    static func cleanupArchivedEpisodeMetadata(
+        in database: PodsDatabase,
+        podcastID: Int64,
+        now: Int64 = Int64(Date().timeIntervalSince1970)
+    ) throws {
+        let episodeIDs = try database.query(
+            """
+            SELECT j.episode_id
+            FROM ad_removal_jobs j
+            JOIN episode_state s ON s.episode_id = j.episode_id
+            WHERE j.podcast_id = ? AND s.archived_at IS NOT NULL
+            """,
+            [.int(podcastID)],
+            map: { sqlite3_column_int64($0, 0) }
+        )
+        for episodeID in episodeIDs {
+            try cleanupEpisodeMetadata(in: database, episodeID: episodeID, now: now)
+        }
     }
 
     func cleanupPodcast(podcastID: Int64) throws {

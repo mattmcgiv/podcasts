@@ -147,6 +147,34 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(missing.statusCode, 404)
     }
 
+    func testSubscribeEnrollsOnlyVisibleEpisodesAndWakesAdRemovalScheduler() async throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            "INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        let schedulerRequested = expectation(description: "ad-removal scheduler requested")
+        harness.backend.setAdRemovalRunRequestHandler { schedulerRequested.fulfill() }
+        let feedURL = "https://feeds.example/ad-removal-subscribe.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Ad Removal Subscribe",
+            items: [
+                ("Ep1", "ar1", "https://h.example/ar1.mp3", Self.d1),
+                ("Ep2", "ar2", "https://h.example/ar2.mp3", Self.d2),
+                ("Ep3", "ar3", "https://h.example/ar3.mp3", Self.d3),
+                ("Ep4", "ar4", "https://h.example/ar4.mp3", Self.d4),
+            ]
+        ).utf8)
+
+        let response = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        XCTAssertEqual(response.statusCode, 201)
+        await fulfillment(of: [schedulerRequested], timeout: 1)
+        let enrolledTitles = try harness.database.query(
+            "SELECT e.title FROM ad_removal_jobs j JOIN episodes e ON e.id = j.episode_id ORDER BY e.published_at",
+            map: { sqliteString($0, 0) }
+        )
+        XCTAssertEqual(enrolledTitles, ["Ep3", "Ep4"])
+    }
+
     func testPlayedPositionSettingsAndNextRoundTrip() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/a.xml"

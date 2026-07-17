@@ -95,6 +95,24 @@ final class AdRemovalPersistenceTests: XCTestCase {
         try store.clearBlockingReasons([.lowPower])
         XCTAssertNil(try store.job(id: older.id)?.blockingReason)
         XCTAssertEqual(try store.nextRunnableJob()?.id, older.id)
+
+        try harness.database.execute(
+            "INSERT INTO episode_state (episode_id, archived_at, updated_at) VALUES (?, ?, ?)",
+            [.int(olderEpisodeID), .int(1_000), .int(1_000)]
+        )
+        XCTAssertEqual(try store.nextRunnableJob()?.id, newer.id)
+    }
+
+    func testArchivedEpisodeCannotBeEnqueued() throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            "INSERT INTO episode_state (episode_id, archived_at, updated_at) VALUES (?, ?, ?)",
+            [.int(harness.episodeID), .int(1_000), .int(1_000)]
+        )
+
+        XCTAssertThrowsError(try AdRemovalJobStore(database: harness.database).enqueue(episodeID: harness.episodeID)) {
+            XCTAssertEqual($0 as? AdRemovalJobStoreError, .episodeArchived)
+        }
     }
 
     func testAudioArtifactMetadataIsDurableAndRejectsUnauditedPaths() throws {
