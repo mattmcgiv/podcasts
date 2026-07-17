@@ -36,6 +36,15 @@ button {
   cursor: pointer;
 }
 
+button,
+a[href],
+input[type="checkbox"],
+input[type="radio"],
+[role="button"],
+[role="switch"] {
+  touch-action: manipulation;
+}
+
 input {
   font: inherit;
 }
