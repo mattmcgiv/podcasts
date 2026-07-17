@@ -108,7 +108,7 @@ enum AdModelDownloadPolicy {
             omittingEmptySubsequences: false
         )
         guard repositoryComponents.count == 2,
-              repositoryComponents.allSatisfy({ AdModelAssetStore.isSafeComponent(String($0)) }),
+              repositoryComponents.allSatisfy({ AdModelAssetStore.isSafeRepositoryComponent(String($0)) }),
               AdModelAssetStore.isSafeComponent(manifest.revision),
               AdModelAssetStore.isSafe(relativePath: file.relativePath),
               manifest.files.contains(file),
@@ -143,6 +143,12 @@ enum AdModelTaskCompletionPolicy {
         return !(cancellationRequested
             && nsError.domain == NSURLErrorDomain
             && nsError.code == NSURLErrorCancelled)
+    }
+}
+
+enum AdModelExistingTaskPolicy {
+    static func shouldCancelExistingTasks(downloadState: String) -> Bool {
+        downloadState == "failed"
     }
 }
 
@@ -342,6 +348,13 @@ final class AdModelAssetStore {
         }
     }
 
+    static func isSafeRepositoryComponent(_ value: String) -> Bool {
+        guard value != "." && value != ".." else { return false }
+        return !value.isEmpty && value.unicodeScalars.allSatisfy {
+            CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.")).contains($0)
+        }
+    }
+
     private func excludeFromBackup(_ url: URL) throws {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
@@ -368,6 +381,7 @@ final class AdModelBackgroundDownloader: NSObject {
     private var scheduling = false
     private var cancellationRequested = false
     private var validatedTaskIdentifiers: Set<Int> = []
+    private var ignoredCancellationTaskIdentifiers: Set<Int> = []
     private var lastProgressBucket: [Int: Int] = [:]
     var modelReadyHandler: (() -> Void)?
 
@@ -397,6 +411,14 @@ final class AdModelBackgroundDownloader: NSObject {
     }
 
     func start(requestedManifest: AdModelManifest) async {
+        record(
+            eventName: "model_download_start_requested",
+            severity: .info,
+            fields: [
+                "requested_revision": requestedManifest.revision,
+                "active_revision": manifest.revision
+            ]
+        )
         guard requestedManifest == manifest else {
             record(
                 eventName: "model_download_manifest_rejected",
@@ -409,6 +431,11 @@ final class AdModelBackgroundDownloader: NSObject {
         cancellationRequested = false
         guard !scheduling else {
             stateLock.unlock()
+            record(
+                eventName: "model_download_start_ignored",
+                severity: .info,
+                fields: ["reason": "already_scheduling"]
+            )
             return
         }
         scheduling = true
@@ -421,6 +448,11 @@ final class AdModelBackgroundDownloader: NSObject {
 
         do {
             let pending = try AdModelDownloadPlan.pendingFiles(manifest: manifest, assetStore: assetStore)
+            record(
+                eventName: "model_download_pending_evaluated",
+                severity: .info,
+                fields: ["pending_count": String(pending.count)]
+            )
             if pending.isEmpty {
                 try assetStore.activate(manifest: manifest, database: database)
                 try setState("ready", downloadedBytes: manifest.totalByteCount, error: nil)
@@ -436,14 +468,38 @@ final class AdModelBackgroundDownloader: NSObject {
                 return
             }
 
-            let tasks = await session.allTasks
-            if tasks.contains(where: { $0.taskDescription.flatMap(fileForTaskDescription) != nil }) {
-                try setState(
-                    "downloading",
-                    downloadedBytes: try assetStore.downloadedByteCount(manifest: manifest),
-                    error: nil
-                )
-                return
+            let existingTasks = await session.allTasks.filter {
+                $0.taskDescription.flatMap(fileForTaskDescription) != nil
+            }
+            record(
+                eventName: "model_download_existing_tasks_evaluated",
+                severity: .info,
+                fields: ["task_count": String(existingTasks.count)]
+            )
+            if !existingTasks.isEmpty {
+                let state = (try? downloadState()) ?? ""
+                if AdModelExistingTaskPolicy.shouldCancelExistingTasks(downloadState: state) {
+                    stateLock.lock()
+                    for task in existingTasks {
+                        ignoredCancellationTaskIdentifiers.insert(task.taskIdentifier)
+                    }
+                    stateLock.unlock()
+                    for task in existingTasks {
+                        task.cancel()
+                    }
+                    record(
+                        eventName: "model_download_stale_tasks_cancelled",
+                        severity: .warning,
+                        fields: ["task_count": String(existingTasks.count), "prior_state": state]
+                    )
+                } else {
+                    try setState(
+                        "downloading",
+                        downloadedBytes: try assetStore.downloadedByteCount(manifest: manifest),
+                        error: nil
+                    )
+                    return
+                }
             }
 
             let file = pending[0]
@@ -469,8 +525,15 @@ final class AdModelBackgroundDownloader: NSObject {
             )
             task.resume()
         } catch {
-            markFailed(error)
+            markFailed(error, fields: ["source": "start"])
         }
+    }
+
+    private func downloadState() throws -> String {
+        try database.query(
+            "SELECT value FROM settings WHERE key = 'ad_removal_model_download_state'",
+            map: { sqliteString($0, 0) }
+        ).first ?? ""
     }
 
     func cancel() async {
@@ -518,14 +581,17 @@ final class AdModelBackgroundDownloader: NSObject {
         }
     }
 
-    private func markFailed(_ error: Error) {
+    private func markFailed(_ error: Error, fields extraFields: [String: String] = [:]) {
         let downloaded = (try? assetStore.downloadedByteCount(manifest: manifest)) ?? 0
         try? setState("failed", downloadedBytes: downloaded, error: error)
         let nsError = error as NSError
+        var fields = extraFields
+        fields["error_domain"] = nsError.domain
+        fields["error_code"] = String(nsError.code)
         record(
             eventName: "model_download_failed",
             severity: .error,
-            fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
+            fields: fields
         )
     }
 
@@ -545,15 +611,25 @@ extension AdModelBackgroundDownloader: URLSessionDownloadDelegate {
         didFinishDownloadingTo location: URL
     ) {
         guard let file = downloadTask.taskDescription.flatMap(fileForTaskDescription) else {
-            markFailed(AdModelBackgroundDownloadError.unexpectedTask)
+            markFailed(AdModelBackgroundDownloadError.unexpectedTask, fields: ["source": "did_finish"])
             return
         }
         guard let response = downloadTask.response as? HTTPURLResponse else {
-            markFailed(AdModelBackgroundDownloadError.missingResponse)
+            markFailed(
+                AdModelBackgroundDownloadError.missingResponse,
+                fields: ["source": "did_finish", "relative_path": file.relativePath]
+            )
             return
         }
         guard (200..<300).contains(response.statusCode) else {
-            markFailed(AdModelBackgroundDownloadError.httpStatus(response.statusCode))
+            markFailed(
+                AdModelBackgroundDownloadError.httpStatus(response.statusCode),
+                fields: [
+                    "source": "did_finish",
+                    "relative_path": file.relativePath,
+                    "http_status": String(response.statusCode)
+                ]
+            )
             return
         }
         do {
@@ -567,7 +643,7 @@ extension AdModelBackgroundDownloader: URLSessionDownloadDelegate {
             validatedTaskIdentifiers.insert(downloadTask.taskIdentifier)
             stateLock.unlock()
         } catch {
-            markFailed(error)
+            markFailed(error, fields: ["source": "did_finish", "relative_path": file.relativePath])
         }
     }
 
@@ -607,14 +683,25 @@ extension AdModelBackgroundDownloader: URLSessionTaskDelegate {
         stateLock.lock()
         lastProgressBucket.removeValue(forKey: task.taskIdentifier)
         let fileValidated = validatedTaskIdentifiers.remove(task.taskIdentifier) != nil
+        let ignoredCancellation = ignoredCancellationTaskIdentifiers.remove(task.taskIdentifier) != nil
         let wasCancellationRequested = cancellationRequested
         stateLock.unlock()
         if let error {
+            let nsError = error as NSError
+            if ignoredCancellation,
+               nsError.domain == NSURLErrorDomain,
+               nsError.code == NSURLErrorCancelled {
+                return
+            }
             if AdModelTaskCompletionPolicy.shouldRecordFailure(
                 error: error,
                 cancellationRequested: wasCancellationRequested
             ) {
-                markFailed(error)
+                var fields = ["source": "did_complete"]
+                if let relativePath = task.taskDescription {
+                    fields["relative_path"] = relativePath
+                }
+                markFailed(error, fields: fields)
             }
             return
         }

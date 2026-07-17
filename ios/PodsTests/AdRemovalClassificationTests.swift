@@ -332,6 +332,20 @@ final class AdRemovalClassificationTests: XCTestCase {
         )
     }
 
+    func testPinnedQwenDownloadURLAllowsRepositoryComponentPeriod() throws {
+        let file = AdModelManifest.qwen35FourBitV1.files[0]
+
+        let url = try AdModelDownloadPolicy.remoteURL(
+            for: file,
+            manifest: .qwen35FourBitV1
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-4bit/resolve/32f3e8ecf65426fc3306969496342d504bfa13f3/chat_template.jinja?download=true"
+        )
+    }
+
     func testDownloadedModelFileIsVerifiedBeforeAtomicInstallation() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AdRemovalModelInstallTests-\(UUID().uuidString)", isDirectory: true)
@@ -426,6 +440,13 @@ final class AdRemovalClassificationTests: XCTestCase {
             error: URLError(.cancelled),
             cancellationRequested: false
         ))
+    }
+
+    func testModelExistingTaskPolicyCancelsStaleFailedTasksBeforeRetrying() {
+        XCTAssertTrue(AdModelExistingTaskPolicy.shouldCancelExistingTasks(downloadState: "failed"))
+        XCTAssertFalse(AdModelExistingTaskPolicy.shouldCancelExistingTasks(downloadState: "downloading"))
+        XCTAssertFalse(AdModelExistingTaskPolicy.shouldCancelExistingTasks(downloadState: "consented"))
+        XCTAssertFalse(AdModelExistingTaskPolicy.shouldCancelExistingTasks(downloadState: "ready"))
     }
 
     func testMLXClassifierUsesPinnedTextOnlyNonThinkingConfiguration() throws {
