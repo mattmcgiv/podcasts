@@ -1169,7 +1169,9 @@ test_prepare_web_assets_starts_existing_stopped_container() {
   mkdir -p "$tmp/repo/ios/Pods" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
   cp "$ROOT/ios/prepare-web-assets.sh" "$tmp/repo/ios/prepare-web-assets.sh"
   cp "$ROOT/ios/atomic-directory-swap.swift" "$tmp/repo/ios/atomic-directory-swap.swift"
+  cp "$ROOT/ios/verify-web-assets.sh" "$tmp/repo/ios/verify-web-assets.sh"
   chmod +x "$tmp/repo/ios/prepare-web-assets.sh"
+  chmod +x "$tmp/repo/ios/verify-web-assets.sh"
 
   cat > "$tmp/repo/dev/up.sh" <<'STUB'
 #!/bin/sh
@@ -1243,7 +1245,9 @@ test_prepare_web_assets_recreates_stale_container_mounts() {
   mkdir -p "$tmp/repo/ios/Pods" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
   cp "$ROOT/ios/prepare-web-assets.sh" "$tmp/repo/ios/prepare-web-assets.sh"
   cp "$ROOT/ios/atomic-directory-swap.swift" "$tmp/repo/ios/atomic-directory-swap.swift"
+  cp "$ROOT/ios/verify-web-assets.sh" "$tmp/repo/ios/verify-web-assets.sh"
   chmod +x "$tmp/repo/ios/prepare-web-assets.sh"
+  chmod +x "$tmp/repo/ios/verify-web-assets.sh"
 
   cat > "$tmp/repo/dev/up.sh" <<'STUB'
 #!/bin/sh
@@ -1307,6 +1311,43 @@ STUB
   assert_file_contains "$tmp/container.log" "rm -f pods-dev"
   assert_file_contains "$tmp/up.log" "up"
   assert_file_exists "$tmp/repo/ios/Pods/Web/index.html"
+}
+
+test_verify_web_assets_rejects_incomplete_and_accepts_complete_bundle() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios/Pods/Web/assets"
+  cp "$ROOT/ios/verify-web-assets.sh" "$tmp/repo/ios/verify-web-assets.sh"
+  chmod +x "$tmp/repo/ios/verify-web-assets.sh"
+
+  set +e
+  WEB_ASSETS_DIR="$tmp/repo/ios/Pods/Web" "$tmp/repo/ios/verify-web-assets.sh" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "missing web assets must fail the deployment gate"
+
+  printf '<!doctype html><link rel="stylesheet" href="./assets/app.css"><script src="./assets/app.js"></script>\n' > "$tmp/repo/ios/Pods/Web/index.html"
+  printf 'ok\n' > "$tmp/repo/ios/Pods/Web/assets/app.js"
+
+  set +e
+  WEB_ASSETS_DIR="$tmp/repo/ios/Pods/Web" "$tmp/repo/ios/verify-web-assets.sh" >/dev/null 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "an index referencing a missing asset must fail the deployment gate"
+
+  printf 'ok\n' > "$tmp/repo/ios/Pods/Web/assets/app.css"
+  WEB_ASSETS_DIR="$tmp/repo/ios/Pods/Web" "$tmp/repo/ios/verify-web-assets.sh" >/dev/null
+}
+
+test_xcode_build_runs_web_asset_gate_before_copying_resources() {
+  project="$ROOT/ios/Pods.xcodeproj/project.pbxproj"
+  assert_file_contains "$project" "Verify Web Assets"
+  assert_file_contains "$project" 'shellScript = "\"$PROJECT_DIR/verify-web-assets.sh\"";'
+
+  phases="$(sed -n '/buildPhases = (/,/);/p' "$project" | head -n 8)"
+  verify_line="$(printf '%s\n' "$phases" | grep -n 'Verify Web Assets' | cut -d: -f1)"
+  resources_line="$(printf '%s\n' "$phases" | grep -n 'Resources' | cut -d: -f1)"
+  [ -n "$verify_line" ] && [ -n "$resources_line" ] && [ "$verify_line" -lt "$resources_line" ] \
+    || fail "the Xcode web-asset gate must run before resources are copied"
 }
 
 test_dev_up_starts_existing_stopped_container() {
@@ -1448,6 +1489,8 @@ test_failed_refresh_preserves_status_and_emits_deduplicated_alert
 test_initial_renewal_failure_alerts_when_profile_state_is_missing
 test_prepare_web_assets_starts_existing_stopped_container
 test_prepare_web_assets_recreates_stale_container_mounts
+test_verify_web_assets_rejects_incomplete_and_accepts_complete_bundle
+test_xcode_build_runs_web_asset_gate_before_copying_resources
 test_dev_up_starts_existing_stopped_container
 test_dev_up_recreates_stale_container_mounts
 

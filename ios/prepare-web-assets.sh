@@ -152,5 +152,6 @@ fi
 
 rm -rf "$STAGE_DIR"
 STAGE_DIR=""
+"$ROOT/ios/verify-web-assets.sh"
 
 echo "Staged web assets in $WEB_DIR"
