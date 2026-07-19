@@ -45,6 +45,40 @@ final class AdRemovalPersistenceTests: XCTestCase {
         }
     }
 
+    /// Holds the first stage execute until `release()` so a concurrent scheduler
+    /// call can observe ownership contention.
+    private actor ControllableStageExecutor: AdRemovalStageExecuting {
+        private var isHeld = true
+        private var enteredContinuation: CheckedContinuation<Void, Never>?
+        private var didEnter = false
+
+        func waitUntilEntered() async {
+            if didEnter { return }
+            await withCheckedContinuation { continuation in
+                if didEnter {
+                    continuation.resume()
+                } else {
+                    enteredContinuation = continuation
+                }
+            }
+        }
+
+        func release() {
+            isHeld = false
+        }
+
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            if !didEnter {
+                didEnter = true
+                enteredContinuation?.resume()
+                enteredContinuation = nil
+            }
+            while isHeld {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+    }
+
     private final class PausingStageExecutor: AdRemovalStageExecuting {
         func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
             throw AdRemovalPipelinePause(reason: .storageLimit)
@@ -501,6 +535,28 @@ final class AdRemovalPersistenceTests: XCTestCase {
 
         XCTAssertEqual(try store.job(id: queued.id)?.stage, .queued)
         XCTAssertTrue(executor.executedStages.isEmpty)
+    }
+
+    func testConcurrentRunUntilIdleReportsBusyWhileOwnerCompletesSuccessfully() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        _ = try store.enqueue(episodeID: harness.episodeID)
+        let executor = ControllableStageExecutor()
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) }
+        )
+
+        async let firstResult = scheduler.runUntilIdle()
+        await executor.waitUntilEntered()
+
+        let secondResult = await scheduler.runUntilIdle()
+        XCTAssertEqual(secondResult, .busy)
+
+        await executor.release()
+        let ownedResult = await firstResult
+        XCTAssertEqual(ownedResult, .completed)
     }
 
     private struct Harness {

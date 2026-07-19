@@ -1187,6 +1187,23 @@ enum AdRemovalSchedulingPolicy {
     }
 }
 
+/// Outcome of a single `AdRemovalPipelineScheduler.runUntilIdle` invocation.
+/// Distinguishes a completed/idle ownership run from a concurrent call that
+/// could not own the shared single-worker pipeline.
+enum AdRemovalPipelineRunResult: Equatable, Sendable {
+    /// This invocation owned the scheduler and ran until idle (or no-op while disabled).
+    case completed
+    /// Another invocation already owns the pipeline; this call did no useful work.
+    case busy
+    /// This invocation owned the pipeline but stopped without a clean idle completion
+    /// (cancellation, stage failure boundary, or store error).
+    case unsuccessful
+
+    var isSuccessful: Bool {
+        self == .completed
+    }
+}
+
 actor AdRemovalPipelineScheduler {
     private let store: AdRemovalJobStore
     private let coordinator: AdRemovalCoordinator
@@ -1195,6 +1212,7 @@ actor AdRemovalPipelineScheduler {
     private let diagnostics: AdRemovalDiagnostics?
     private let now: () -> Int64
     private let sleep: (UInt64) async throws -> Void
+    private var runInProgress = false
 
     init(
         store: AdRemovalJobStore,
@@ -1216,13 +1234,19 @@ actor AdRemovalPipelineScheduler {
         self.sleep = sleep
     }
 
-    func runUntilIdle(maximumStageCount: Int = 100) async {
-        guard await isEnabled() else { return }
+    @discardableResult
+    func runUntilIdle(maximumStageCount: Int = 100) async -> AdRemovalPipelineRunResult {
+        guard !runInProgress else { return .busy }
+        runInProgress = true
+        defer { runInProgress = false }
+
+        guard await isEnabled() else { return .completed }
         do {
             try store.clearTransientPolicyBlockingReasons()
             for _ in 0..<maximumStageCount {
+                if Task.isCancelled { return .unsuccessful }
                 guard let next = try store.nextRunnableJob() else {
-                    guard let deadline = try store.earliestRetryAt() else { return }
+                    guard let deadline = try store.earliestRetryAt() else { return .completed }
                     let delay = UInt64(max(0, deadline - now()))
                     try? diagnostics?.record(
                         eventName: "retry_scheduled",
@@ -1237,7 +1261,9 @@ actor AdRemovalPipelineScheduler {
                     )
                     continue
                 }
-                guard let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else { return }
+                guard let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else {
+                    return .completed
+                }
                 if let reason = AdRemovalSchedulingPolicy.blockingReason(
                     for: stage,
                     conditions: await conditions()
@@ -1257,13 +1283,23 @@ actor AdRemovalPipelineScheduler {
                     )
                     continue
                 }
-                guard await runOneStage() else { return }
+                switch await runOneStage() {
+                case .ran:
+                    continue
+                case .idle:
+                    return .completed
+                case .failed:
+                    return .unsuccessful
+                }
             }
             try? diagnostics?.record(
                 eventName: "scheduler_stage_limit_reached",
                 severity: .warning,
                 fields: ["maximum_stage_count": String(maximumStageCount)]
             )
+            return .completed
+        } catch is CancellationError {
+            return .unsuccessful
         } catch {
             let nsError = error as NSError
             try? diagnostics?.record(
@@ -1271,14 +1307,25 @@ actor AdRemovalPipelineScheduler {
                 severity: .error,
                 fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
             )
+            return .unsuccessful
         }
     }
 
-    private func runOneStage() async -> Bool {
+    private enum StageAttemptResult {
+        case ran
+        case idle
+        case failed
+    }
+
+    private func runOneStage() async -> StageAttemptResult {
         do {
-            return try await coordinator.runNextStage() != nil
+            // Coordinator returns nil when another stage run owns the shared worker
+            // or when there is no runnable work. With scheduler-level ownership the
+            // busy path should be rare; treat nil as idle so callers do not report
+            // false success for an empty queue.
+            return try await coordinator.runNextStage() != nil ? .ran : .idle
         } catch is CancellationError {
-            return false
+            return .failed
         } catch {
             let nsError = error as NSError
             try? diagnostics?.record(
@@ -1286,7 +1333,7 @@ actor AdRemovalPipelineScheduler {
                 severity: .error,
                 fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
             )
-            return false
+            return .failed
         }
     }
 }

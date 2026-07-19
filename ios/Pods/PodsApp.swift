@@ -363,8 +363,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
         }
         work = Task { [weak self, adRemovalScheduler] in
-            await adRemovalScheduler.runUntilIdle()
-            let success = !Task.isCancelled
+            let runResult = await adRemovalScheduler.runUntilIdle()
+            // Never report success for a concurrent/busy invocation that did not
+            // own pipeline work, or for cancellation / unsuccessful ownership runs.
+            let success = !Task.isCancelled && runResult.isSuccessful
             task.setTaskCompleted(success: success)
             try? self?.adRemovalDiagnostics?.record(
                 eventName: "background_processing_finished",
