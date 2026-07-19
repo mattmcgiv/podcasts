@@ -109,6 +109,29 @@ describe("RecentView", () => {
     await waitFor(() => expect(recentCalls).toBeGreaterThanOrEqual(3)); // initial + loadMore + reload
   });
 
+  it("does not mark the newly exposed row played during the same rapid interaction", async () => {
+    const first = episode({ id: 1, title: "First" });
+    const exposed = episode({ id: 2, title: "Exposed after removal" });
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page([first, exposed]),
+      "POST /api/episodes/1/played": null,
+      "POST /api/episodes/2/played": null,
+    });
+    wrap(<RecentView />);
+
+    await screen.findByText("First");
+    fireEvent.click(within(screen.getByText("First").closest("li")!).getByRole("button", { name: "Mark played" }));
+    fireEvent.click(
+      within(screen.getByText("Exposed after removal").closest("li")!).getByRole("button", {
+        name: "Mark played",
+      }),
+    );
+
+    expect(calls.filter((call) => call.key === "POST /api/episodes/1/played")).toHaveLength(1);
+    expect(calls.filter((call) => call.key === "POST /api/episodes/2/played")).toHaveLength(0);
+  });
+
   it("has no Listen refresh control and empty state does not mention refresh button", async () => {
     installApi({
       ...settings,

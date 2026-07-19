@@ -31,6 +31,10 @@ export const AD_SETTINGS_POLL_INTERVAL_MS = 15_000;
  * replaces per-row full-detail polling. One cycle covers every active row. */
 export const AD_STATUS_POLL_INTERVAL_MS = 8_000;
 
+/** Keep a removed row from exposing a different episode to the tail of the
+ * same rapid tap/double-tap interaction. */
+export const MARK_PLAYED_REFLOW_GUARD_MS = 1_000;
+
 /** Backend caps batch statuses at 50 episode ids per request. */
 const AD_STATUS_BATCH_MAX = 50;
 
@@ -85,6 +89,7 @@ export function RecentView() {
   const [sortAscending, setSortAscending] = useState(true);
   const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
+  const markPlayedGuardUntilRef = useRef(0);
 
   const items = list.items;
 
@@ -310,6 +315,9 @@ export function RecentView() {
   }, [adSettings]);
 
   function markPlayed(item: EpisodeItem) {
+    const now = Date.now();
+    if (now < markPlayedGuardUntilRef.current) return;
+    markPlayedGuardUntilRef.current = now + MARK_PLAYED_REFLOW_GUARD_MS;
     list.removeById(item.id);
     void Api.markPlayed(item.id)
       .then(() => emitEpisodesChanged())
