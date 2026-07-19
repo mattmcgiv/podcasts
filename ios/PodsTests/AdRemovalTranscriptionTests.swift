@@ -116,6 +116,36 @@ final class AdRemovalTranscriptionTests: XCTestCase {
         ))
     }
 
+    func testResultAccumulatorKeepsValidFinalizedSegmentsWhenAnotherResultIsInvalid() throws {
+        var accumulator = AdTranscriptResultAccumulator(language: "en-US")
+
+        accumulator.consume(isFinal: false, startTime: 0, endTime: 1, text: "Draft")
+        accumulator.consume(isFinal: true, startTime: 10, endTime: 14, text: "Valid segment")
+        accumulator.consume(isFinal: true, startTime: 14, endTime: 14, text: "Invalid range")
+
+        XCTAssertEqual(accumulator.segments.count, 1)
+        XCTAssertEqual(accumulator.segments.first?.text, "Valid segment")
+        XCTAssertEqual(accumulator.observedFinalResultCount, 2)
+        XCTAssertEqual(accumulator.rejectedFinalResultCount, 1)
+    }
+
+    func testTranscriptionErrorsExposeStableSpecificNSErrorCodes() {
+        let errors: [(AdRemovalTranscriptionError, Int)] = [
+            (.invalidSegment, 1),
+            (.speechTranscriberUnavailable, 2),
+            (.englishLocaleUnsupported, 3),
+            (.speechModelUnavailable, 4),
+            (.noFinalizedResults, 5)
+        ]
+
+        for (error, expectedCode) in errors {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "Pods.AdRemovalTranscriptionError")
+            XCTAssertEqual(nsError.code, expectedCode)
+            XCTAssertFalse(nsError.localizedDescription.isEmpty)
+        }
+    }
+
     private struct Harness {
         let database: PodsDatabase
         let jobStore: AdRemovalJobStore
