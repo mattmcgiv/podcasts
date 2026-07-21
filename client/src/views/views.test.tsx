@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { PlayerProvider } from "../player";
+import { installReliableTapActivation } from "../reliableTap";
 import { FakeAudio } from "../test/fakeAudio";
 import { adRemovalSettings, adRemovalStatusItem, adRemovalStatuses, episode, HttpError, installApi, page, type MockRoutes } from "../test/mockApi";
 import type { Show } from "../types";
@@ -35,9 +36,42 @@ function show(overrides: Partial<Show> = {}): Show {
 const settings: MockRoutes = {
   "GET /api/settings": { speed: 1, autoplay: true },
   "GET /api/ad-removal/settings": adRemovalSettings({ enabled: false }),
+  "GET /api/refresh-status": {
+    last_attempt_at: null,
+    last_success_at: null,
+    last_source: null,
+    last_refreshed: 0,
+    last_errors: 0,
+  },
 };
 
 describe("RecentView", () => {
+  it("shows the latest successful feed refresh above the footer nav and updates it", async () => {
+    let statusCalls = 0;
+    installApi({
+      ...settings,
+      "GET /api/recent": page([episode()]),
+      "GET /api/refresh-status": () => ({
+        is_refreshing: statusCalls === 0,
+        last_attempt_at: 1_784_071_860,
+        last_success_at: statusCalls++ === 0 ? 1_784_071_800 : 1_784_075_400,
+        last_source: "foreground",
+        last_refreshed: 1,
+        last_errors: 0,
+      }),
+    });
+    wrap(<RecentView />);
+
+    const initial = await screen.findByText(/Latest feed refresh:/);
+    const initialText = initial.textContent;
+    expect(initial).toHaveClass("feed-refresh-status");
+    expect(initialText).toMatch(/^Refreshing feeds/);
+
+    window.dispatchEvent(new Event("pods-episodes-changed"));
+    await waitFor(() => expect(screen.getByText(/^Latest feed refresh:/).textContent).not.toBe(initialText));
+    expect(screen.getByText(/^Latest feed refresh:/).textContent).not.toMatch(/^Refreshing feeds/);
+  });
+
   it("renders, marks played optimistically, loads more", async () => {
     const ep1 = episode({ id: 1, title: "First" });
     const ep2 = episode({ id: 2, title: "Second" });
@@ -1211,6 +1245,60 @@ describe("PlayedView", () => {
     await waitFor(() =>
       expect(calls.some((c) => c.key === "DELETE /api/episodes/4/played")).toBe(true),
     );
+  });
+
+  it("one touch only unmarks the selected row when the next row moves underneath", async () => {
+    const first = episode({ id: 4, title: "Old One", played_at: 1_750_000_100 });
+    const second = episode({ id: 5, title: "Older Two", played_at: 1_750_000_000 });
+    const unplayed = new Set<number>();
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/played": () => page([first, second].filter((item) => !unplayed.has(item.id))),
+      "DELETE /api/episodes/4/played": () => { unplayed.add(4); return null; },
+      "DELETE /api/episodes/5/played": () => { unplayed.add(5); return null; },
+    });
+    const uninstallReliableTap = installReliableTapActivation(document);
+    wrap(<PlayedView />);
+    await screen.findByText("Old One");
+
+    const selected = within(screen.getByText("Old One").closest("li")!)
+      .getByRole("button", { name: "Mark unplayed" });
+    const dispatchPointer = (type: string) => {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: 20,
+        clientY: 20,
+      });
+      Object.defineProperties(event, {
+        pointerId: { value: 1 },
+        pointerType: { value: "touch" },
+      });
+      selected.dispatchEvent(event);
+    };
+    act(() => {
+      dispatchPointer("pointerdown");
+      dispatchPointer("pointerup");
+    });
+    await waitFor(() => expect(screen.queryByText("Old One")).not.toBeInTheDocument());
+
+    const newlyExposed = within(screen.getByText("Older Two").closest("li")!)
+      .getByRole("button", { name: "Mark unplayed" });
+    act(() => {
+      newlyExposed.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 20,
+        clientY: 20,
+        detail: 1,
+      }));
+    });
+    await act(async () => { await Promise.resolve(); });
+    uninstallReliableTap();
+
+    expect(calls.filter((call) => call.key === "DELETE /api/episodes/4/played")).toHaveLength(1);
+    expect(calls.filter((call) => call.key === "DELETE /api/episodes/5/played")).toHaveLength(0);
+    expect(screen.getByText("Older Two")).toBeInTheDocument();
   });
 
   it("shows its empty state", async () => {

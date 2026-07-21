@@ -9,6 +9,9 @@ function formatGB(bytes: number): string {
 }
 
 function formatRefreshStatus(refreshStatus: RefreshStatus): string {
+  if (refreshStatus.is_refreshing) {
+    return "Refreshing feeds…";
+  }
   if (refreshStatus.last_success_at == null) {
     return "No successful feed refresh yet.";
   }
@@ -199,7 +202,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           <section className="ad-removal-settings" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
-              Transcript windows are sent to DeepSeek V4 Pro for classification. Audio stays on this iPhone.
+              Transcript text is sent to DeepSeek V4 Pro for ad classification and generated show notes. Audio stays on this iPhone.
             </p>
             <input
               type="password"

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SPEEDS } from "../config";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
@@ -15,14 +15,73 @@ function speedCorrelationID(): string {
   return `speed-${Date.now().toString(36)}-${nextSpeedInteraction++}`;
 }
 
+function fmtChapterTime(secs: number): string {
+  const total = Math.max(0, Math.floor(secs));
+  const hours = Math.floor(total / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  return `${hours}${hours === 1 ? "hr" : "hrs"} ${minutes}${minutes === 1 ? "min" : "mins"}`;
+}
+
 export function PlayerSheet() {
   const p = usePlayer();
   const pendingSpeedInteraction = useRef<string | null>(null);
+  const [adSkipToast, setAdSkipToast] = useState<{
+    notice: NonNullable<typeof p.pendingAdSkip>;
+    phase: "visible" | "leaving";
+  } | null>(null);
+  useEffect(() => {
+    if (!p.pendingAdSkip) {
+      setAdSkipToast(null);
+      return;
+    }
+    setAdSkipToast({ notice: p.pendingAdSkip, phase: "visible" });
+    const leaveTimer = window.setTimeout(() => {
+      setAdSkipToast((current) => current ? { ...current, phase: "leaving" } : null);
+    }, 9_840);
+    const removeTimer = window.setTimeout(() => setAdSkipToast(null), 10_000);
+    return () => {
+      window.clearTimeout(leaveTimer);
+      window.clearTimeout(removeTimer);
+    };
+  }, [p.pendingAdSkip]);
   if (!p.current || !p.expanded) return null;
   const ep = p.current;
+  const showNotes = (ep.show_notes ?? []).filter(
+    (note) => Number.isFinite(note.start_time) && note.start_time >= 0,
+  );
+  const chapters = [
+    ...showNotes.map((note) => ({ ...note, isAd: false })),
+    ...(ep.ad_markers ?? [])
+      .filter((marker) => Number.isFinite(marker.start_time) && marker.start_time >= 0)
+      .map((marker) => ({
+        ...marker,
+        title: "Ads",
+        summary: "",
+        isAd: true,
+      })),
+  ]
+    .sort((a, b) => a.start_time - b.start_time || a.id.localeCompare(b.id))
+    .filter((chapter, index, sorted) => (
+      !chapter.isAd || index === 0 || !sorted[index - 1].isAd
+    ));
+  const nextChapter = showNotes
+    .filter((chapter) => chapter.start_time > p.position)
+    .sort((a, b) => a.start_time - b.start_time || a.id.localeCompare(b.id))[0];
 
   return (
     <div className="player-sheet" role="dialog" aria-label="Player">
+      {adSkipToast && (
+        <div
+          className={`top-confirmation ad-skip-toast is-${adSkipToast.phase}`}
+          role="status"
+          aria-label="Ad skip notification"
+        >
+          <span>Skipped {fmtTime(adSkipToast.notice.skippedDuration)}</span>
+          <button type="button" onClick={p.undoAdSkip} aria-label="Undo skipped section">
+            Undo
+          </button>
+        </div>
+      )}
       <header className="sheet-header">
         <button className="icon-btn" onClick={() => p.setExpanded(false)} aria-label="Minimize player">
           <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden>
@@ -61,13 +120,15 @@ export function PlayerSheet() {
           </div>
         )}
 
-        {p.pendingAdSkip && (
-          <div className="ad-skip-undo" role="status">
-            <span>Skipped {fmtTime(p.pendingAdSkip.skippedDuration)}</span>
-            <button type="button" onClick={p.undoAdSkip} aria-label="Undo skipped section">
-              Undo
-            </button>
-          </div>
+        {nextChapter && (
+          <button
+            type="button"
+            className="next-chapter-link"
+            onClick={() => p.seekTo(nextChapter.start_time)}
+          >
+            <span className="next-chapter-prefix">Next:</span>{" "}{nextChapter.title}{" "}
+            <span className="next-chapter-time">({fmtChapterTime(nextChapter.start_time)})</span>
+          </button>
         )}
 
         <div className="controls-row">
@@ -153,22 +214,58 @@ export function PlayerSheet() {
               </p>
             )}
           </div>
-          <label className="switch-row">
-            <span>Autoplay next</span>
-            <input
-              type="checkbox"
+          <div className="player-action-row">
+            <button
+              type="button"
+              className="chip mark-played-btn"
+              onClick={() => void p.markPlayedAndClose()}
+            >
+              Mark played
+            </button>
+            <button
+              type="button"
+              className="autoplay-toggle"
               role="switch"
-              checked={p.autoplay}
-              onChange={(e) => p.setAutoplay(e.target.checked)}
-            />
-          </label>
-          <button className="ghost-btn" onClick={() => void p.markPlayedAndClose()}>
-            Mark played
-          </button>
+              aria-checked={p.autoplay}
+              aria-label="Autoplay next"
+              onClick={() => p.setAutoplay(!p.autoplay)}
+            >
+              <span>Autoplay next</span>
+              <span className="autoplay-toggle-track" aria-hidden>
+                <span className="autoplay-toggle-thumb" />
+              </span>
+            </button>
+          </div>
         </div>
 
-        {ep.notes_html && (
-          <div className="notes" dangerouslySetInnerHTML={{ __html: ep.notes_html }} />
+        {(chapters.length > 0 || p.showNotesGenerating || p.showNotesError) && (
+          <section className="show-notes" aria-labelledby="show-notes-title">
+            <h3 id="show-notes-title">Chapters</h3>
+            {p.showNotesGenerating && (
+              <p className="show-notes-status" role="status">Generating show notes…</p>
+            )}
+            {p.showNotesError && !p.showNotesGenerating && (
+              <div className="show-notes-error" role="alert">
+                <span>{p.showNotesError}</span>
+                <button type="button" onClick={p.retryShowNotes}>Retry</button>
+              </div>
+            )}
+            {chapters.map((chapter) => (
+              <button
+                key={`${chapter.isAd ? "ad" : "note"}-${chapter.id}`}
+                type="button"
+                className={`show-note${chapter.isAd ? " is-ad" : ""}`}
+                aria-label={`${fmtTime(chapter.start_time)} ${chapter.title}`}
+                onClick={() => p.seekTo(chapter.start_time)}
+              >
+                <span className="show-note-time">{fmtTime(chapter.start_time)}</span>
+                <span className="show-note-copy">
+                  <strong>{chapter.title}</strong>
+                  {chapter.summary && <span>{chapter.summary}</span>}
+                </span>
+              </button>
+            ))}
+          </section>
         )}
       </div>
     </div>

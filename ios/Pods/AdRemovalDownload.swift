@@ -142,8 +142,10 @@ final class AdRemovalBackgroundDownloader: NSObject, AdRemovalAudioDownloading {
 
     private func persistResumeData(_ data: Data?, for job: AdRemovalJob) {
         guard let data, !data.isEmpty else { return }
+        var writtenPath: String?
         do {
             let relativePath = try artifactStore.writeResumeData(data, jobID: job.id)
+            writtenPath = relativePath
             _ = try jobStore.recordDownloadResumePath(jobID: job.id, relativePath: relativePath)
             record(
                 eventName: "audio_download_resume_data_saved",
@@ -152,6 +154,9 @@ final class AdRemovalBackgroundDownloader: NSObject, AdRemovalAudioDownloading {
                 fields: ["byte_count": String(data.count)]
             )
         } catch {
+            if let writtenPath {
+                try? artifactStore.removeArtifact(relativePath: writtenPath)
+            }
             record(
                 eventName: "audio_download_resume_data_save_failed",
                 severity: .error,

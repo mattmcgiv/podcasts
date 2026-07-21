@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private static let adRemovalTaskIdentifier = "dev.mcgiv.pods.ad-removal-processing"
     private var localServer: PodsLocalServer?
     private var refreshCoordinator: FeedRefreshCoordinator?
+    private let foregroundRefreshLifecycle = ForegroundFeedRefreshLifecycle()
     private var adRemovalDiagnostics: AdRemovalDiagnostics?
     private var adRemovalDownloader: AdRemovalBackgroundDownloader?
     private var adRemovalModelDownloader: AdModelBackgroundDownloader?
@@ -41,6 +42,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var adRemovalScheduler: AdRemovalPipelineScheduler?
     private var adRemovalRangeServer: AdRemovalRangeServer?
     private var adRemovalWork: Task<Void, Never>?
+    private var adRemovalWorkToken: UUID?
+    private var adRemovalBackgroundWork: Task<Void, Never>?
+    private var adRemovalBackgroundWorkToken: UUID?
+    private var adRemovalCancellationDepth = 0
     private var adRemovalEnabled: (() -> Bool)?
     private var pendingAdRemovalBackgroundEvents: [(String, () -> Void)] = []
     private var startupFailureDescription: String?
@@ -51,6 +56,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         registerBackgroundTasks()
+        // SwiftUI may deliver the initial active transition before the native
+        // backend is ready. Queue it now and consume it after coordinator setup.
+        foregroundRefreshLifecycle.applicationDidBecomeActive()
         adRemovalDiagnostics = try? AdRemovalDiagnostics.applicationDefault(component: .iphone)
         try? adRemovalDiagnostics?.record(
             eventName: "application_launch",
@@ -80,6 +88,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             _ = try cleanup.drain()
             let jobStore = AdRemovalJobStore(database: database)
+            let episodeShowNotesService = EpisodeShowNotesService(
+                database: database,
+                generator: DeepSeekEpisodeShowNotesGenerator(
+                    credentialStore: deepSeekCredentialStore,
+                    diagnostics: adRemovalDiagnostics
+                )
+            )
+            let diagnostics = adRemovalDiagnostics
             try Self.repairAccidentalNextTenYearsSkipUndo(database: database)
             AudioBridge.shared.adRemovalPlaybackProvider = AdRemovalPlaybackStore(
                 database: database,
@@ -112,7 +128,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let adCoordinator = AdRemovalCoordinator(
                 store: jobStore,
                 executor: pipeline,
-                diagnostics: adRemovalDiagnostics
+                diagnostics: adRemovalDiagnostics,
+                readyHandler: { episodeID in
+                    do {
+                        _ = try await episodeShowNotesService.generate(episodeID: episodeID)
+                    } catch is CancellationError {
+                        // Episode or feature cleanup owns cancellation; no retry is appropriate here.
+                    } catch {
+                        let nsError = error as NSError
+                        try? diagnostics?.record(
+                            eventName: "episode_show_notes_generation_failed",
+                            severity: .warning,
+                            context: .init(episodeID: episodeID),
+                            fields: [
+                                "error_domain": nsError.domain,
+                                "error_code": String(nsError.code)
+                            ]
+                        )
+                    }
+                }
             )
             adRemovalCoordinator = adCoordinator
             let scheduler = AdRemovalPipelineScheduler(
@@ -162,7 +196,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 database: database,
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
-                deepSeekCredentialStore: deepSeekCredentialStore
+                deepSeekCredentialStore: deepSeekCredentialStore,
+                episodeShowNotesService: episodeShowNotesService
             )
             let coordinator = FeedRefreshCoordinator(backend: backend)
             backend.setRefreshRequestHandler { source in
@@ -174,9 +209,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             backend.setAdRemovalModelDownloadRequestHandler { [weak modelDownloader] manifest in
                 await modelDownloader?.start(requestedManifest: manifest)
             }
-            backend.setAdRemovalStopRequestHandler { [weak self, weak modelDownloader] in
-                await MainActor.run { self?.cancelAdRemovalWork() }
-                await modelDownloader?.cancel()
+            backend.setAdRemovalCancellationRequestHandler { [weak self, weak modelDownloader] scope in
+                await self?.cancelAdRemovalWork(scope)
+                if scope == .all {
+                    await modelDownloader?.cancel()
+                }
             }
             NotificationCenter.default.addObserver(
                 self,
@@ -198,6 +235,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             try server.start()
             localServer = server
             refreshCoordinator = coordinator
+            installForegroundRefreshHandler(coordinator)
             scheduleBackgroundRefresh()
             Self.approveCrashRecoveryModelReplacement(database: database)
             if Self.shouldResumeModelDownload(database: database) {
@@ -267,6 +305,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         try server.start()
         localServer = server
         refreshCoordinator = coordinator
+        installForegroundRefreshHandler(coordinator)
         scheduleBackgroundRefresh()
         PodsDebugLog("Minimal local backend start requested")
     }
@@ -300,13 +339,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        guard let refreshCoordinator else {
-            return
-        }
-        Task { [weak self, refreshCoordinator] in
-            _ = await refreshCoordinator.refreshIfDue()
-            self?.scheduleBackgroundRefresh()
-            self?.requestAdRemovalRun()
+        foregroundRefreshLifecycle.applicationDidBecomeActive()
+    }
+
+    private func installForegroundRefreshHandler(_ coordinator: FeedRefreshCoordinator) {
+        foregroundRefreshLifecycle.install { [weak self, coordinator] in
+            let result = await coordinator.refreshWhenForegrounded()
+            await MainActor.run {
+                self?.scheduleBackgroundRefresh()
+                self?.requestAdRemovalRun()
+            }
+            return result
         }
     }
 
@@ -391,18 +434,45 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     private func requestAdRemovalRun() {
-        guard adRemovalWork == nil, let adRemovalScheduler else { return }
+        guard adRemovalWork == nil,
+              adRemovalCancellationDepth == 0,
+              adRemovalEnabled?() == true,
+              let adRemovalScheduler else { return }
         scheduleAdRemovalProcessing()
+        let token = UUID()
+        adRemovalWorkToken = token
         adRemovalWork = Task { [weak self, adRemovalScheduler] in
             await adRemovalScheduler.runUntilIdle()
-            await MainActor.run { self?.adRemovalWork = nil }
+            await MainActor.run {
+                guard self?.adRemovalWorkToken == token else { return }
+                self?.adRemovalWork = nil
+                self?.adRemovalWorkToken = nil
+            }
         }
     }
 
-    private func cancelAdRemovalWork() {
-        adRemovalWork?.cancel()
-        adRemovalWork = nil
+    @MainActor
+    private func cancelAdRemovalWork(_ scope: AdRemovalPipelineCancellationScope) async {
+        adRemovalCancellationDepth += 1
+        defer { adRemovalCancellationDepth -= 1 }
+        let foreground = adRemovalWork
+        let foregroundToken = adRemovalWorkToken
+        let background = adRemovalBackgroundWork
+        let backgroundToken = adRemovalBackgroundWorkToken
+        foreground?.cancel()
+        background?.cancel()
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.adRemovalTaskIdentifier)
+        await adRemovalCoordinator?.cancel(scope)
+        await foreground?.value
+        await background?.value
+        if adRemovalWorkToken == foregroundToken {
+            adRemovalWork = nil
+            adRemovalWorkToken = nil
+        }
+        if adRemovalBackgroundWorkToken == backgroundToken {
+            adRemovalBackgroundWork = nil
+            adRemovalBackgroundWorkToken = nil
+        }
     }
 
     private func scheduleAdRemovalProcessing() {
@@ -434,6 +504,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             task.setTaskCompleted(success: true)
             return
         }
+        guard adRemovalBackgroundWork == nil, adRemovalCancellationDepth == 0 else {
+            task.setTaskCompleted(success: false)
+            return
+        }
         try? adRemovalDiagnostics?.record(eventName: "background_processing_launch", severity: .notice)
         var work: Task<Void, Never>?
         task.expirationHandler = { [weak self] in
@@ -443,16 +517,26 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 severity: .warning
             )
         }
+        let token = UUID()
+        adRemovalBackgroundWorkToken = token
         work = Task { [weak self, adRemovalScheduler] in
-            await adRemovalScheduler.runUntilIdle()
-            let success = !Task.isCancelled
+            let runResult = await adRemovalScheduler.runUntilIdle()
+            // Never report success for a concurrent/busy invocation that did not
+            // own pipeline work, or for cancellation / unsuccessful ownership runs.
+            let success = !Task.isCancelled && runResult.isSuccessful
             task.setTaskCompleted(success: success)
             try? self?.adRemovalDiagnostics?.record(
                 eventName: "background_processing_finished",
                 severity: success ? .notice : .warning
             )
             self?.scheduleAdRemovalProcessing()
+            await MainActor.run {
+                guard self?.adRemovalBackgroundWorkToken == token else { return }
+                self?.adRemovalBackgroundWork = nil
+                self?.adRemovalBackgroundWorkToken = nil
+            }
         }
+        adRemovalBackgroundWork = work
     }
 
     @objc private func adRemovalConditionsDidChange() {

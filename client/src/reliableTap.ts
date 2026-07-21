@@ -9,12 +9,19 @@ const CONTROL_SELECTOR = [
 
 const MAX_TAP_MOVEMENT_PX = 12;
 const DUPLICATE_CLICK_WINDOW_MS = 750;
+const DUPLICATE_CLICK_POSITION_TOLERANCE_PX = 32;
 
 type TapSession = {
   pointerId: number;
   control: HTMLElement;
   startX: number;
   startY: number;
+};
+
+type PendingSyntheticClick = {
+  until: number;
+  clientX: number;
+  clientY: number;
 };
 
 function eligibleControl(target: EventTarget | null): HTMLElement | null {
@@ -33,7 +40,11 @@ function eligibleControl(target: EventTarget | null): HTMLElement | null {
 export function installReliableTapActivation(root: Document): () => void {
   let session: TapSession | null = null;
   let activating: HTMLElement | null = null;
-  let suppressClick: { control: HTMLElement; until: number } | null = null;
+  let pendingSyntheticClicks: PendingSyntheticClick[] = [];
+
+  const discardExpiredSyntheticClicks = (now: number) => {
+    pendingSyntheticClicks = pendingSyntheticClicks.filter((pending) => pending.until >= now);
+  };
 
   const onPointerDown = (event: PointerEvent) => {
     if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
@@ -64,18 +75,38 @@ export function installReliableTapActivation(root: Document): () => void {
       pending.control.click();
     } finally {
       activating = null;
-      suppressClick = {
-        control: pending.control,
-        until: performance.now() + DUPLICATE_CLICK_WINDOW_MS,
-      };
+      const now = performance.now();
+      discardExpiredSyntheticClicks(now);
+      pendingSyntheticClicks.push({
+        until: now + DUPLICATE_CLICK_WINDOW_MS,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
     }
   };
 
   const onClick = (event: MouseEvent) => {
     const control = eligibleControl(event.target);
     if (!control || control === activating) return;
-    if (suppressClick?.control !== control || performance.now() > suppressClick.until) return;
-    suppressClick = null;
+    // Keyboard, VoiceOver, and HTMLElement.click() activations have detail 0.
+    // They are independent activations and must not consume a touch token.
+    if (event.detail === 0) return;
+    const sourceCapabilities = (event as MouseEvent & {
+      sourceCapabilities?: { firesTouchEvents?: boolean } | null;
+    }).sourceCapabilities;
+    if (sourceCapabilities?.firesTouchEvents === false) return;
+
+    const now = performance.now();
+    discardExpiredSyntheticClicks(now);
+    // DOM reflow can retarget WebKit's synthesized click to a newly exposed
+    // control. Match it to a completed touch gesture by time and coordinates,
+    // not by the old element, and retain one token per rapid touch gesture.
+    const pendingIndex = pendingSyntheticClicks.findIndex((pending) => (
+      Math.hypot(event.clientX - pending.clientX, event.clientY - pending.clientY)
+        <= DUPLICATE_CLICK_POSITION_TOLERANCE_PX
+    ));
+    if (pendingIndex < 0) return;
+    pendingSyntheticClicks.splice(pendingIndex, 1);
     event.preventDefault();
     event.stopImmediatePropagation();
   };

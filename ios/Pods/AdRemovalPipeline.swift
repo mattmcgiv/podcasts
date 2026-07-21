@@ -46,6 +46,11 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
     func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
         switch stage {
         case .downloading:
+            _ = try jobStore.requirePipelineJob(
+                jobID: job.id,
+                episodeID: job.episodeID,
+                expected: [.downloading]
+            )
             guard let source = try database.query(
                 "SELECT audio_url FROM episodes WHERE id = ?",
                 [.int(job.episodeID)],
@@ -57,10 +62,20 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                 throw AdRemovalPipelineError.episodeAudioURLMissing
             }
             let artifact = try await audioDownloader.download(job: job, sourceURL: sourceURL)
+            try Task.checkCancellation()
             guard try artifactStore.validate(artifact) else {
                 throw AdRemovalPipelineError.invalidDownloadedArtifact
             }
-            _ = try jobStore.recordAudioArtifact(jobID: job.id, artifact: artifact)
+            let current = try jobStore.requirePipelineJob(
+                jobID: job.id,
+                episodeID: job.episodeID,
+                expected: [.downloading, .downloaded]
+            )
+            if current.stage == .downloading {
+                _ = try jobStore.recordAudioArtifact(jobID: job.id, artifact: artifact)
+            } else if current.audioArtifact != artifact {
+                throw AdRemovalPipelineError.invalidDownloadedArtifact
+            }
         case .transcribing:
             guard let transcriber else {
                 throw AdRemovalPipelineError.stageNotConfigured(stage)
@@ -73,6 +88,7 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                 audioURL: artifactStore.url(for: artifact.relativePath),
                 episodeID: job.episodeID
             )
+            try Task.checkCancellation()
             _ = try jobStore.recordTranscript(
                 jobID: job.id,
                 segments: segments,
@@ -82,6 +98,11 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
             guard let classifier else {
                 throw AdRemovalPipelineError.stageNotConfigured(stage)
             }
+            _ = try jobStore.requirePipelineJob(
+                jobID: job.id,
+                episodeID: job.episodeID,
+                expected: [.classifying]
+            )
             let segments = try jobStore.transcriptSegments(episodeID: job.episodeID)
             let corrections = try jobStore.corrections(podcastID: job.podcastID)
             let windows = try classificationWindowBuilder.makeWindows(
@@ -109,7 +130,8 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                         return completed.sorted { $0.windowIndex < $1.windowIndex }
                     }
                     for record in records {
-                        try jobStore.recordClassificationEvidence(record)
+                        try Task.checkCancellation()
+                        try jobStore.recordClassificationEvidence(record, jobID: job.id)
                         evidence.append(record)
                     }
                 }
@@ -118,6 +140,7 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                     evidence: evidence,
                     descriptor: classifier.descriptor
                 )
+                try Task.checkCancellation()
                 _ = try jobStore.completeClassification(
                     jobID: job.id,
                     runID: runID,
@@ -202,6 +225,8 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                     descriptor: classifier.descriptor,
                     createdAt: Int64(Date().timeIntervalSince1970)
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 recordClassificationEvent(
                     "classifier_window_retry",

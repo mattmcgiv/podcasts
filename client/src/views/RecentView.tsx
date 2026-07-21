@@ -2,15 +2,26 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Api } from "../api";
 import { EpisodeRow } from "../components/EpisodeRow";
 import { APP_NAME } from "../config";
-import { emitEpisodesChanged } from "../events";
+import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { useList } from "../hooks";
 import { usePlayer } from "../player";
-import type { AdRemovalSettings, AdRemovalStage, EpisodeItem } from "../types";
+import type { AdRemovalSettings, AdRemovalStage, EpisodeItem, RefreshStatus } from "../types";
 import type { AdRemovalStatusItem } from "../types";
 
 function formatGB(bytes: number): string {
   const gb = Math.max(0, bytes) / 1_000_000_000;
   return `${gb.toFixed(2).replace(/\.?0+$/, "")} GB`;
+}
+
+function formatLatestRefresh(status: RefreshStatus | null): string {
+  if (status?.is_refreshing && status.last_success_at == null) return "Refreshing feeds…";
+  if (status?.last_success_at == null) return "Latest feed refresh: Not yet";
+  const when = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(status.last_success_at * 1000));
+  if (status.is_refreshing) return `Refreshing feeds · Latest feed refresh: ${when}`;
+  return `Latest feed refresh: ${when}`;
 }
 
 /** Bounded interval for polling ad-removal settings so the banner can recover. */
@@ -73,6 +84,7 @@ export function RecentView() {
   const player = usePlayer();
   const [sortAscending, setSortAscending] = useState(true);
   const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
+  const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
 
   const items = list.items;
 
@@ -134,6 +146,26 @@ export function RecentView() {
     () => displayItems?.slice().sort((a, b) => compareByReleaseDate(a, b, sortAscending)) ?? null,
     [displayItems, sortAscending],
   );
+
+  // Native foreground refreshes emit the same episode-change event used by
+  // manual refreshes, keeping this informational timestamp current without a
+  // separate polling loop. Status failures never block the Listen view.
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      void Api.refreshStatus()
+        .then((status) => {
+          if (active) setRefreshStatus(status);
+        })
+        .catch(() => {});
+    };
+    load();
+    const unsubscribe = onEpisodesChanged(load);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   // Fetch ad-removal settings on mount and poll on a bounded, single-flight
   // schedule so the low-storage banner can recover without a reload. The next
@@ -307,6 +339,7 @@ export function RecentView() {
             Newest
           </span>
         </button>
+        <p className="feed-refresh-status">{formatLatestRefresh(refreshStatus)}</p>
       </header>
 
       {lowStorageBanner && (

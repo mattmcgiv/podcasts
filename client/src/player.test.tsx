@@ -1,11 +1,18 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlayerProvider, usePlayer } from "./player";
-import { episode, installApi, type MockRoutes } from "./test/mockApi";
+import {
+  adRemovalStatusItem,
+  adRemovalStatuses,
+  episode,
+  installApi,
+  type MockRoutes,
+} from "./test/mockApi";
 import { FakeAudio } from "./test/fakeAudio";
 
 afterEach(() => {
+  vi.useRealTimers();
   delete window.webkit;
   delete window.PODS_API_BASE;
   delete window.PodsAudioBridge;
@@ -45,6 +52,7 @@ function Probe() {
       <button onClick={p.skipForward}>fwd</button>
       <button onClick={p.skipBack}>back</button>
       <button onClick={() => p.setExpanded(false)}>collapse</button>
+      <button onClick={p.retryShowNotes}>retry-notes</button>
       <span data-testid="state">
         {p.current
           ? `${p.current.id}:${p.playing ? "playing" : "paused"}:${p.speed}:${p.autoplay ? "auto" : "manual"}`
@@ -53,6 +61,12 @@ function Probe() {
       <span data-testid="expanded">{p.expanded ? "open" : "closed"}</span>
       <span data-testid="dur">{p.duration}</span>
       <span data-testid="pos">{Math.floor(p.position)}</span>
+      <span data-testid="show-notes">
+        {p.current?.show_notes?.map((note) => note.title).join("|") ?? "none"}
+      </span>
+      <span data-testid="show-notes-status">
+        {p.showNotesGenerating ? "generating" : p.showNotesError ?? "idle"}
+      </span>
     </div>
   );
 }
@@ -112,6 +126,311 @@ describe("PlayerProvider", () => {
     expect(audio.currentTime).toBe(30); // resumed
     expect(audio.playbackRate).toBe(2); // persisted setting
     expect(screen.getByTestId("dur")).toHaveTextContent("1800");
+  });
+
+  it("generates show notes once a ready episode detail is opened", async () => {
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": {
+        ...episode({ id: 1, position_secs: 30, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+        notes_html: "",
+        show_notes: [],
+        archived_at: null,
+      },
+      "POST /api/episodes/1/show-notes": [
+        {
+          id: "segment-topic",
+          start_time: 125.25,
+          title: "A new direction",
+          summary: "The discussion moves to the next major topic.",
+        },
+      ],
+    });
+
+    await user.click(screen.getByText("play1"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("show-notes")).toHaveTextContent("A new direction"),
+    );
+    expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1);
+    expect(screen.getByTestId("show-notes-status")).toHaveTextContent("idle");
+  });
+
+  it("keeps one show-notes request per episode across an A-B-A switch", async () => {
+    let resolveA!: (value: unknown) => void;
+    let resolveB!: (value: unknown) => void;
+    const pendingA = new Promise<unknown>((resolve) => { resolveA = resolve; });
+    const pendingB = new Promise<unknown>((resolve) => { resolveB = resolve; });
+    const readyDetail = (id: number) => ({
+      ...episode({ id, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [],
+      archived_at: null,
+    });
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": readyDetail(1),
+      "GET /api/episodes/4": readyDetail(4),
+      "POST /api/episodes/1/show-notes": () => pendingA,
+      "POST /api/episodes/4/show-notes": () => pendingB,
+    });
+
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("play-art"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "POST /api/episodes/4/show-notes")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("show-notes-status")).toHaveTextContent("generating"));
+    expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1);
+
+    resolveA([{ id: "segment-a", start_time: 10, title: "Episode A", summary: "A." }]);
+    resolveB([{ id: "segment-b", start_time: 20, title: "Episode B", summary: "B." }]);
+    await waitFor(() => expect(screen.getByTestId("show-notes")).toHaveTextContent("Episode A"));
+    expect(screen.getByTestId("show-notes-status")).toHaveTextContent("idle");
+  });
+
+  it("does not let a prior-visit A POST overwrite newer A detail after A-B-A", async () => {
+    let resolveOldA!: (value: unknown) => void;
+    const oldARequest = new Promise<unknown>((resolve) => { resolveOldA = resolve; });
+    let episodeACalls = 0;
+    const freshA = {
+      ...episode({ id: 1, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [{
+        id: "fresh-a",
+        start_time: 20,
+        title: "Fresh persisted A",
+        summary: "The detail from the current visit wins.",
+      }],
+      archived_at: null,
+    };
+    const detailWithNotes = (id: number, title: string) => ({
+      ...episode({ id, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [{ id: `note-${id}`, start_time: 10, title, summary: title }],
+      archived_at: null,
+    });
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": () => {
+        episodeACalls += 1;
+        return episodeACalls === 1
+          ? { ...freshA, show_notes: [] }
+          : freshA;
+      },
+      "GET /api/episodes/4": detailWithNotes(4, "Episode B"),
+      "POST /api/episodes/1/show-notes": () => oldARequest,
+    });
+
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("play-art"));
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh persisted A"),
+    );
+
+    resolveOldA([{
+      id: "old-a",
+      start_time: 1,
+      title: "Old generated A",
+      summary: "This belongs to the prior visit.",
+    }]);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh persisted A");
+    expect(screen.getByTestId("show-notes")).not.toHaveTextContent("Old generated A");
+    expect(screen.getByTestId("show-notes-status")).toHaveTextContent("idle");
+  });
+
+  it("does not let a prior-visit A POST error alter newer A detail after A-B-A", async () => {
+    let rejectOldA!: (reason?: unknown) => void;
+    const oldARequest = new Promise<unknown>((_resolve, reject) => { rejectOldA = reject; });
+    let episodeACalls = 0;
+    const freshA = {
+      ...episode({ id: 1, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [{
+        id: "fresh-a",
+        start_time: 20,
+        title: "Fresh persisted A",
+        summary: "The detail from the current visit wins.",
+      }],
+      archived_at: null,
+    };
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": () => {
+        episodeACalls += 1;
+        return episodeACalls === 1 ? { ...freshA, show_notes: [] } : freshA;
+      },
+      "GET /api/episodes/4": {
+        ...episode({ id: 4 }),
+        notes_html: "",
+        show_notes: [{ id: "b", start_time: 5, title: "B", summary: "B" }],
+        archived_at: null,
+      },
+      "POST /api/episodes/1/show-notes": () => oldARequest,
+    });
+
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("play-art"));
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh persisted A"),
+    );
+
+    rejectOldA(new Error("prior visit failed"));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh persisted A");
+    expect(screen.getByTestId("show-notes-status")).toHaveTextContent("idle");
+  });
+
+  it("keeps newer POST notes when an older empty detail resolves later", async () => {
+    let resolveDetail!: (value: unknown) => void;
+    let resolveNotes!: (value: unknown) => void;
+    const pendingDetail = new Promise<unknown>((resolve) => { resolveDetail = resolve; });
+    const pendingNotes = new Promise<unknown>((resolve) => { resolveNotes = resolve; });
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": () => pendingDetail,
+      "POST /api/episodes/1/show-notes": () => pendingNotes,
+    });
+
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "GET /api/episodes/1")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("retry-notes"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1),
+    );
+
+    resolveNotes([{
+      id: "new-notes",
+      start_time: 30,
+      title: "New POST notes",
+      summary: "These notes resolved before the older detail.",
+    }]);
+    await waitFor(() =>
+      expect(screen.getByTestId("show-notes")).toHaveTextContent("New POST notes"),
+    );
+
+    resolveDetail({
+      ...episode({ id: 1, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [],
+      archived_at: null,
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("New POST notes");
+    expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1);
+    expect(screen.getByTestId("show-notes-status")).toHaveTextContent("idle");
+  });
+
+  it("polls an active episode and generates show notes when processing becomes ready", async () => {
+    vi.useFakeTimers();
+    const { calls } = installApi(baseRoutes({
+      "GET /api/episodes/1": {
+        ...episode({ id: 1, ad_removal_state: "preparing", ad_removal_stage: "classifying" }),
+        notes_html: "",
+        show_notes: [],
+        archived_at: null,
+      },
+      "GET /api/ad-removal/statuses": adRemovalStatuses([adRemovalStatusItem({
+        id: 1,
+        ad_removal_state: "ad-free",
+        ad_removal_action: null,
+        ad_removal_stage: "ready",
+      })]),
+      "POST /api/episodes/1/show-notes": [{
+        id: "segment-ready",
+        start_time: 42,
+        title: "Ready chapter",
+        summary: "Processing completed while the player stayed open.",
+      }],
+    }));
+    render(
+      <PlayerProvider>
+        <Probe />
+      </PlayerProvider>,
+    );
+
+    await act(async () => {
+      screen.getByText("play1").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("Ready chapter");
+    expect(calls.filter((call) => call.key === "GET /api/ad-removal/statuses")).toHaveLength(1);
+    expect(calls.filter((call) => call.key === "POST /api/episodes/1/show-notes")).toHaveLength(1);
+  });
+
+  it("rejects an old detail response after an A-B-A switch", async () => {
+    let resolveOldA!: (value: unknown) => void;
+    const oldA = new Promise<unknown>((resolve) => { resolveOldA = resolve; });
+    let episodeACalls = 0;
+    const freshA = {
+      ...episode({ id: 1, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+      notes_html: "",
+      show_notes: [{
+        id: "fresh",
+        start_time: 20,
+        title: "Fresh A detail",
+        summary: "The newest request wins.",
+      }],
+      archived_at: null,
+    };
+    const { calls, user } = await setup({
+      "GET /api/episodes/1": () => {
+        episodeACalls += 1;
+        return episodeACalls === 1 ? oldA : freshA;
+      },
+    });
+
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.key === "GET /api/episodes/1")).toHaveLength(1),
+    );
+    await user.click(screen.getByText("play-art"));
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh A detail"));
+
+    resolveOldA({
+      ...freshA,
+      show_notes: [{
+        id: "stale",
+        start_time: 1,
+        title: "Stale A detail",
+        summary: "This response arrived from the first request.",
+      }],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("Fresh A detail");
+    expect(screen.getByTestId("show-notes")).not.toHaveTextContent("Stale A detail");
   });
 
   it("sends now-playing metadata to the native audio bridge", async () => {

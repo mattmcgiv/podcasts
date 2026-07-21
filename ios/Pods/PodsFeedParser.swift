@@ -42,6 +42,25 @@ protocol ConditionalFeedFetching: FeedFetching {
 }
 
 struct URLSessionFeedFetcher: ConditionalFeedFetching {
+    private let session: URLSession
+    private let requestTimeout: TimeInterval
+
+    init(
+        session: URLSession? = nil,
+        requestTimeout: TimeInterval = FeedRefreshPolicy.feedRequestTimeout
+    ) {
+        self.requestTimeout = requestTimeout
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.default
+            configuration.timeoutIntervalForRequest = requestTimeout
+            configuration.timeoutIntervalForResource = requestTimeout
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
     func data(for url: URL) async throws -> Data {
         switch try await response(for: url, validators: FeedValidators()) {
         case .data(let data, _):
@@ -52,7 +71,11 @@ struct URLSessionFeedFetcher: ConditionalFeedFetching {
     }
 
     func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
-        var request = URLRequest(url: url)
+        var request = URLRequest(
+            url: url,
+            cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+            timeoutInterval: requestTimeout
+        )
         if let eTag = validators.eTag {
             request.setValue(eTag, forHTTPHeaderField: "If-None-Match")
         }
@@ -60,7 +83,7 @@ struct URLSessionFeedFetcher: ConditionalFeedFetching {
             request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             return .data(data, validators)
         }

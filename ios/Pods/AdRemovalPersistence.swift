@@ -17,6 +17,7 @@ enum AdRemovalBlockingReason: String, Codable, CaseIterable {
     case storageLimit = "storage_limit"
     case lowPower = "low_power"
     case thermalPressure = "thermal_pressure"
+    case dailyLimit = "daily_limit"
     // Retained so jobs persisted by older builds can be decoded and unblocked.
     case playbackActive = "playback_active"
 }
@@ -178,6 +179,19 @@ final class AdRemovalJobStore {
         ).first
     }
 
+    func requirePipelineJob(
+        jobID: String,
+        episodeID: Int64,
+        expected stages: [AdRemovalJobStage]
+    ) throws -> AdRemovalJob {
+        let job = try requiredJob(id: jobID)
+        guard job.episodeID == episodeID else {
+            throw AdRemovalJobStoreError.corruptState("pipeline job episode changed")
+        }
+        try requirePipelineStage(job, expected: stages)
+        return job
+    }
+
     func transition(jobID: String, to nextStage: AdRemovalJobStage) throws -> AdRemovalJob {
         try database.withTransaction {
             let current = try requiredJob(id: jobID)
@@ -220,7 +234,33 @@ final class AdRemovalJobStore {
     }
 
     func clearTransientPolicyBlockingReasons() throws {
-        try clearBlockingReasons([.storageLimit, .lowPower, .thermalPressure, .playbackActive])
+        try clearBlockingReasons([.storageLimit, .lowPower, .thermalPressure, .dailyLimit, .playbackActive])
+    }
+
+    /// Atomically reserves one cost-bearing cloud-classification slot for an episode.
+    /// Repeated attempts for the same episode on the same local calendar day reuse its slot.
+    func reserveDailyClassificationSlot(episodeID: Int64, limit: Int = 20) throws -> Bool {
+        guard limit > 0 else { return false }
+        let date = Date(timeIntervalSince1970: TimeInterval(now()))
+        let dayStart = Int64(Calendar.current.startOfDay(for: date).timeIntervalSince1970)
+        return try database.withTransaction {
+            if try database.scalarInt64(
+                "SELECT 1 FROM ad_removal_daily_usage WHERE day_start = ? AND episode_id = ?",
+                [.int(dayStart), .int(episodeID)]
+            ) != nil {
+                return true
+            }
+            let used = try database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_removal_daily_usage WHERE day_start = ?",
+                [.int(dayStart)]
+            ) ?? 0
+            guard used < Int64(limit) else { return false }
+            try database.execute(
+                "INSERT INTO ad_removal_daily_usage (day_start, episode_id, reserved_at) VALUES (?, ?, ?)",
+                [.int(dayStart), .int(episodeID), .int(now())]
+            )
+            return true
+        }
     }
 
     func clearBlockingReasons(_ reasons: Set<AdRemovalBlockingReason>) throws {
@@ -245,7 +285,8 @@ final class AdRemovalJobStore {
             throw AdRemovalJobStoreError.corruptState("invalid audio artifact metadata")
         }
         return try database.withTransaction {
-            _ = try requiredJob(id: jobID)
+            let job = try requiredJob(id: jobID)
+            try requirePipelineStage(job, expected: [.downloading])
             let timestamp = now()
             try database.execute(
                 """
@@ -273,7 +314,11 @@ final class AdRemovalJobStore {
             throw AdRemovalJobStoreError.corruptState("invalid resume-data path")
         }
         return try database.withTransaction {
-            _ = try requiredJob(id: jobID)
+            let job = try requiredJob(id: jobID)
+            try requirePipelineStage(
+                job,
+                expected: relativePath == nil ? [.downloading, .downloaded] : [.downloading]
+            )
             try database.execute(
                 "UPDATE ad_removal_jobs SET download_resume_relative_path = ?, updated_at = ? WHERE id = ?",
                 [
@@ -415,6 +460,7 @@ final class AdRemovalJobStore {
         }
         return try database.withTransaction {
             let job = try requiredJob(id: jobID)
+            try requirePipelineStage(job, expected: [.transcribing])
             try Self.replaceTranscriptSegments(
                 in: database,
                 episodeID: job.episodeID,
@@ -477,6 +523,10 @@ final class AdRemovalJobStore {
             priorEnd = segment.endTime
         }
         try database.execute(
+            "DELETE FROM episode_show_notes WHERE episode_id = ?",
+            [.int(episodeID)]
+        )
+        try database.execute(
             "DELETE FROM ad_transcript_segments WHERE episode_id = ?",
             [.int(episodeID)]
         )
@@ -511,6 +561,7 @@ final class AdRemovalJobStore {
         episodeID: Int64,
         ranges: [AdSkipRange]
     ) throws {
+        try database.execute("DELETE FROM episode_show_notes WHERE episode_id = ?", [.int(episodeID)])
         try database.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", [.int(episodeID)])
         for range in ranges {
             guard !range.id.isEmpty,
@@ -574,7 +625,10 @@ final class AdRemovalJobStore {
         }
     }
 
-    func recordClassificationEvidence(_ evidence: AdClassificationEvidence) throws {
+    func recordClassificationEvidence(
+        _ evidence: AdClassificationEvidence,
+        jobID: String
+    ) throws {
         guard !evidence.runID.isEmpty,
               evidence.windowIndex >= 0,
               !evidence.segmentIDs.isEmpty,
@@ -589,37 +643,44 @@ final class AdRemovalJobStore {
         let segmentIDs = String(decoding: try encoder.encode(evidence.segmentIDs), as: UTF8.self)
         let correctionIDs = String(decoding: try encoder.encode(evidence.correctionIDs), as: UTF8.self)
         let labels = String(decoding: try encoder.encode(evidence.labels), as: UTF8.self)
-        try database.execute(
-            """
-            INSERT INTO ad_classification_windows
-                (run_id, episode_id, window_index, segment_ids_json, correction_ids_json,
-                 prompt, raw_output, schema_valid, validation_error, labels_json,
-                 model_id, model_revision, quantization, prompt_version,
-                 max_context_tokens, max_output_tokens, temperature, top_p, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                .text(evidence.runID),
-                .int(evidence.episodeID),
-                .int(Int64(evidence.windowIndex)),
-                .text(segmentIDs),
-                .text(correctionIDs),
-                .text(evidence.prompt),
-                .text(evidence.rawOutput),
-                .int(evidence.schemaValid ? 1 : 0),
-                evidence.validationError.map(SQLiteValue.text) ?? .null,
-                .text(labels),
-                .text(evidence.descriptor.modelID),
-                .text(evidence.descriptor.modelRevision),
-                .text(evidence.descriptor.quantization),
-                .text(evidence.descriptor.promptRevision),
-                .int(Int64(evidence.descriptor.maximumContextTokens)),
-                .int(Int64(evidence.descriptor.maximumOutputTokens)),
-                .double(evidence.descriptor.temperature),
-                .double(evidence.descriptor.topP),
-                .int(evidence.createdAt)
-            ]
-        )
+        try database.withTransaction {
+            let job = try requiredJob(id: jobID)
+            guard job.episodeID == evidence.episodeID else {
+                throw AdRemovalJobStoreError.corruptState("classification evidence episode does not match job")
+            }
+            try requirePipelineStage(job, expected: [.classifying])
+            try database.execute(
+                """
+                INSERT INTO ad_classification_windows
+                    (run_id, episode_id, window_index, segment_ids_json, correction_ids_json,
+                     prompt, raw_output, schema_valid, validation_error, labels_json,
+                     model_id, model_revision, quantization, prompt_version,
+                     max_context_tokens, max_output_tokens, temperature, top_p, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .text(evidence.runID),
+                    .int(evidence.episodeID),
+                    .int(Int64(evidence.windowIndex)),
+                    .text(segmentIDs),
+                    .text(correctionIDs),
+                    .text(evidence.prompt),
+                    .text(evidence.rawOutput),
+                    .int(evidence.schemaValid ? 1 : 0),
+                    evidence.validationError.map(SQLiteValue.text) ?? .null,
+                    .text(labels),
+                    .text(evidence.descriptor.modelID),
+                    .text(evidence.descriptor.modelRevision),
+                    .text(evidence.descriptor.quantization),
+                    .text(evidence.descriptor.promptRevision),
+                    .int(Int64(evidence.descriptor.maximumContextTokens)),
+                    .int(Int64(evidence.descriptor.maximumOutputTokens)),
+                    .double(evidence.descriptor.temperature),
+                    .double(evidence.descriptor.topP),
+                    .int(evidence.createdAt)
+                ]
+            )
+        }
     }
 
     func classificationEvidence(episodeID: Int64) throws -> [AdClassificationEvidence] {
@@ -675,6 +736,7 @@ final class AdRemovalJobStore {
     ) throws -> AdRemovalJob {
         try database.withTransaction {
             let job = try requiredJob(id: jobID)
+            try requirePipelineStage(job, expected: [.classifying])
             let invalidCount = try database.scalarInt64(
                 "SELECT COUNT(*) FROM ad_classification_windows WHERE run_id = ? AND schema_valid = 0",
                 [.text(runID)]
@@ -814,6 +876,10 @@ final class AdRemovalJobStore {
                 [.text(range.id), .int(episodeID)]
             )
             try database.execute(
+                "DELETE FROM episode_show_notes WHERE episode_id = ?",
+                [.int(episodeID)]
+            )
+            try database.execute(
                 """
                 INSERT INTO ad_corrections
                     (id, podcast_id, source_episode_id, transcript_window, classification_context,
@@ -923,6 +989,7 @@ final class AdRemovalJobStore {
             for episodeID in episodeIDs {
                 try Self.cleanupEpisodeMetadata(in: database, episodeID: episodeID, now: now())
             }
+            try database.execute("DELETE FROM episode_show_notes")
             try database.execute("DELETE FROM ad_corrections")
             try database.execute(
                 "DELETE FROM settings WHERE key LIKE 'ad_removal_%'"
@@ -965,6 +1032,18 @@ final class AdRemovalJobStore {
     private func requiredJob(id: String) throws -> AdRemovalJob {
         guard let job = try job(id: id) else { throw AdRemovalJobStoreError.jobNotFound }
         return job
+    }
+
+    private func requirePipelineStage(
+        _ job: AdRemovalJob,
+        expected stages: [AdRemovalJobStage]
+    ) throws {
+        guard stages.contains(job.stage) else {
+            throw AdRemovalJobStoreError.invalidTransition(
+                from: job.stage,
+                to: stages.first ?? job.stage
+            )
+        }
     }
 
     private static func mapJob(_ statement: OpaquePointer?) throws -> AdRemovalJob {
@@ -1050,6 +1129,11 @@ protocol AdRemovalStageExecuting: AnyObject {
     func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws
 }
 
+enum AdRemovalPipelineCancellationScope: Equatable, Sendable {
+    case episode(Int64)
+    case all
+}
+
 struct AdRemovalPipelinePause: Error, Equatable {
     let reason: AdRemovalBlockingReason
 }
@@ -1058,16 +1142,22 @@ actor AdRemovalCoordinator {
     private let store: AdRemovalJobStore
     private let executor: AdRemovalStageExecuting
     private let diagnostics: AdRemovalDiagnostics?
+    private let readyHandler: ((Int64) async -> Void)?
     private var stageRunInProgress = false
+    private var activeStageTask: Task<Void, Error>?
+    private var activeStageEpisodeID: Int64?
+    private var activeStageCancellationRequested = false
 
     init(
         store: AdRemovalJobStore,
         executor: AdRemovalStageExecuting,
-        diagnostics: AdRemovalDiagnostics? = nil
+        diagnostics: AdRemovalDiagnostics? = nil,
+        readyHandler: ((Int64) async -> Void)? = nil
     ) {
         self.store = store
         self.executor = executor
         self.diagnostics = diagnostics
+        self.readyHandler = readyHandler
     }
 
     @discardableResult
@@ -1101,16 +1191,56 @@ actor AdRemovalCoordinator {
             return nil
         }
 
+        if executingStage == .classifying,
+           try !store.reserveDailyClassificationSlot(episodeID: job.episodeID) {
+            let blocked = try store.setBlockingReason(jobID: job.id, reason: .dailyLimit)
+            record(
+                eventName: "scheduler_policy_pause",
+                severity: .notice,
+                job: blocked,
+                fields: ["blocking_reason": AdRemovalBlockingReason.dailyLimit.rawValue, "daily_limit": "20"]
+            )
+            return blocked
+        }
+
         record(eventName: "scheduler_stage_submission", severity: .info, job: job)
-        do {
+        let stageTask = Task<Void, Error> { [executor] in
             try await executor.execute(stage: executingStage, job: job)
+        }
+        activeStageTask = stageTask
+        activeStageEpisodeID = job.episodeID
+        activeStageCancellationRequested = false
+        defer {
+            activeStageTask = nil
+            activeStageEpisodeID = nil
+            activeStageCancellationRequested = false
+        }
+        do {
+            try await withTaskCancellationHandler {
+                try await stageTask.value
+            } onCancel: {
+                stageTask.cancel()
+            }
+            guard !activeStageCancellationRequested else {
+                throw CancellationError()
+            }
+            try Task.checkCancellation()
             let completed = try store.transition(jobID: job.id, to: completionStage)
             record(eventName: "job_state_transition", severity: .notice, job: completed)
+            if completed.stage == .ready {
+                await readyHandler?(completed.episodeID)
+            }
             return completed
         } catch is CancellationError {
             record(eventName: "job_stage_cancelled_at_safe_boundary", severity: .notice, job: job)
             throw CancellationError()
         } catch let pause as AdRemovalPipelinePause {
+            guard !activeStageCancellationRequested,
+                  !Task.isCancelled,
+                  (try? store.job(id: job.id))?.stage == executingStage else {
+                record(eventName: "job_stage_cancelled_at_safe_boundary", severity: .notice, job: job)
+                throw CancellationError()
+            }
             let blocked = try store.setBlockingReason(jobID: job.id, reason: pause.reason)
             record(
                 eventName: "scheduler_policy_pause",
@@ -1120,6 +1250,12 @@ actor AdRemovalCoordinator {
             )
             return blocked
         } catch {
+            guard !activeStageCancellationRequested,
+                  !Task.isCancelled,
+                  (try? store.job(id: job.id))?.stage == executingStage else {
+                record(eventName: "job_stage_cancelled_at_safe_boundary", severity: .notice, job: job)
+                throw CancellationError()
+            }
             let nsError = error as NSError
             let failed = try store.recordFailure(
                 jobID: job.id,
@@ -1134,6 +1270,19 @@ actor AdRemovalCoordinator {
             )
             return failed
         }
+    }
+
+    /// Cancels the currently executing stage when it matches the requested
+    /// scope and does not return until that executor task has terminated.
+    func cancel(_ scope: AdRemovalPipelineCancellationScope) async {
+        guard let task = activeStageTask else { return }
+        if case .episode(let episodeID) = scope,
+           episodeID != activeStageEpisodeID {
+            return
+        }
+        activeStageCancellationRequested = true
+        task.cancel()
+        _ = await task.result
     }
 
     private func record(
@@ -1187,6 +1336,23 @@ enum AdRemovalSchedulingPolicy {
     }
 }
 
+/// Outcome of a single `AdRemovalPipelineScheduler.runUntilIdle` invocation.
+/// Distinguishes a completed/idle ownership run from a concurrent call that
+/// could not own the shared single-worker pipeline.
+enum AdRemovalPipelineRunResult: Equatable, Sendable {
+    /// This invocation owned the scheduler and ran until idle (or no-op while disabled).
+    case completed
+    /// Another invocation already owns the pipeline; this call did no useful work.
+    case busy
+    /// This invocation owned the pipeline but stopped without a clean idle completion
+    /// (cancellation, stage failure boundary, or store error).
+    case unsuccessful
+
+    var isSuccessful: Bool {
+        self == .completed
+    }
+}
+
 actor AdRemovalPipelineScheduler {
     private let store: AdRemovalJobStore
     private let coordinator: AdRemovalCoordinator
@@ -1195,6 +1361,7 @@ actor AdRemovalPipelineScheduler {
     private let diagnostics: AdRemovalDiagnostics?
     private let now: () -> Int64
     private let sleep: (UInt64) async throws -> Void
+    private var runInProgress = false
 
     init(
         store: AdRemovalJobStore,
@@ -1216,13 +1383,20 @@ actor AdRemovalPipelineScheduler {
         self.sleep = sleep
     }
 
-    func runUntilIdle(maximumStageCount: Int = 100) async {
-        guard await isEnabled() else { return }
+    @discardableResult
+    func runUntilIdle(maximumStageCount: Int = 100) async -> AdRemovalPipelineRunResult {
+        guard !runInProgress else { return .busy }
+        runInProgress = true
+        defer { runInProgress = false }
+
+        guard await isEnabled() else { return .completed }
         do {
             try store.clearTransientPolicyBlockingReasons()
             for _ in 0..<maximumStageCount {
+                if Task.isCancelled { return .unsuccessful }
+                guard await isEnabled() else { return .completed }
                 guard let next = try store.nextRunnableJob() else {
-                    guard let deadline = try store.earliestRetryAt() else { return }
+                    guard let deadline = try store.earliestRetryAt() else { return .completed }
                     let delay = UInt64(max(0, deadline - now()))
                     try? diagnostics?.record(
                         eventName: "retry_scheduled",
@@ -1237,7 +1411,9 @@ actor AdRemovalPipelineScheduler {
                     )
                     continue
                 }
-                guard let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else { return }
+                guard let stage = AdRemovalSchedulingPolicy.executingStage(for: next) else {
+                    return .completed
+                }
                 if let reason = AdRemovalSchedulingPolicy.blockingReason(
                     for: stage,
                     conditions: await conditions()
@@ -1257,13 +1433,23 @@ actor AdRemovalPipelineScheduler {
                     )
                     continue
                 }
-                guard await runOneStage() else { return }
+                switch await runOneStage() {
+                case .ran:
+                    continue
+                case .idle:
+                    return .completed
+                case .failed:
+                    return .unsuccessful
+                }
             }
             try? diagnostics?.record(
                 eventName: "scheduler_stage_limit_reached",
                 severity: .warning,
                 fields: ["maximum_stage_count": String(maximumStageCount)]
             )
+            return .completed
+        } catch is CancellationError {
+            return .unsuccessful
         } catch {
             let nsError = error as NSError
             try? diagnostics?.record(
@@ -1271,14 +1457,25 @@ actor AdRemovalPipelineScheduler {
                 severity: .error,
                 fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
             )
+            return .unsuccessful
         }
     }
 
-    private func runOneStage() async -> Bool {
+    private enum StageAttemptResult {
+        case ran
+        case idle
+        case failed
+    }
+
+    private func runOneStage() async -> StageAttemptResult {
         do {
-            return try await coordinator.runNextStage() != nil
+            // Coordinator returns nil when another stage run owns the shared worker
+            // or when there is no runnable work. With scheduler-level ownership the
+            // busy path should be rare; treat nil as idle so callers do not report
+            // false success for an empty queue.
+            return try await coordinator.runNextStage() != nil ? .ran : .idle
         } catch is CancellationError {
-            return false
+            return .failed
         } catch {
             let nsError = error as NSError
             try? diagnostics?.record(
@@ -1286,7 +1483,7 @@ actor AdRemovalPipelineScheduler {
                 severity: .error,
                 fields: ["error_domain": nsError.domain, "error_code": String(nsError.code)]
             )
-            return false
+            return .failed
         }
     }
 }

@@ -3,6 +3,7 @@ import type {
   AdRemovalStatusesPayload,
   EpisodeDetail,
   EpisodeItem,
+  EpisodeShowNote,
   Page,
   PlayContext,
   RefreshStatus,
@@ -27,11 +28,21 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}, raw = false): Promise<T> {
+  const method = init.method ?? "GET";
+  const target = `/api${path}`;
   const headers = new Headers(init.headers);
   if (init.body != null && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
-  const res = await fetch(`${window.PODS_API_BASE ?? ""}/api${path}`, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, headers });
+  } catch (error) {
+    console.warn(
+      `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+    );
+    throw error;
+  }
   if (!res.ok) {
     let message = res.statusText || `HTTP ${res.status}`;
     try {
@@ -40,6 +51,7 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
     } catch {
       // non-JSON error body; keep the status text
     }
+    console.warn(`api_http_failed method=${method} target=${target} status=${res.status} message=${message}`);
     throw new ApiError(res.status, message);
   }
   if (res.status === 204) return undefined as T;
@@ -47,7 +59,17 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
 }
 
 async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
-  const res = await fetch(`${window.PODS_API_BASE ?? ""}/api${path}`, init);
+  const method = init.method ?? "GET";
+  const target = `/api${path}`;
+  let res: Response;
+  try {
+    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, init);
+  } catch (error) {
+    console.warn(
+      `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+    );
+    throw error;
+  }
   if (!res.ok) {
     let message = res.statusText || `HTTP ${res.status}`;
     try {
@@ -56,6 +78,7 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
     } catch {
       // non-JSON error body; keep the status text
     }
+    console.warn(`api_http_failed method=${method} target=${target} status=${res.status} message=${message}`);
     throw new ApiError(res.status, message);
   }
   return res.blob();
@@ -73,6 +96,11 @@ export const Api = {
     request<Show>("/shows", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
   unsubscribe: (id: number) => request<void>(`/shows/${id}`, { method: "DELETE" }),
   episode: (id: number) => request<EpisodeDetail>(`/episodes/${id}`),
+  generateShowNotes: (id: number) =>
+    request<EpisodeShowNote[]>(`/episodes/${id}/show-notes`, {
+      method: "POST",
+      body: "{}",
+    }),
   markPlayed: (id: number) => request<void>(`/episodes/${id}/played`, { method: "POST" }),
   unmarkPlayed: (id: number) => request<void>(`/episodes/${id}/played`, { method: "DELETE" }),
   setPosition: (id: number, seconds: number) =>

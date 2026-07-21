@@ -40,6 +40,22 @@ export interface EpisodeItem {
 export interface EpisodeDetail extends EpisodeItem {
   notes_html: string;
   archived_at: number | null;
+  show_notes: EpisodeShowNote[];
+  ad_markers: EpisodeAdMarker[];
+}
+
+export interface EpisodeAdMarker {
+  id: string;
+  start_time: number;
+}
+
+export interface EpisodeShowNote {
+  /** Stable transcript segment identifier chosen by DeepSeek and validated by Swift. */
+  id: string;
+  /** Authoritative playback time in seconds, resolved locally from the transcript. */
+  start_time: number;
+  title: string;
+  summary: string;
 }
 
 export interface Show {
@@ -107,6 +123,8 @@ export interface RefreshStatus {
   last_source: "manual" | "foreground" | "background" | null;
   last_refreshed: number;
   last_errors: number;
+  /** A native refresh has started but has not yet persisted its result. */
+  is_refreshing?: boolean;
 }
 
 export interface ShowDetailResponse {

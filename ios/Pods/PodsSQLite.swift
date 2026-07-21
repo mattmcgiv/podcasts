@@ -224,6 +224,22 @@ final class PodsDatabase {
 
     CREATE INDEX IF NOT EXISTS idx_feed_refresh_runs_finished ON feed_refresh_runs(finished_at DESC);
 
+    -- Unlike feed_refresh_runs, this ledger records the start before network I/O.
+    -- A subsequent process can therefore close a run interrupted by suspension,
+    -- termination, or a crash instead of leaving the refresh state ambiguous.
+    CREATE TABLE IF NOT EXISTS feed_refresh_attempts (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER,
+        refreshed INTEGER,
+        errors INTEGER,
+        outcome TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feed_refresh_attempts_outcome_started
+        ON feed_refresh_attempts(outcome, started_at DESC);
+
     CREATE TABLE IF NOT EXISTS feed_http_cache (
         podcast_id INTEGER PRIMARY KEY REFERENCES podcasts(id) ON DELETE CASCADE,
         etag TEXT,
@@ -261,6 +277,13 @@ final class PodsDatabase {
     CREATE INDEX IF NOT EXISTS idx_ad_removal_jobs_stage
         ON ad_removal_jobs(stage, blocking_reason, enrolled_at);
 
+    CREATE TABLE IF NOT EXISTS ad_removal_daily_usage (
+        day_start INTEGER NOT NULL,
+        episode_id INTEGER NOT NULL,
+        reserved_at INTEGER NOT NULL,
+        PRIMARY KEY (day_start, episode_id)
+    );
+
     CREATE TABLE IF NOT EXISTS ad_transcript_segments (
         episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
         segment_id TEXT NOT NULL,
@@ -272,6 +295,23 @@ final class PodsDatabase {
         PRIMARY KEY (episode_id, segment_id),
         UNIQUE (episode_id, segment_index)
     );
+
+    CREATE TABLE IF NOT EXISTS episode_show_notes (
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        chapter_index INTEGER NOT NULL,
+        segment_id TEXT NOT NULL,
+        start_time REAL NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (episode_id, chapter_index),
+        UNIQUE (episode_id, segment_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_episode_show_notes_episode_time
+        ON episode_show_notes(episode_id, start_time);
 
     CREATE TABLE IF NOT EXISTS ad_skip_ranges (
         id TEXT PRIMARY KEY,

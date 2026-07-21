@@ -76,10 +76,13 @@ final class PodsBackend: PlaybackProgressRecording {
     private let adRemovalArtifactStore: AdRemovalArtifactStore?
     private let adRemovalDiagnostics: AdRemovalDiagnostics?
     private let deepSeekCredentialStore: DeepSeekCredentialStoring
+    private let episodeShowNotesStore: EpisodeShowNotesStore
+    private let episodeShowNotesService: EpisodeShowNotesService?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
     private var adRemovalRunRequestHandler: (() async -> Void)?
     private var adRemovalModelDownloadRequestHandler: ((AdModelManifest) async -> Void)?
     private var adRemovalStopRequestHandler: (() async -> Void)?
+    private var adRemovalCancellationRequestHandler: ((AdRemovalPipelineCancellationScope) async -> Void)?
 
     init(
         database: PodsDatabase,
@@ -87,7 +90,8 @@ final class PodsBackend: PlaybackProgressRecording {
         directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
-        deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore()
+        deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore(),
+        episodeShowNotesService: EpisodeShowNotesService? = nil
     ) {
         self.database = database
         self.feedFetcher = feedFetcher
@@ -95,9 +99,12 @@ final class PodsBackend: PlaybackProgressRecording {
         self.adRemovalArtifactStore = adRemovalArtifactStore
         self.adRemovalDiagnostics = adRemovalDiagnostics
         self.deepSeekCredentialStore = deepSeekCredentialStore
+        self.episodeShowNotesStore = EpisodeShowNotesStore(database: database)
+        self.episodeShowNotesService = episodeShowNotesService
         self.adRemovalFileCleanup = adRemovalArtifactStore.map {
             AdRemovalFileCleanup(database: database, artifactStore: $0)
         }
+        recoverInterruptedRefreshAttempts()
     }
 
     func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
@@ -128,8 +135,17 @@ final class PodsBackend: PlaybackProgressRecording {
         adRemovalStopRequestHandler = handler
     }
 
+    func setAdRemovalCancellationRequestHandler(
+        _ handler: @escaping (AdRemovalPipelineCancellationScope) async -> Void
+    ) {
+        adRemovalCancellationRequestHandler = handler
+    }
+
     func refreshStatus() -> RefreshStatus {
         do {
+            let isRefreshing = try database.scalarInt64(
+                "SELECT 1 FROM feed_refresh_attempts WHERE outcome = 'running' LIMIT 1"
+            ) != nil
             return try database.query(
                 "SELECT last_attempt_at, last_success_at, last_source, last_refreshed, last_errors FROM feed_refresh_state WHERE id = 1"
             ) { statement in
@@ -138,7 +154,8 @@ final class PodsBackend: PlaybackProgressRecording {
                     last_success_at: sqliteOptionalInt64(statement, 1),
                     last_source: sqliteOptionalString(statement, 2),
                     last_refreshed: Int(sqlite3_column_int64(statement, 3)),
-                    last_errors: Int(sqlite3_column_int64(statement, 4))
+                    last_errors: Int(sqlite3_column_int64(statement, 4)),
+                    is_refreshing: isRefreshing
                 )
             }.first ?? .empty
         } catch {
@@ -149,11 +166,19 @@ final class PodsBackend: PlaybackProgressRecording {
 
     func performRefresh(source: RefreshSource) async -> RefreshResult {
         let startedAt = nowUnix()
-        recordRefreshAttempt(source: source, startedAt: startedAt)
+        let attemptID = recordRefreshAttempt(source: source, startedAt: startedAt)
+        NotificationCenter.default.post(name: .podsFeedRefreshStateChanged, object: nil)
         let result = await refreshAll()
         let finishedAt = nowUnix()
-        recordRefreshCompletion(source: source, startedAt: startedAt, finishedAt: finishedAt, result: result)
+        recordRefreshCompletion(
+            source: source,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            result: result,
+            attemptID: attemptID
+        )
         PodsLog("Pods feed refresh source=\(source.rawValue) refreshed=\(result.refreshed) errors=\(result.errors)")
+        NotificationCenter.default.post(name: .podsFeedRefreshStateChanged, object: nil)
         NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
         if (try? settingValues()["ad_removal_enabled"]) == "true",
            let adRemovalRunRequestHandler {
@@ -166,6 +191,9 @@ final class PodsBackend: PlaybackProgressRecording {
         PodsDebugLog("Backend request method=\(request.method) target=\(request.target)")
         do {
             if request.method == "OPTIONS" {
+                if Self.isShowNotesRequest(request), !Self.hasTrustedBrowserOrigin(request) {
+                    throw PodsBackendError.forbidden("untrusted request origin")
+                }
                 return HTTPResponse.noContent()
             }
             guard request.path.hasPrefix("/api") else {
@@ -224,9 +252,38 @@ final class PodsBackend: PlaybackProgressRecording {
         if parts.count == 3, parts[0] == "api", parts[1] == "episodes", let id = Int64(parts[2]), request.method == "GET" {
             return .json(try episodeDetail(id: id))
         }
+        if parts.count == 4,
+           parts[0] == "api",
+           parts[1] == "episodes",
+           parts[3] == "show-notes",
+           let id = Int64(parts[2]),
+           request.method == "POST" {
+            guard Self.hasTrustedBrowserOrigin(request) else {
+                throw PodsBackendError.forbidden("untrusted request origin")
+            }
+            guard request.headers["content-type"]?.lowercased().hasPrefix("application/json") == true else {
+                throw PodsBackendError.invalid("application/json is required")
+            }
+            guard let episodeShowNotesService else { throw PodsBackendError.notFound }
+            do {
+                return .json(try await episodeShowNotesService.generate(episodeID: id))
+            } catch EpisodeShowNotesError.noTranscript {
+                throw PodsBackendError.conflict("episode transcript is not available")
+            } catch EpisodeShowNotesError.notReady {
+                throw PodsBackendError.conflict("episode ad removal is not ready")
+            } catch EpisodeShowNotesError.noContent {
+                throw PodsBackendError.conflict("episode has no content segments")
+            } catch EpisodeShowNotesError.featureDisabled {
+                throw PodsBackendError.conflict("ad removal is disabled")
+            } catch EpisodeShowNotesError.sourceChanged {
+                throw PodsBackendError.conflict("episode transcript changed; retry show notes")
+            } catch EpisodeShowNotesError.transcriptTooLarge {
+                throw PodsBackendError.conflict("episode transcript is too large for show notes")
+            }
+        }
         if parts.count == 4, parts[0] == "api", parts[1] == "episodes", parts[3] == "played", let id = Int64(parts[2]) {
             if request.method == "POST" {
-                try setPlayed(id: id)
+                try await setPlayed(id: id)
                 return .noContent()
             }
             if request.method == "DELETE" {
@@ -290,10 +347,9 @@ final class PodsBackend: PlaybackProgressRecording {
         }
         if path == "/api/ad-removal/disable", request.method == "POST" {
             try setSetting(key: "ad_removal_enabled", value: "false")
+            await cancelAdRemovalPipeline(.all)
+            await episodeShowNotesService?.cancelAll()
             try? adRemovalDiagnostics?.record(eventName: "feature_disabled", severity: .notice)
-            if let adRemovalStopRequestHandler {
-                Task { await adRemovalStopRequestHandler() }
-            }
             return .json(try adRemovalSettings())
         }
         if parts.count == 5,
@@ -319,9 +375,13 @@ final class PodsBackend: PlaybackProgressRecording {
             guard body["confirm"] as? String == "DELETE_AD_REMOVAL_DATA" else {
                 throw PodsBackendError.invalid("destructive cleanup confirmation does not match")
             }
-            if let adRemovalStopRequestHandler {
-                await adRemovalStopRequestHandler()
-            }
+            // Close the generation gate before any awaited shutdown work. The
+            // cleanup endpoint ultimately removes this setting, but without
+            // this write a concurrent request could start another transcript
+            // upload after cancelAll drains and before metadata is deleted.
+            try setSetting(key: "ad_removal_enabled", value: "false")
+            await cancelAdRemovalPipeline(.all)
+            await episodeShowNotesService?.cancelAll()
             try cleanupAdRemovalData()
             return .json(try adRemovalSettings())
         }
@@ -365,6 +425,19 @@ final class PodsBackend: PlaybackProgressRecording {
             return .json(try await importOPML(request.bodyString))
         }
         throw PodsBackendError.notFound
+    }
+
+    private static func isShowNotesRequest(_ request: HTTPRequest) -> Bool {
+        let parts = request.path.split(separator: "/")
+        return parts.count == 4
+            && parts[0] == "api"
+            && parts[1] == "episodes"
+            && Int64(parts[2]) != nil
+            && parts[3] == "show-notes"
+    }
+
+    private static func hasTrustedBrowserOrigin(_ request: HTTPRequest) -> Bool {
+        request.headers["origin"] == "http://127.0.0.1:18180"
     }
 
     private func recent(offset: Int64) throws -> Page<EpisodeItem> {
@@ -527,8 +600,15 @@ final class PodsBackend: PlaybackProgressRecording {
         LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
         WHERE e.id = ?
         """
-        guard let detail = try database.query(sql, [.int(id)], map: Self.mapEpisodeDetail).first else {
+        guard var detail = try database.query(sql, [.int(id)], map: Self.mapEpisodeDetail).first else {
             throw PodsBackendError.notFound
+        }
+        detail.show_notes = try episodeShowNotesStore.notes(episodeID: id)
+        if detail.ad_removal_stage == AdRemovalJobStage.ready.rawValue {
+            detail.ad_markers = try AdRemovalJobStore(database: database)
+                .skipRanges(episodeID: id)
+                .filter { !$0.disabled && $0.startTime.isFinite && $0.startTime >= 0 }
+                .map { EpisodeAdMarker(id: $0.id, start_time: $0.startTime) }
         }
         return detail
     }
@@ -807,9 +887,26 @@ final class PodsBackend: PlaybackProgressRecording {
         try? adRemovalDiagnostics?.record(eventName: "feature_cleanup_finished", severity: .notice)
     }
 
-    private func setPlayed(id: Int64) throws {
+    private func setPlayed(id: Int64) async throws {
         try episodeExists(id: id)
         let ts = nowUnix()
+        // Make the persisted source unavailable before awaiting cancellation.
+        // The service tombstone covers the await itself; this cancelled stage
+        // closes the handoff between cancellation completion and cleanup.
+        try database.execute(
+            """
+            UPDATE ad_removal_jobs
+            SET stage = 'cancelled', blocking_reason = NULL, updated_at = ?
+            WHERE episode_id = ?
+            """,
+            [.int(ts), .int(id)]
+        )
+        // The classifier/transcriber/downloader may still hold episode input
+        // in memory. Drain that worker before deleting its durable sources.
+        await cancelAdRemovalPipeline(.episode(id))
+        // A generation task may still hold the transcript in memory. Wait for
+        // it to finish cancelling before deleting the episode's source data.
+        await episodeShowNotesService?.cancel(episodeID: id)
         try database.withTransaction {
             try database.execute(
                 """
@@ -821,6 +918,19 @@ final class PodsBackend: PlaybackProgressRecording {
             try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
         }
         try adRemovalFileCleanup?.drain()
+        if let adRemovalRunRequestHandler {
+            await adRemovalRunRequestHandler()
+        }
+    }
+
+    private func cancelAdRemovalPipeline(_ scope: AdRemovalPipelineCancellationScope) async {
+        if let adRemovalCancellationRequestHandler {
+            await adRemovalCancellationRequestHandler(scope)
+        } else if scope == .all, let adRemovalStopRequestHandler {
+            // Compatibility for tests/standalone backend users that install
+            // only the historical all-work stop hook.
+            await adRemovalStopRequestHandler()
+        }
     }
 
     private func clearPlayed(id: Int64) throws {
@@ -922,22 +1032,39 @@ final class PodsBackend: PlaybackProgressRecording {
         return RefreshResult(refreshed: ok, errors: errors)
     }
 
-    private func recordRefreshAttempt(source: RefreshSource, startedAt: Int64) {
+    private func recordRefreshAttempt(source: RefreshSource, startedAt: Int64) -> Int64? {
         do {
-            try database.execute(
-                """
-                INSERT INTO feed_refresh_state (id, last_attempt_at, last_source, last_refreshed, last_errors)
-                VALUES (1, ?, ?, 0, 0)
-                ON CONFLICT(id) DO UPDATE SET last_attempt_at = excluded.last_attempt_at, last_source = excluded.last_source
-                """,
-                [.int(startedAt), .text(source.rawValue)]
-            )
+            return try database.withTransaction {
+                try database.execute(
+                    """
+                    INSERT INTO feed_refresh_state (id, last_attempt_at, last_source, last_refreshed, last_errors)
+                    VALUES (1, ?, ?, 0, 0)
+                    ON CONFLICT(id) DO UPDATE SET last_attempt_at = excluded.last_attempt_at, last_source = excluded.last_source
+                    """,
+                    [.int(startedAt), .text(source.rawValue)]
+                )
+                try database.execute(
+                    """
+                    INSERT INTO feed_refresh_attempts (source, started_at, outcome)
+                    VALUES (?, ?, 'running')
+                    """,
+                    [.text(source.rawValue), .int(startedAt)]
+                )
+                return database.lastInsertRowID()
+            }
         } catch {
             PodsLog("Pods refresh attempt record failed: \(error)")
+            return nil
         }
     }
 
-    private func recordRefreshCompletion(source: RefreshSource, startedAt: Int64, finishedAt: Int64, result: RefreshResult) {
+    private func recordRefreshCompletion(
+        source: RefreshSource,
+        startedAt: Int64,
+        finishedAt: Int64,
+        result: RefreshResult,
+        attemptID: Int64?
+    ) {
         do {
             try database.withTransaction {
                 try database.execute(
@@ -953,9 +1080,64 @@ final class PodsBackend: PlaybackProgressRecording {
                     "INSERT INTO feed_refresh_runs (source, started_at, finished_at, refreshed, errors) VALUES (?, ?, ?, ?, ?)",
                     [.text(source.rawValue), .int(startedAt), .int(finishedAt), .int(Int64(result.refreshed)), .int(Int64(result.errors))]
                 )
+                if let attemptID {
+                    try database.execute(
+                        """
+                        UPDATE feed_refresh_attempts
+                        SET finished_at = ?, refreshed = ?, errors = ?, outcome = ?
+                        WHERE id = ? AND outcome = 'running'
+                        """,
+                        [
+                            .int(finishedAt),
+                            .int(Int64(result.refreshed)),
+                            .int(Int64(result.errors)),
+                            .text(result.errors == 0 ? "completed" : "completed_with_errors"),
+                            .int(attemptID)
+                        ]
+                    )
+                }
             }
         } catch {
             PodsLog("Pods refresh completion record failed: \(error)")
+        }
+    }
+
+    private func recoverInterruptedRefreshAttempts(now: Int64 = nowUnix()) {
+        do {
+            let interruptedSource = try database.query(
+                """
+                SELECT source FROM feed_refresh_attempts
+                WHERE outcome = 'running'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ) { sqliteString($0, 0) }.first
+            guard let interruptedSource else { return }
+
+            try database.withTransaction {
+                try database.execute(
+                    """
+                    UPDATE feed_refresh_attempts
+                    SET finished_at = ?, refreshed = 0, errors = 1, outcome = 'interrupted'
+                    WHERE outcome = 'running'
+                    """,
+                    [.int(now)]
+                )
+                try database.execute(
+                    """
+                    INSERT INTO feed_refresh_state (id, last_attempt_at, last_source, last_refreshed, last_errors)
+                    VALUES (1, ?, ?, 0, 1)
+                    ON CONFLICT(id) DO UPDATE SET
+                        last_source = excluded.last_source,
+                        last_refreshed = excluded.last_refreshed,
+                        last_errors = excluded.last_errors
+                    """,
+                    [.int(now), .text(interruptedSource)]
+                )
+            }
+            PodsLog("Pods recovered an interrupted feed refresh source=\(interruptedSource)")
+        } catch {
+            PodsLog("Pods interrupted refresh recovery failed: \(error)")
         }
     }
 

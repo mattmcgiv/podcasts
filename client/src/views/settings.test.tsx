@@ -156,7 +156,9 @@ describe("SettingsSheet", () => {
     await screen.findByText(/Cloud classifier: Configured/);
     const call = calls.find((item) => item.key === "POST /api/ad-removal/enable");
     expect(JSON.parse(String(call?.init.body))).toEqual({ confirmed_bytes: 3_061_129_077 });
-    expect(screen.getByText(/Transcript windows are sent to DeepSeek/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Transcript text is sent to DeepSeek.*generated show notes/),
+    ).toBeInTheDocument();
   });
 
   it("keeps enable disabled until a DeepSeek API key is configured", async () => {

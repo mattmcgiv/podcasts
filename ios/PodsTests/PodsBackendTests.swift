@@ -4,6 +4,220 @@ import WebKit
 @testable import Pods
 
 final class PodsBackendTests: XCTestCase {
+    private actor CompletionProbe {
+        private var completed = false
+
+        func markCompleted() { completed = true }
+        func isCompleted() -> Bool { completed }
+    }
+
+    private actor ControlledRefreshHandler {
+        private var calls = 0
+        private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+        private var released = false
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func perform() async -> RefreshResult {
+            calls += 1
+            startedWaiters.forEach { $0.resume() }
+            startedWaiters.removeAll()
+            if !released {
+                await withCheckedContinuation { releaseWaiters.append($0) }
+            }
+            return RefreshResult(refreshed: 1, errors: 0)
+        }
+
+        func waitUntilStarted() async {
+            if calls > 0 { return }
+            await withCheckedContinuation { startedWaiters.append($0) }
+        }
+
+        func release() {
+            released = true
+            releaseWaiters.forEach { $0.resume() }
+            releaseWaiters.removeAll()
+        }
+
+        func callCount() -> Int { calls }
+    }
+
+    private actor BlockingFeedFetcher: ConditionalFeedFetching {
+        private let responseData: Data
+        private var started = false
+        private var released = false
+        private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(responseData: Data) {
+            self.responseData = responseData
+        }
+
+        func data(for url: URL) async throws -> Data {
+            await waitForRelease()
+            return responseData
+        }
+
+        func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
+            await waitForRelease()
+            return .data(responseData, validators)
+        }
+
+        private func waitForRelease() async {
+            started = true
+            startedWaiters.forEach { $0.resume() }
+            startedWaiters.removeAll()
+            if !released {
+                await withCheckedContinuation { releaseWaiters.append($0) }
+            }
+        }
+
+        func waitUntilStarted() async {
+            if started { return }
+            await withCheckedContinuation { startedWaiters.append($0) }
+        }
+
+        func release() {
+            released = true
+            releaseWaiters.forEach { $0.resume() }
+            releaseWaiters.removeAll()
+        }
+    }
+
+    private actor CancellationHoldingClassificationExecutor: AdRemovalStageExecuting {
+        private let store: AdRemovalJobStore
+        private var entered = false
+        private var cancellationObserved = false
+        private var released = false
+        private var staleWriteSucceeded: Bool?
+        private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+        private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        init(store: AdRemovalJobStore) {
+            self.store = store
+        }
+
+        func waitUntilEntered() async {
+            if entered { return }
+            await withCheckedContinuation { enteredWaiters.append($0) }
+        }
+
+        func waitUntilCancellationObserved() async {
+            if cancellationObserved { return }
+            await withCheckedContinuation { cancellationWaiters.append($0) }
+        }
+
+        func release() {
+            released = true
+            releaseWaiters.forEach { $0.resume() }
+            releaseWaiters.removeAll()
+        }
+
+        func didPersistAfterCancellation() -> Bool? {
+            staleWriteSucceeded
+        }
+
+        func execute(stage: AdRemovalJobStage, job: AdRemovalJob) async throws {
+            entered = true
+            enteredWaiters.forEach { $0.resume() }
+            enteredWaiters.removeAll()
+            do {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            } catch is CancellationError {
+                cancellationObserved = true
+                cancellationWaiters.forEach { $0.resume() }
+                cancellationWaiters.removeAll()
+                if !released {
+                    await withCheckedContinuation { releaseWaiters.append($0) }
+                }
+                do {
+                    try store.recordClassificationEvidence(
+                        Self.evidence(episodeID: job.episodeID),
+                        jobID: job.id
+                    )
+                    staleWriteSucceeded = true
+                } catch {
+                    staleWriteSucceeded = false
+                }
+                throw CancellationError()
+            }
+        }
+
+        private nonisolated static func evidence(episodeID: Int64) -> AdClassificationEvidence {
+            AdClassificationEvidence(
+                runID: "cancelled-run",
+                episodeID: episodeID,
+                windowIndex: 0,
+                segmentIDs: ["segment-0"],
+                correctionIDs: [],
+                prompt: "classify segment-0",
+                rawOutput: #"{"labels":[]}"#,
+                schemaValid: true,
+                validationError: nil,
+                labels: [],
+                descriptor: AdClassifierDescriptor(
+                    modelID: "test/model",
+                    modelRevision: "revision-1",
+                    quantization: "cloud",
+                    promptRevision: "prompt-1",
+                    maximumContextTokens: 8_192,
+                    maximumOutputTokens: 1_024,
+                    temperature: 0,
+                    topP: 1
+                ),
+                createdAt: 1_000
+            )
+        }
+    }
+
+    private actor CancellationBlockingShowNotesGenerator: EpisodeShowNotesGenerating {
+        nonisolated let modelID = "test/show-notes"
+        nonisolated let promptVersion = "show-notes-prompt-v1"
+        private var entered = false
+        private var cancellationObserved = false
+        private var cancellationReleased = false
+        private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func waitUntilEntered() async {
+            if entered { return }
+            await withCheckedContinuation { enteredWaiters.append($0) }
+        }
+
+        func hasObservedCancellation() -> Bool {
+            cancellationObserved
+        }
+
+        func releaseAfterCancellation() {
+            cancellationReleased = true
+            releaseWaiters.forEach { $0.resume() }
+            releaseWaiters.removeAll()
+        }
+
+        func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft] {
+            entered = true
+            enteredWaiters.forEach { $0.resume() }
+            enteredWaiters.removeAll()
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            } catch is CancellationError {
+                cancellationObserved = true
+                if !cancellationReleased {
+                    await withCheckedContinuation { releaseWaiters.append($0) }
+                }
+                throw CancellationError()
+            }
+            guard let segment = segments.first else {
+                throw EpisodeShowNotesError.noContent
+            }
+            return [EpisodeShowNoteDraft(
+                segmentID: segment.id,
+                title: "Opening",
+                summary: "The episode begins."
+            )]
+        }
+    }
+
     private final class MockFeedFetcher: ConditionalFeedFetching {
         var responses: [String: Data] = [:]
         var responseValidators: [String: FeedValidators] = [:]
@@ -29,6 +243,48 @@ final class PodsBackendTests: XCTestCase {
                 responseValidators[url.absoluteString] ?? FeedValidators()
             )
         }
+    }
+
+    private final class FeedRequestCaptureURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var capturedRequest: URLRequest?
+
+        static func reset() {
+            lock.lock()
+            defer { lock.unlock() }
+            capturedRequest = nil
+        }
+
+        static func request() -> URLRequest? {
+            lock.lock()
+            defer { lock.unlock() }
+            return capturedRequest
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool {
+            request.url?.host == "feeds.example"
+        }
+
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+            request
+        }
+
+        override func startLoading() {
+            Self.lock.lock()
+            Self.capturedRequest = request
+            Self.lock.unlock()
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("<rss/>".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
     }
 
     private struct MockDirectorySearcher: PodcastDirectorySearching {
@@ -101,12 +357,96 @@ final class PodsBackendTests: XCTestCase {
         try JSONSerialization.jsonObject(with: response.body)
     }
 
+    private func prepareClassifyingEpisode(
+        _ harness: Harness,
+        guid: String
+    ) async throws -> (episodeID: Int64, store: AdRemovalJobStore, job: AdRemovalJob) {
+        let feedURL = "https://feeds.example/\(guid).xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Cancellation Test",
+            items: [("Episode", guid, "https://h.example/\(guid).mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = ?",
+            [.text(guid)]
+        ))
+        try harness.database.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: episodeID)
+        var job = queued
+        for stage in [
+            AdRemovalJobStage.downloading,
+            .downloaded,
+            .transcribing,
+            .classifying
+        ] {
+            job = try store.transition(jobID: queued.id, to: stage)
+        }
+        return (episodeID, store, job)
+    }
+
     func testEndpointsDoNotRequireAuth() async throws {
         let harness = try makeHarness()
         let response = try await call(harness.backend, "GET", "/api/recent")
         XCTAssertEqual(response.statusCode, 200)
         let page = try decode(Page<EpisodeItem>.self, from: response)
         XCTAssertTrue(page.items.isEmpty)
+    }
+
+    func testShowNotesEndpointRejectsCrossOriginBrowserRequestsBeforeGeneration() async throws {
+        let harness = try makeHarness()
+        let target = "/api/episodes/1/show-notes"
+        let maliciousHeaders = [
+            "origin": "https://attacker.example",
+            "content-type": "application/json"
+        ]
+
+        let preflight = await harness.backend.handle(HTTPRequest(
+            method: "OPTIONS",
+            target: target,
+            headers: maliciousHeaders
+        ))
+        XCTAssertEqual(preflight.statusCode, 403)
+
+        let post = await harness.backend.handle(HTTPRequest(
+            method: "POST",
+            target: target,
+            headers: maliciousHeaders,
+            body: Data("{}".utf8)
+        ))
+        XCTAssertEqual(post.statusCode, 403)
+
+        let missingOriginPreflight = await harness.backend.handle(HTTPRequest(
+            method: "OPTIONS",
+            target: target,
+            headers: ["content-type": "application/json"]
+        ))
+        XCTAssertEqual(missingOriginPreflight.statusCode, 403)
+
+        let missingOriginPost = await harness.backend.handle(HTTPRequest(
+            method: "POST",
+            target: target,
+            headers: ["content-type": "application/json"],
+            body: Data("{}".utf8)
+        ))
+        XCTAssertEqual(missingOriginPost.statusCode, 403)
+
+        let trusted = await harness.backend.handle(HTTPRequest(
+            method: "POST",
+            target: target,
+            headers: [
+                "origin": "http://127.0.0.1:18180",
+                "content-type": "application/json"
+            ],
+            body: Data("{}".utf8)
+        ))
+        XCTAssertEqual(trusted.statusCode, 404)
     }
 
     func testSubscribeBackfillsNewestTwoAndListsRecent() async throws {
@@ -218,6 +558,255 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(saved, SettingsPayload(speed: 2.5, autoplay: false))
         let invalidSettings = try await call(harness.backend, "PUT", "/api/settings", json: ["speed": 9.9, "autoplay": true])
         XCTAssertEqual(invalidSettings.statusCode, 422)
+    }
+
+    func testMarkPlayedAwaitsShowNotesCancellationBeforeMetadataCleanup() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/show-notes-cancellation.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Show Notes Cancellation",
+            items: [("Episode", "show-notes-cancel-1", "https://h.example/cancel.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'show-notes-cancel-1'"
+        ))
+        try harness.database.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        let jobStore = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        var job = try jobStore.enqueue(episodeID: episodeID)
+        let segment = AdTranscriptSegment(
+            id: "segment-opening",
+            index: 0,
+            language: "en",
+            startTime: 12.5,
+            endTime: 30,
+            text: "Episode content"
+        )
+        try jobStore.replaceTranscriptSegments(episodeID: episodeID, segments: [segment])
+        for stage in [
+            AdRemovalJobStage.downloading,
+            .downloaded,
+            .transcribing,
+            .classifying,
+            .ready
+        ] {
+            job = try jobStore.transition(jobID: job.id, to: stage)
+        }
+        XCTAssertEqual(job.stage, .ready)
+
+        let generator = CancellationBlockingShowNotesGenerator()
+        let service = EpisodeShowNotesService(database: harness.database, generator: generator)
+        let backend = PodsBackend(
+            database: harness.database,
+            feedFetcher: harness.fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: harness.adRemovalArtifactStore,
+            episodeShowNotesService: service
+        )
+        let generation = Task { try await service.generate(episodeID: episodeID) }
+        await generator.waitUntilEntered()
+
+        let markPlayed = Task {
+            await backend.handle(HTTPRequest(
+                method: "POST",
+                target: "/api/episodes/\(episodeID)/played"
+            ))
+        }
+        var observedCancellation = false
+        for _ in 0..<200 {
+            if await generator.hasObservedCancellation() {
+                observedCancellation = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(observedCancellation, "mark-played must cancel active show-note generation")
+        let cancellingJob = try XCTUnwrap(jobStore.job(episodeID: episodeID))
+        XCTAssertEqual(
+            cancellingJob.stage,
+            .cancelled,
+            "mark-played must make the source unavailable while cancellation drains"
+        )
+        XCTAssertFalse(
+            try jobStore.transcriptSegments(episodeID: episodeID).isEmpty,
+            "metadata cleanup must wait until cancelled generation has terminated"
+        )
+
+        await generator.releaseAfterCancellation()
+        let response = await markPlayed.value
+        XCTAssertEqual(response.statusCode, 204)
+        XCTAssertNil(try jobStore.job(episodeID: episodeID))
+        XCTAssertTrue(try jobStore.transcriptSegments(episodeID: episodeID).isEmpty)
+        XCTAssertNotNil(try harness.database.scalarInt64(
+            "SELECT played_at FROM episode_state WHERE episode_id = ?",
+            [.int(episodeID)]
+        ))
+        do {
+            _ = try await generation.value
+            XCTFail("Expected mark-played to cancel in-flight show-note generation")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
+    func testMarkPlayedDrainsPipelineAndRejectsCancelledClassifierWrite() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "pipeline-mark-played")
+        let executor = CancellationHoldingClassificationExecutor(store: prepared.store)
+        let coordinator = AdRemovalCoordinator(store: prepared.store, executor: executor)
+        harness.backend.setAdRemovalCancellationRequestHandler { scope in
+            await coordinator.cancel(scope)
+        }
+        let pipeline = Task { try await coordinator.runNextStage() }
+        await executor.waitUntilEntered()
+
+        let completion = CompletionProbe()
+        let markPlayed = Task {
+            let response = await harness.backend.handle(HTTPRequest(
+                method: "POST",
+                target: "/api/episodes/\(prepared.episodeID)/played"
+            ))
+            await completion.markCompleted()
+            return response
+        }
+        await executor.waitUntilCancellationObserved()
+
+        let completedBeforeRelease = await completion.isCompleted()
+        XCTAssertFalse(completedBeforeRelease, "mark-played returned before pipeline termination")
+        XCTAssertEqual(try prepared.store.job(id: prepared.job.id)?.stage, .cancelled)
+        await executor.release()
+
+        let response = await markPlayed.value
+        XCTAssertEqual(response.statusCode, 204)
+        let staleWriteSucceeded = await executor.didPersistAfterCancellation()
+        XCTAssertEqual(staleWriteSucceeded, false)
+        XCTAssertNil(try prepared.store.job(id: prepared.job.id))
+        XCTAssertTrue(try prepared.store.classificationEvidence(episodeID: prepared.episodeID).isEmpty)
+        do {
+            _ = try await pipeline.value
+            XCTFail("Expected cancelled pipeline stage")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
+    func testFeatureCleanupWaitsForPipelineTerminationBeforeDeletingLateWrites() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "pipeline-full-cleanup")
+        let executor = CancellationHoldingClassificationExecutor(store: prepared.store)
+        let coordinator = AdRemovalCoordinator(store: prepared.store, executor: executor)
+        harness.backend.setAdRemovalCancellationRequestHandler { scope in
+            await coordinator.cancel(scope)
+        }
+        let pipeline = Task { try await coordinator.runNextStage() }
+        await executor.waitUntilEntered()
+
+        let completion = CompletionProbe()
+        let cleanup = Task {
+            let response = try await self.call(
+                harness.backend,
+                "POST",
+                "/api/ad-removal/cleanup",
+                json: ["confirm": "DELETE_AD_REMOVAL_DATA"]
+            )
+            await completion.markCompleted()
+            return response
+        }
+        await executor.waitUntilCancellationObserved()
+
+        let completedBeforeRelease = await completion.isCompleted()
+        XCTAssertFalse(completedBeforeRelease, "cleanup returned before pipeline termination")
+        XCTAssertNotNil(try prepared.store.job(id: prepared.job.id))
+        await executor.release()
+
+        let response = try await cleanup.value
+        XCTAssertEqual(response.statusCode, 200)
+        let lateWriteSucceeded = await executor.didPersistAfterCancellation()
+        XCTAssertEqual(lateWriteSucceeded, true)
+        XCTAssertNil(try prepared.store.job(id: prepared.job.id))
+        XCTAssertTrue(try prepared.store.classificationEvidence(episodeID: prepared.episodeID).isEmpty)
+        do {
+            _ = try await pipeline.value
+            XCTFail("Expected cancelled pipeline stage")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
+    func testFeatureDisableWaitsForPipelineTerminationBeforeResponding() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "pipeline-disable")
+        let executor = CancellationHoldingClassificationExecutor(store: prepared.store)
+        let coordinator = AdRemovalCoordinator(store: prepared.store, executor: executor)
+        harness.backend.setAdRemovalCancellationRequestHandler { scope in
+            await coordinator.cancel(scope)
+        }
+        let pipeline = Task { try await coordinator.runNextStage() }
+        await executor.waitUntilEntered()
+
+        let completion = CompletionProbe()
+        let disable = Task {
+            let response = await harness.backend.handle(HTTPRequest(
+                method: "POST",
+                target: "/api/ad-removal/disable"
+            ))
+            await completion.markCompleted()
+            return response
+        }
+        await executor.waitUntilCancellationObserved()
+
+        let completedBeforeRelease = await completion.isCompleted()
+        XCTAssertFalse(completedBeforeRelease, "disable returned before pipeline termination")
+        XCTAssertEqual(
+            try harness.database.query(
+                "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
+                map: { sqliteString($0, 0) }
+            ).first,
+            "false"
+        )
+        await executor.release()
+
+        let response = await disable.value
+        XCTAssertEqual(response.statusCode, 200)
+        do {
+            _ = try await pipeline.value
+            XCTFail("Expected cancelled pipeline stage")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
+    func testFeatureCleanupDisablesShowNotesBeforeAwaitingRuntimeShutdown() async throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            """
+            INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        let shutdownObserved = expectation(description: "runtime shutdown observes closed generation gate")
+        harness.backend.setAdRemovalStopRequestHandler {
+            let enabled = try? harness.database.query(
+                "SELECT value FROM settings WHERE key = 'ad_removal_enabled'"
+            ) { sqliteString($0, 0) }.first
+            XCTAssertEqual(enabled, "false")
+            shutdownObserved.fulfill()
+        }
+
+        let response = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/cleanup",
+            json: ["confirm": "DELETE_AD_REMOVAL_DATA"]
+        )
+
+        await fulfillment(of: [shutdownObserved], timeout: 1)
+        XCTAssertEqual(response.statusCode, 200)
     }
 
     func testEpisodeAdRemovalStatePrepareAndRetryRoundTrip() async throws {
@@ -354,6 +943,53 @@ final class PodsBackendTests: XCTestCase {
         // Lightweight: the response must not contain notes_html anywhere.
         let raw = try XCTUnwrap(String(data: response.body, encoding: .utf8))
         XCTAssertFalse(raw.contains("notes_html"), "batch statuses must not serialize notes_html")
+    }
+
+    func testEpisodeDetailExposesOnlyEnabledDeepSeekAdMarkers() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "chapter-ad-markers")
+        try prepared.store.replaceTranscriptSegments(episodeID: prepared.episodeID, segments: [
+            AdTranscriptSegment(id: "segment-1", index: 0, language: "en", startTime: 42.5, endTime: 55, text: "Sponsor"),
+            AdTranscriptSegment(id: "segment-2", index: 1, language: "en", startTime: 55, endTime: 68, text: "Offer"),
+            AdTranscriptSegment(id: "segment-3", index: 2, language: "en", startTime: 90, endTime: 100, text: "Correction"),
+            AdTranscriptSegment(id: "segment-4", index: 3, language: "en", startTime: 100, endTime: 110, text: "Editorial")
+        ])
+        try prepared.store.replaceSkipRanges(episodeID: prepared.episodeID, ranges: [
+            AdSkipRange(
+                id: "enabled-ad",
+                startSegmentID: "segment-1",
+                endSegmentID: "segment-2",
+                startTime: 42.5,
+                endTime: 68,
+                confidence: 0.98,
+                reason: "sponsor read",
+                classifierVersion: "deepseek-test",
+                promptVersion: "prompt-v1",
+                createdAt: 1_000,
+                disabled: false
+            ),
+            AdSkipRange(
+                id: "disabled-ad",
+                startSegmentID: "segment-3",
+                endSegmentID: "segment-4",
+                startTime: 90,
+                endTime: 110,
+                confidence: 0.95,
+                reason: "corrected sponsor read",
+                classifierVersion: "deepseek-test",
+                promptVersion: "prompt-v1",
+                createdAt: 1_000,
+                disabled: true
+            )
+        ])
+        _ = try prepared.store.transition(jobID: prepared.job.id, to: .ready)
+
+        let detail = try decode(EpisodeDetail.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/episodes/\(prepared.episodeID)"
+        ))
+        XCTAssertEqual(detail.ad_markers, [EpisodeAdMarker(id: "enabled-ad", start_time: 42.5)])
     }
 
     func testAdRemovalStatusesRejectsMalformedEmptyNonPositiveAndOverLimitInput() async throws {
@@ -645,7 +1281,8 @@ final class PodsBackendTests: XCTestCase {
         let episode = try XCTUnwrap(recent.items.first)
         let podcastID = episode.podcast_id
         let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
-        let job = try store.enqueue(episodeID: episode.id)
+        let queued = try store.enqueue(episodeID: episode.id)
+        let job = try store.transition(jobID: queued.id, to: .downloading)
         let temporaryAudio = harness.directory.appendingPathComponent("downloaded-audio.tmp")
         try Data("downloaded audio".utf8).write(to: temporaryAudio)
         let audioArtifact = try harness.adRemovalArtifactStore.installDownloadedAudio(
@@ -810,6 +1447,207 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(harness.fetcher.requestedURLs.count, 2)
     }
 
+    func testNativeCoordinatorRefreshesEveryTimeTheAppEntersForeground() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/a.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(show: "Alpha", items: [
+            ("Episode", "g1", "https://h.example/1.mp3", Self.d1)
+        ]).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let coordinator = FeedRefreshCoordinator(backend: harness.backend)
+        _ = await coordinator.refreshWhenForegrounded()
+        _ = await coordinator.refreshWhenForegrounded()
+
+        XCTAssertEqual(harness.fetcher.requestedURLs.count, 3)
+        let status = try decode(RefreshStatus.self, from: try await call(harness.backend, "GET", "/api/refresh-status"))
+        XCTAssertEqual(status.last_source, "foreground")
+        XCTAssertNotNil(status.last_success_at)
+    }
+
+    func testDeferredLaunchActivationRefreshesFeedsAndPersistsCompletionThroughLoopbackAPI() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/launch.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(show: "Launch", items: [
+            ("Episode", "launch-1", "https://h.example/launch-1.mp3", Self.d1)
+        ]).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+
+        let lifecycle = await MainActor.run { ForegroundFeedRefreshLifecycle() }
+        let coordinator = FeedRefreshCoordinator(backend: harness.backend)
+        harness.backend.setRefreshRequestHandler { source in
+            await coordinator.refreshNow(source: source)
+        }
+
+        // This is the app-launch ordering that previously dropped refreshes:
+        // UIKit reports activation before the backend coordinator is installed.
+        await MainActor.run {
+            lifecycle.applicationDidBecomeActive()
+            lifecycle.install { await coordinator.refreshWhenForegrounded() }
+        }
+
+        let server = PodsLocalServer(backend: harness.backend, staticAssets: nil, port: 18183)
+        try server.start()
+        defer { server.stop() }
+
+        let statusURL = URL(string: "http://127.0.0.1:18183/api/refresh-status")!
+        var status = RefreshStatus.empty
+        for _ in 0..<100 {
+            let (data, response) = try await URLSession.shared.data(from: statusURL)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            status = try JSONDecoder().decode(RefreshStatus.self, from: data)
+            if status.last_success_at != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(harness.fetcher.requestedURLs, [feedURL, feedURL])
+        XCTAssertEqual(status.last_source, "foreground")
+        XCTAssertNotNil(status.last_attempt_at)
+        XCTAssertNotNil(status.last_success_at)
+        XCTAssertEqual(status.last_refreshed, 1)
+        XCTAssertEqual(status.last_errors, 0)
+    }
+
+    func testLifecycleCoalescesDuplicateColdStartActivationIntoOneRefresh() async throws {
+        let lifecycle = await MainActor.run { ForegroundFeedRefreshLifecycle() }
+        let handler = ControlledRefreshHandler()
+        await MainActor.run {
+            lifecycle.install { await handler.perform() }
+            lifecycle.applicationDidBecomeActive()
+        }
+        await handler.waitUntilStarted()
+        await MainActor.run {
+            lifecycle.applicationDidBecomeActive()
+        }
+        await handler.release()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let callCount = await handler.callCount()
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testRefreshStatusReportsAnActiveRefreshUntilItPersistsCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PodsRefreshStatusTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        let feedURL = "https://feeds.example/status.xml"
+        try database.execute(
+            "INSERT INTO podcasts (feed_url, created_at) VALUES (?, 1)",
+            [.text(feedURL)]
+        )
+        let fetcher = BlockingFeedFetcher(responseData: Data(Self.rss(show: "Status", items: []).utf8))
+        let backend = PodsBackend(
+            database: database,
+            feedFetcher: fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher()
+        )
+
+        let refresh = Task { await backend.performRefresh(source: .foreground) }
+        await fetcher.waitUntilStarted()
+        XCTAssertTrue(backend.refreshStatus().is_refreshing)
+
+        await fetcher.release()
+        _ = await refresh.value
+        XCTAssertFalse(backend.refreshStatus().is_refreshing)
+    }
+
+    func testLoopbackRefreshStatusReportsAnActiveRefreshUntilCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PodsLoopbackRefreshStatusTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        let feedURL = "https://feeds.example/loopback-status.xml"
+        try database.execute(
+            "INSERT INTO podcasts (feed_url, created_at) VALUES (?, 1)",
+            [.text(feedURL)]
+        )
+        let fetcher = BlockingFeedFetcher(responseData: Data(Self.rss(show: "Loopback", items: []).utf8))
+        let backend = PodsBackend(
+            database: database,
+            feedFetcher: fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher()
+        )
+        let server = PodsLocalServer(backend: backend, staticAssets: nil, port: 18184)
+        try server.start()
+        defer { server.stop() }
+
+        let refresh = Task { await backend.performRefresh(source: .foreground) }
+        await fetcher.waitUntilStarted()
+
+        let statusURL = try XCTUnwrap(URL(string: "http://127.0.0.1:18184/api/refresh-status"))
+        let (activeData, activeResponse) = try await URLSession.shared.data(from: statusURL)
+        XCTAssertEqual((activeResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertTrue(try JSONDecoder().decode(RefreshStatus.self, from: activeData).is_refreshing)
+
+        await fetcher.release()
+        _ = await refresh.value
+
+        let (completedData, completedResponse) = try await URLSession.shared.data(from: statusURL)
+        XCTAssertEqual((completedResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertFalse(try JSONDecoder().decode(RefreshStatus.self, from: completedData).is_refreshing)
+    }
+
+    func testBackendStartupClosesAnInterruptedRefreshAttemptForRetry() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PodsInterruptedRefreshTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let database = try PodsDatabase(url: directory.appendingPathComponent("test.sqlite"))
+        try database.execute(
+            """
+            INSERT INTO feed_refresh_state (id, last_attempt_at, last_source, last_refreshed, last_errors)
+            VALUES (1, 100, 'foreground', 0, 0)
+            """
+        )
+        try database.execute(
+            """
+            INSERT INTO feed_refresh_attempts (source, started_at, outcome)
+            VALUES ('foreground', 100, 'running')
+            """
+        )
+
+        let backend = PodsBackend(
+            database: database,
+            feedFetcher: MockFeedFetcher(),
+            directorySearcher: DisabledPodcastDirectorySearcher()
+        )
+
+        let recovered = try database.query(
+            "SELECT finished_at, refreshed, errors, outcome FROM feed_refresh_attempts"
+        ) { statement in
+            (
+                sqliteOptionalInt64(statement, 0),
+                sqliteOptionalInt64(statement, 1),
+                sqliteOptionalInt64(statement, 2),
+                sqliteString(statement, 3)
+            )
+        }
+        XCTAssertEqual(recovered.count, 1)
+        XCTAssertNotNil(recovered[0].0)
+        XCTAssertEqual(recovered[0].1, 0)
+        XCTAssertEqual(recovered[0].2, 1)
+        XCTAssertEqual(recovered[0].3, "interrupted")
+
+        let status = backend.refreshStatus()
+        XCTAssertEqual(status.last_source, "foreground")
+        XCTAssertEqual(status.last_errors, 1)
+    }
+
+    func testFeedFetcherUsesBoundedTimeoutForEveryPublisherRequest() async throws {
+        FeedRequestCaptureURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FeedRequestCaptureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        _ = try await fetcher.response(
+            for: try XCTUnwrap(URL(string: "https://feeds.example/slow.xml")),
+            validators: FeedValidators()
+        )
+
+        XCTAssertEqual(FeedRequestCaptureURLProtocol.request()?.timeoutInterval, 12)
+    }
+
     func testManualRefreshUsesTheNativeCoordinatorAndOverridesTheFreshnessWindow() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/a.xml"
@@ -840,7 +1678,8 @@ final class PodsBackendTests: XCTestCase {
             last_success_at: lastSuccess,
             last_source: "foreground",
             last_refreshed: 1,
-            last_errors: 0
+            last_errors: 0,
+            is_refreshing: false
         )
 
         XCTAssertFalse(FeedRefreshPolicy.isForegroundRefreshDue(status: status, now: now))
@@ -858,7 +1697,8 @@ final class PodsBackendTests: XCTestCase {
             last_success_at: Int64(now.addingTimeInterval(-13 * 60 * 60).timeIntervalSince1970),
             last_source: "foreground",
             last_refreshed: 2,
-            last_errors: 1
+            last_errors: 1,
+            is_refreshing: false
         )
 
         XCTAssertFalse(FeedRefreshPolicy.isForegroundRefreshDue(status: status, now: now))

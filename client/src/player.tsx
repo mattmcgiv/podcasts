@@ -18,9 +18,13 @@ import {
 } from "./audioEngine";
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
-import type { EpisodeItem, PlayContext } from "./types";
+import type { EpisodeAdMarker, EpisodeItem, EpisodeShowNote, PlayContext } from "./types";
 
-export type PlayerEpisode = EpisodeItem & { notes_html?: string };
+export type PlayerEpisode = EpisodeItem & {
+  notes_html?: string;
+  show_notes?: EpisodeShowNote[];
+  ad_markers?: EpisodeAdMarker[];
+};
 
 export interface PlayerApi {
   current: PlayerEpisode | null;
@@ -33,6 +37,8 @@ export interface PlayerApi {
   autoplay: boolean;
   cast: CastInfo;
   pendingAdSkip: AdSkipNotice | null;
+  showNotesGenerating: boolean;
+  showNotesError: string | null;
   playEpisode: (item: EpisodeItem, context: PlayContext) => void;
   toggle: () => void;
   seekTo: (secs: number) => void;
@@ -43,11 +49,33 @@ export interface PlayerApi {
   setExpanded: (on: boolean) => void;
   setCastOutput: (target: "local" | "mac") => void;
   undoAdSkip: () => void;
+  retryShowNotes: () => void;
   markPlayedAndClose: () => Promise<void>;
   close: () => void;
 }
 
 const PlayerContext = createContext<PlayerApi | null>(null);
+const SHOW_NOTES_STATUS_POLL_MS = 2_000;
+const ACTIVE_AD_REMOVAL_STAGES = new Set([
+  "queued",
+  "downloading",
+  "downloaded",
+  "transcribing",
+  "classifying",
+]);
+
+interface EpisodeVisit {
+  episodeID: number;
+  generation: number;
+  nextOperation: number;
+  acceptedOperation: number;
+}
+
+interface EpisodeVisitOperation {
+  episodeID: number;
+  visitGeneration: number;
+  sequence: number;
+}
 
 export function usePlayer(): PlayerApi {
   const ctx = useContext(PlayerContext);
@@ -66,6 +94,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [autoplay, setAutoplayState] = useState(true);
   const [cast, setCast] = useState<CastInfo>({ available: false, connected: false, output: "local" });
   const [pendingAdSkip, setPendingAdSkip] = useState<AdSkipNotice | null>(null);
+  const [showNotesGenerating, setShowNotesGenerating] = useState(false);
+  const [showNotesError, setShowNotesError] = useState<string | null>(null);
 
   const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
@@ -75,6 +105,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const resumeAtRef = useRef(0);
   /** True while mark-played → next is in flight for one asynchronous completion. */
   const endInFlightRef = useRef(false);
+  const nextEpisodeVisitGenerationRef = useRef(0);
+  const currentEpisodeVisitRef = useRef<EpisodeVisit | null>(null);
+  const showNotesRequestsRef = useRef(new Map<number, Promise<EpisodeShowNote[]>>());
 
   currentRef.current = current;
 
@@ -86,6 +119,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const beginVisitOperation = useCallback((episodeID: number): EpisodeVisitOperation | null => {
+    const visit = currentEpisodeVisitRef.current;
+    if (currentRef.current?.id !== episodeID || visit?.episodeID !== episodeID) return null;
+    const sequence = ++visit.nextOperation;
+    return { episodeID, visitGeneration: visit.generation, sequence };
+  }, []);
+
+  const acceptVisitOperation = useCallback((operation: EpisodeVisitOperation): boolean => {
+    const visit = currentEpisodeVisitRef.current;
+    if (
+      currentRef.current?.id !== operation.episodeID
+      || visit?.episodeID !== operation.episodeID
+      || visit.generation !== operation.visitGeneration
+      || operation.sequence < visit.acceptedOperation
+    ) return false;
+    visit.acceptedOperation = operation.sequence;
+    return true;
+  }, []);
+
   const close = useCallback(() => {
     const a = audioRef.current;
     if (a) {
@@ -94,6 +146,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.removeAttribute("src");
       a.load();
     }
+    currentRef.current = null;
+    currentEpisodeVisitRef.current = null;
     setCurrent(null);
     setPlaying(false);
     setInitializing(false);
@@ -101,13 +155,134 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setPosition(0);
     setDuration(0);
     setPendingAdSkip(null);
+    setShowNotesGenerating(false);
+    setShowNotesError(null);
   }, [flushPosition]);
+
+  const requestShowNotes = useCallback((episodeID: number) => {
+    const operation = beginVisitOperation(episodeID);
+    if (!operation || !acceptVisitOperation(operation)) return;
+
+    setShowNotesGenerating(true);
+    setShowNotesError(null);
+
+    let request = showNotesRequestsRef.current.get(episodeID);
+    if (!request) {
+      request = Api.generateShowNotes(episodeID);
+      showNotesRequestsRef.current.set(episodeID, request);
+      void request.then(
+        () => {
+          if (showNotesRequestsRef.current.get(episodeID) === request) {
+            showNotesRequestsRef.current.delete(episodeID);
+          }
+        },
+        () => {
+          if (showNotesRequestsRef.current.get(episodeID) === request) {
+            showNotesRequestsRef.current.delete(episodeID);
+          }
+        },
+      );
+    }
+
+    void request
+      .then((notes) => {
+        if (!acceptVisitOperation(operation)) return;
+        setCurrent((prev) =>
+          prev?.id === episodeID ? { ...prev, show_notes: notes } : prev,
+        );
+      })
+      .catch(() => {
+        if (!acceptVisitOperation(operation)) return;
+        setShowNotesError("Show notes could not be generated. Please try again.");
+      })
+      .finally(() => {
+        if (acceptVisitOperation(operation)) setShowNotesGenerating(false);
+      });
+  }, [acceptVisitOperation, beginVisitOperation]);
+
+  const loadEpisodeDetail = useCallback(
+    (episodeID: number) => {
+      const operation = beginVisitOperation(episodeID);
+      if (!operation) return;
+      void Api.episode(episodeID)
+        .then((detail) => {
+          if (!acceptVisitOperation(operation)) return;
+          setCurrent((prev) => (prev?.id === episodeID ? { ...prev, ...detail } : prev));
+          if (detail.show_notes?.length) {
+            setShowNotesError(null);
+            setShowNotesGenerating(false);
+          } else if (detail.ad_removal_stage === "ready") {
+            requestShowNotes(episodeID);
+          }
+        })
+        .catch(() => {});
+    },
+    [acceptVisitOperation, beginVisitOperation, requestShowNotes],
+  );
+
+  useEffect(() => {
+    const episodeID = current?.id;
+    const stage = current?.ad_removal_stage;
+    const visitGeneration = currentEpisodeVisitRef.current?.generation;
+    if (
+      episodeID == null
+      || current?.show_notes?.length
+      || stage == null
+      || !ACTIVE_AD_REMOVAL_STAGES.has(stage)
+    ) return;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    const schedule = () => {
+      timer = window.setTimeout(run, SHOW_NOTES_STATUS_POLL_MS);
+    };
+    const run = () => {
+      void Api.adRemovalStatuses([episodeID])
+        .then(({ items }) => {
+          if (
+            cancelled
+            || currentRef.current?.id !== episodeID
+            || currentEpisodeVisitRef.current?.generation !== visitGeneration
+          ) return false;
+          const status = items.find((item) => item.id === episodeID);
+          if (!status) return true;
+          setCurrent((previous) => previous?.id === episodeID ? {
+            ...previous,
+            ad_removal_state: status.ad_removal_state,
+            ad_removal_action: status.ad_removal_action,
+            ad_removal_stage: status.ad_removal_stage,
+            ad_removal_blocking_reason: status.ad_removal_blocking_reason,
+          } : previous);
+          if (status.ad_removal_stage === "ready") {
+            requestShowNotes(episodeID);
+            return false;
+          }
+          return status.ad_removal_stage != null
+            && ACTIVE_AD_REMOVAL_STAGES.has(status.ad_removal_stage);
+        })
+        .catch(() => true)
+        .then((shouldContinue) => {
+          if (!cancelled && shouldContinue) schedule();
+        });
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [current?.id, current?.ad_removal_stage, current?.show_notes?.length, requestShowNotes]);
+
+  const retryShowNotes = useCallback(() => {
+    const episodeID = currentRef.current?.id;
+    if (episodeID != null) requestShowNotes(episodeID);
+  }, [requestShowNotes]);
 
   const playEpisode = useCallback(
     (item: EpisodeItem, context: PlayContext) => {
       if (currentRef.current?.id === item.id) {
         contextRef.current = context;
         setExpanded(true);
+        loadEpisodeDetail(item.id);
         return;
       }
       flushPosition();
@@ -115,10 +290,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       contextRef.current = context;
       setCurrent(item);
       currentRef.current = item;
+      currentEpisodeVisitRef.current = {
+        episodeID: item.id,
+        generation: ++nextEpisodeVisitGenerationRef.current,
+        nextOperation: 0,
+        acceptedOperation: 0,
+      };
       setExpanded(true);
       setPosition(item.position_secs);
       setDuration(item.duration_secs ?? 0);
       setPendingAdSkip(null);
+      setShowNotesGenerating(false);
+      setShowNotesError(null);
       setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
       resumeAtRef.current = a.loadSource ? 0 : resumeAt;
@@ -135,17 +318,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setInitializing(false);
       });
       updateMediaSessionMetadata(metadata);
-      // Upgrade to the full detail (show notes) in the background.
-      void Api.episode(item.id)
-        .then((detail) => {
-          if (currentRef.current?.id === item.id) {
-            setCurrent((prev) => (prev && prev.id === item.id ? { ...prev, ...detail } : prev));
-          }
-        })
-        .catch(() => {});
+      // Upgrade to full detail, then generate chapters once for ready transcripts.
+      loadEpisodeDetail(item.id);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [flushPosition],
+    [flushPosition, loadEpisodeDetail],
   );
 
   const handleEnded = useCallback(async () => {
@@ -156,17 +333,34 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!cur) return;
     endInFlightRef.current = true;
     const completedId = cur.id;
+    console.log(
+      `playback_ended_accepted episode_id=${completedId} autoplay=${autoplayRef.current} context=${contextRef.current}`,
+    );
     try {
       try {
         await Api.markPlayed(completedId);
+        console.log(`playback_mark_played_succeeded episode_id=${completedId}`);
         emitEpisodesChanged();
-      } catch {
+      } catch (error) {
+        console.warn(
+          `playback_mark_played_failed episode_id=${completedId} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+        );
         // offline mark failure shouldn't wedge the player
       }
       // User (or a prior completion) already moved on — do not chain from a stale end.
       if (currentRef.current?.id !== completedId) return;
       if (autoplayRef.current) {
-        const next = await Api.next(completedId, contextRef.current).catch(() => null);
+        let next: EpisodeItem | null = null;
+        try {
+          next = await Api.next(completedId, contextRef.current);
+          console.log(
+            `playback_next_resolved episode_id=${completedId} next_episode_id=${next?.id ?? "none"} context=${contextRef.current}`,
+          );
+        } catch (error) {
+          console.warn(
+            `playback_next_failed episode_id=${completedId} context=${contextRef.current} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+          );
+        }
         if (currentRef.current?.id !== completedId) return;
         if (next) {
           playEpisode(next, contextRef.current);
@@ -286,7 +480,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const seekTo = useCallback((secs: number) => {
     const a = audioRef.current;
-    if (!a) return;
+    if (!a || !Number.isFinite(secs)) return;
     a.currentTime = Math.max(0, secs);
     setPosition(a.currentTime);
   }, []);
@@ -358,6 +552,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       autoplay,
       cast,
       pendingAdSkip,
+      showNotesGenerating,
+      showNotesError,
       playEpisode,
       toggle,
       seekTo,
@@ -368,6 +564,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setExpanded,
       setCastOutput,
       undoAdSkip,
+      retryShowNotes,
       markPlayedAndClose,
       close,
     }),
@@ -382,6 +579,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       autoplay,
       cast,
       pendingAdSkip,
+      showNotesGenerating,
+      showNotesError,
       playEpisode,
       toggle,
       seekTo,
@@ -391,6 +590,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setAutoplay,
       setCastOutput,
       undoAdSkip,
+      retryShowNotes,
       markPlayedAndClose,
       close,
     ],

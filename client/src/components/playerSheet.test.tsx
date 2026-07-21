@@ -22,7 +22,31 @@ function setup() {
     "PUT /api/settings": null,
     "GET /api/episodes/1": {
       ...episode({ id: 1, title: "Sheet Episode" }),
-      notes_html: "<p>The show notes</p>",
+      notes_html: "<p>Publisher-provided notes should stay hidden.</p>",
+      show_notes: [
+        {
+          id: "segment-topic",
+          start_time: 125.25,
+          title: "A new direction",
+          summary: "The discussion moves to the next major topic.",
+        },
+        {
+          id: "segment-closing",
+          start_time: 240,
+          title: "Closing lessons",
+          summary: "The episode closes with practical lessons.",
+        },
+        {
+          id: "segment-long-form",
+          start_time: 3661,
+          title: "Long-form takeaway",
+          summary: "A final takeaway after the first hour.",
+        },
+      ],
+      ad_markers: [
+        { id: "ad-range-1", start_time: 42.5 },
+        { id: "ad-range-2", start_time: 60 },
+      ],
       archived_at: null,
     },
     "PUT /api/episodes/1/position": null,
@@ -56,7 +80,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     // expanded sheet
     const sheet = await screen.findByRole("dialog", { name: "Player" });
     expect(sheet).toBeInTheDocument();
-    await screen.findByText("The show notes");
+    expect(screen.queryByText("Publisher-provided notes should stay hidden.")).not.toBeInTheDocument();
 
     // collapse -> mini player visible
     await user.click(screen.getByRole("button", { name: "Minimize player" }));
@@ -133,12 +157,66 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.getByText("-8:00")).toBeInTheDocument();
   });
 
+  it("seeks to a generated show-note timestamp", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    const audio = FakeAudio.last();
+
+    await user.click(screen.getByRole("button", { name: "2:05 A new direction" }));
+
+    expect(audio.currentTime).toBe(125.25);
+  });
+
+  it("links to the next generated chapter while excluding Ads markers", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    const audio = FakeAudio.last();
+
+    const firstNext = screen.getByRole("button", { name: "Next: A new direction (0hrs 2mins)" });
+    expect(firstNext.querySelector(".next-chapter-prefix")).toHaveTextContent("Next:");
+    expect(firstNext.querySelector(".next-chapter-time")).toHaveTextContent("(0hrs 2mins)");
+    expect(screen.queryByRole("button", { name: /Next: Ads/ })).not.toBeInTheDocument();
+    await user.click(firstNext);
+    expect(audio.currentTime).toBe(125.25);
+    const closing = screen.getByRole("button", { name: "Next: Closing lessons (0hrs 4mins)" });
+    await user.click(closing);
+    expect(screen.getByRole("button", { name: "Next: Long-form takeaway (1hr 1min)" })).toBeInTheDocument();
+  });
+
+  it("places playback options above Chapters and collapses consecutive ad markers", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    const sheet = await screen.findByRole("dialog", { name: "Player" });
+
+    const playOn = screen.getByText("Play on");
+    const chapters = screen.getByRole("heading", { name: "Chapters" });
+    expect(playOn.compareDocumentPosition(chapters) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const markPlayed = screen.getByRole("button", { name: "Mark played" });
+    const autoplay = screen.getByRole("switch", { name: "Autoplay next" });
+    expect(markPlayed.parentElement).toBe(autoplay.parentElement);
+    expect(markPlayed).toHaveClass("chip", "mark-played-btn");
+    expect(autoplay.querySelector(".autoplay-toggle-track")).toBeTruthy();
+    expect(autoplay.querySelector(".autoplay-toggle-thumb")).toBeTruthy();
+
+    const ad = screen.getByRole("button", { name: "0:42 Ads" });
+    expect(ad).toHaveTextContent("0:42");
+    expect(ad).toHaveTextContent("Ads");
+    await user.click(ad);
+    expect(FakeAudio.last().currentTime).toBe(42.5);
+    expect(sheet.querySelectorAll(".show-note.is-ad")).toHaveLength(1);
+  });
+
   it("autoplay switch persists the setting", async () => {
     const { calls, user } = setup();
     await user.click(screen.getByText("start"));
     await screen.findByRole("dialog", { name: "Player" });
 
-    await user.click(screen.getByRole("switch"));
+    const autoplay = screen.getByRole("switch", { name: "Autoplay next" });
+    expect(autoplay).toHaveAttribute("aria-checked", "true");
+    await user.click(autoplay);
+    expect(autoplay).toHaveAttribute("aria-checked", "false");
     const put = calls.filter((c) => c.key === "PUT /api/settings").at(-1);
     expect(JSON.parse(String(put?.init.body))).toEqual({ speed: 1, autoplay: false });
   });
@@ -164,7 +242,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.queryByRole("dialog", { name: "Player" })).not.toBeInTheDocument();
   });
 
-  it("shows one pending skipped-duration action and sends Undo to native playback", async () => {
+  it("shows skipped-duration Undo as a 10-second top-banner toast", async () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));
     await screen.findByRole("dialog", { name: "Player" });
@@ -181,11 +259,37 @@ describe("PlayerSheet + MiniPlayer", () => {
       },
     })));
 
-    expect(screen.getByText("Skipped 0:20")).toBeInTheDocument();
+    const toast = screen.getByRole("status", { name: "Ad skip notification" });
+    expect(toast).toHaveClass("top-confirmation", "is-visible");
+    expect(toast).toHaveTextContent("Skipped 0:20");
     await user.click(screen.getByRole("button", { name: "Undo skipped section" }));
     expect(undo).toHaveBeenCalledOnce();
 
     act(() => audio.dispatchEvent(new CustomEvent("adSkipUndone")));
     expect(screen.queryByText("Skipped 0:20")).not.toBeInTheDocument();
+  });
+
+  it("dismisses the ad-skip toast after ten seconds", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    const audio = FakeAudio.last();
+    vi.useFakeTimers();
+
+    act(() => audio.dispatchEvent(new CustomEvent("adSkip", {
+      detail: {
+        rangeId: "range-timed",
+        rangeStart: 10,
+        rangeEnd: 30,
+        skippedDuration: 20,
+      },
+    })));
+    expect(screen.getByRole("status", { name: "Ad skip notification" })).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(9_840));
+    expect(screen.getByRole("status", { name: "Ad skip notification" })).toHaveClass("is-leaving");
+    act(() => vi.advanceTimersByTime(160));
+    expect(screen.queryByRole("status", { name: "Ad skip notification" })).not.toBeInTheDocument();
+    vi.useRealTimers();
   });
 });

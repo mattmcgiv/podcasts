@@ -622,6 +622,12 @@ final class PodsWebViewController: UIViewController {
             name: .podsFeedRefreshCompleted,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(feedRefreshCompleted),
+            name: .podsFeedRefreshStateChanged,
+            object: nil
+        )
         beginBootRecovery(reason: "initial-load", resetAttempts: true)
     }
 

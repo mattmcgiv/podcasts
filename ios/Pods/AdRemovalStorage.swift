@@ -265,6 +265,11 @@ struct AdRemovalDownloadFinalizer {
                 || contentType.isEmpty else {
             throw AdRemovalDownloadError.unsupportedContentType(contentType)
         }
+        _ = try jobStore.requirePipelineJob(
+            jobID: job.id,
+            episodeID: job.episodeID,
+            expected: [.downloading]
+        )
         let byteCount = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? 0
         try storagePolicy.authorizeLargeWrite(anticipatedBytes: byteCount)
         let fileExtension = Self.fileExtension(contentType: contentType, responseURL: response.url)
@@ -273,8 +278,16 @@ struct AdRemovalDownloadFinalizer {
             episodeID: job.episodeID,
             fileExtension: fileExtension
         )
-        _ = try jobStore.recordAudioArtifact(jobID: job.id, artifact: artifact)
-        _ = try jobStore.transition(jobID: job.id, to: .downloaded)
+        do {
+            _ = try jobStore.recordAudioArtifact(jobID: job.id, artifact: artifact)
+            _ = try jobStore.transition(jobID: job.id, to: .downloaded)
+        } catch {
+            // The episode may have been marked played or globally cleaned up
+            // while the background transfer was being finalized. Never leave
+            // a newly installed orphan behind when its durable job rejects it.
+            try? artifactStore.removeArtifact(relativePath: artifact.relativePath)
+            throw error
+        }
         try? diagnostics?.record(
             eventName: "audio_download_completed",
             severity: .notice,

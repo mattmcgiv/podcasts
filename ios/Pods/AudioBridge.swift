@@ -145,6 +145,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var macStreamURL: URL?
     private var adRemovalSkipSession = AdRemovalSkipSession()
     private var automaticSkipInFlight = false
+    private var automaticSkipLifecycle = AdRemovalSkipLifecycle()
+    private var macAutomaticSkipState = AdRemovalMacSkipState()
+    private var macSupersedingSeekFence: AdRemovalMacSupersedingSeekFence?
+    private var macAutomaticSkipRetryWorkItem: DispatchWorkItem?
+    private let macAutomaticSkipRetryDelay: TimeInterval = 2
+    private let macAutomaticSkipMaximumAttempts = 3
 
     private var output: PlaybackOutput = .local
     /// User's chosen sink. Distinct from connection liveness — stays `.mac` while we reconnect.
@@ -259,6 +265,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Output switching
 
     private func setOutput(_ next: PlaybackOutput, id: Int, resume: Bool) {
+        invalidateAutomaticSkip()
         preferredOutput = next
         let position = nowPlayingPosition
         let wasPlaying = !nowPlayingPaused
@@ -317,7 +324,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                     return
                 }
                 self.updateCastKeepAlive()
-                guard status.connected else { return }
+                guard status.connected else {
+                    self.invalidateAutomaticSkip()
+                    return
+                }
                 // Never leave local episode audio running once Mac is reachable.
                 self.stopLocalPlayer(record: false)
                 self.output = .mac
@@ -439,6 +449,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             // Keep progress durable. Do NOT auto-start local while user still wants Mac —
             // that caused dual playback when Mac kept playing after a flaky TCP drop.
             recordCurrentProgress(force: true)
+            invalidateAutomaticSkip()
             if preferredOutput == .mac {
                 output = .mac
                 stopLocalPlayer(record: false)
@@ -491,6 +502,29 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 "paused": paused.map { $0 ? "true" : "false" } ?? "unknown"
             ]
         )
+
+        // Decide before mutating the phone-side clock. This keeps a queued pre-seek
+        // Mac timeupdate from regressing now-playing state after the target was seen.
+        if type == "timeupdate", let position {
+            if var fence = macSupersedingSeekFence {
+                switch fence.observe(position: position) {
+                case .suppress:
+                    macSupersedingSeekFence = fence
+                    return
+                case .acknowledged:
+                    macSupersedingSeekFence = fence
+                case .settled:
+                    macSupersedingSeekFence = nil
+                }
+            }
+            if applyAutomaticSkipIfNeeded(
+                id: currentId,
+                position: position,
+                macTransportEventType: type
+            ) {
+                return
+            }
+        }
 
         if let position {
             nowPlayingPosition = max(0, position)
@@ -559,6 +593,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             }
             emit(type: "state", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: paused)
         case "error":
+            invalidateAutomaticSkip()
             macSourceFailed = true
             nowPlayingPaused = true
             if let position {
@@ -586,7 +621,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         macSourceFailed = false
         adRemovalRangeServer?.revoke()
         adRemovalSkipSession.clear()
-        automaticSkipInFlight = false
+        invalidateAutomaticSkip()
         if let episodeID, let adRemovalPlaybackProvider {
             do {
                 if let downloaded = try adRemovalPlaybackProvider.downloadedEpisode(episodeID: episodeID) {
@@ -751,11 +786,16 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func seek(id: Int, seconds: Double) {
         let safe = max(0, seconds)
+        // A user seek supersedes any asynchronous automatic seek completion.
+        invalidateAutomaticSkip()
         if applyAutomaticSkipIfNeeded(id: id, position: safe) {
             return
         }
         nowPlayingPosition = safe
         if preferredOutput == .mac || output == .mac {
+            macSupersedingSeekFence = AdRemovalMacSupersedingSeekFence(
+                targetPosition: safe
+            )
             CastSession.shared.sendCommand(["cmd": "seek", "seconds": safe])
             updateNowPlaying(position: safe)
             recordPlaybackProgress(position: safe, force: true, allowRegress: true)
@@ -819,7 +859,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         macSourceFailed = false
         adRemovalRangeServer?.revoke()
         adRemovalSkipSession.clear()
-        automaticSkipInFlight = false
+        invalidateAutomaticSkip()
         playbackSessionID = nil
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
@@ -897,14 +937,28 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @discardableResult
-    private func applyAutomaticSkipIfNeeded(id: Int, position: Double) -> Bool {
+    private func applyAutomaticSkipIfNeeded(
+        id: Int,
+        position: Double,
+        macTransportEventType: String? = nil
+    ) -> Bool {
+        if output == .mac || preferredOutput == .mac {
+            return applyMacAutomaticSkipIfNeeded(
+                id: id,
+                position: position,
+                transportEventType: macTransportEventType
+            )
+        }
+
         guard !automaticSkipInFlight,
               downloadedEpisode?.manifestReady == true,
-              (output == .mac || player != nil),
-              let decision = adRemovalSkipSession.enter(position: position) else {
+              player != nil else {
             return false
         }
+        let decision = adRemovalSkipSession.enter(position: position)
+        guard let decision else { return false }
         automaticSkipInFlight = true
+        let lifecycleToken = automaticSkipLifecycle.generation
         let started = Date()
         recordDiagnostic(
             eventName: "playback_ad_range_entered",
@@ -917,50 +971,220 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             ]
         )
 
-        let completed: (Bool) -> Void = { [weak self] succeeded in
-            guard let self else { return }
-            self.automaticSkipInFlight = false
-            guard succeeded else {
-                self.recordDiagnostic(
-                    eventName: "playback_ad_seek_failed",
-                    severity: .warning,
-                    fields: ["range_id": decision.rangeID]
-                )
-                return
-            }
-            self.nowPlayingPosition = decision.targetPosition
-            self.updateNowPlaying(position: decision.targetPosition)
-            self.recordPlaybackProgress(
-                position: decision.targetPosition,
-                force: true,
-                allowRegress: false
-            )
-            self.emitAdRemovalEvent(type: "adSkip", id: id, decision: decision)
-            self.recordDiagnostic(
-                eventName: "playback_ad_seek_completed",
-                severity: .notice,
-                fields: [
-                    "range_id": decision.rangeID,
-                    "latency_ms": String(Int(Date().timeIntervalSince(started) * 1_000))
-                ]
-            )
-        }
-
-        if output == .mac || preferredOutput == .mac {
-            CastSession.shared.sendCommand(["cmd": "seek", "seconds": decision.targetPosition])
-            completed(true)
-        } else if let player {
+        if let player {
             player.seek(
                 to: CMTime(seconds: decision.targetPosition, preferredTimescale: 600),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
-                completionHandler: completed
+                completionHandler: { [weak self] succeeded in
+                    self?.finishAutomaticSkip(
+                        id: id,
+                        decision: decision,
+                        started: started,
+                        lifecycleToken: lifecycleToken,
+                        succeeded: succeeded
+                    )
+                }
             )
         } else {
-            completed(false)
+            finishAutomaticSkip(
+                id: id,
+                decision: decision,
+                started: started,
+                lifecycleToken: lifecycleToken,
+                succeeded: false
+            )
             return false
         }
         return true
+    }
+
+    private func applyMacAutomaticSkipIfNeeded(
+        id: Int,
+        position: Double,
+        transportEventType: String?
+    ) -> Bool {
+        guard downloadedEpisode?.manifestReady == true,
+              !macSourceFailed,
+              CastSession.shared.currentStatus.connected,
+              transportEventType == nil || transportEventType == "timeupdate" else {
+            return false
+        }
+        let lifecycleToken = automaticSkipLifecycle.generation
+        switch macAutomaticSkipState.observe(
+            position: position,
+            lifecycleToken: lifecycleToken
+        ) {
+        case .suppress:
+            return true
+        case .completed(let attempt):
+            cancelMacAutomaticSkipRetry()
+            finishAutomaticSkip(
+                id: id,
+                decision: attempt.decision,
+                started: attempt.startedAt,
+                lifecycleToken: attempt.lifecycleToken,
+                succeeded: true
+            )
+            return false
+        case .passThrough:
+            break
+        }
+
+        let decision: AdRemovalSkipDecision?
+        if let transportEventType {
+            decision = adRemovalSkipSession.enterMacTransportEvent(
+                type: transportEventType,
+                position: position
+            )
+        } else {
+            decision = adRemovalSkipSession.enter(position: position)
+        }
+        guard let decision,
+              let attempt = macAutomaticSkipState.begin(
+                  decision: decision,
+                  lifecycleToken: lifecycleToken,
+                  now: Date()
+              ) else {
+            return false
+        }
+        recordDiagnostic(
+            eventName: "playback_ad_range_entered",
+            severity: .notice,
+            fields: [
+                "range_id": decision.rangeID,
+                "original_position": String(position),
+                "seek_target": String(decision.targetPosition),
+                "output": output.rawValue
+            ]
+        )
+        sendMacAutomaticSkipAttempt(id: id, attempt: attempt)
+        return true
+    }
+
+    private func sendMacAutomaticSkipAttempt(id: Int, attempt: AdRemovalMacSkipAttempt) {
+        scheduleMacAutomaticSkipRetry(id: id, attempt: attempt)
+        CastSession.shared.sendCommand([
+            "cmd": "seek",
+            "seconds": attempt.decision.targetPosition
+        ]) { [weak self] succeeded in
+            guard let self,
+                  self.automaticSkipLifecycle.accepts(attempt.lifecycleToken),
+                  self.macAutomaticSkipState.acceptsDelivery(
+                      attemptToken: attempt.token,
+                      lifecycleToken: attempt.lifecycleToken
+                  ),
+                  !succeeded else {
+                return
+            }
+            self.recordDiagnostic(
+                eventName: "playback_ad_seek_send_failed",
+                severity: .warning,
+                fields: [
+                    "range_id": attempt.decision.rangeID,
+                    "attempt": String(attempt.attemptNumber)
+                ]
+            )
+        }
+    }
+
+    private func scheduleMacAutomaticSkipRetry(id: Int, attempt: AdRemovalMacSkipAttempt) {
+        cancelMacAutomaticSkipRetry()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.automaticSkipLifecycle.accepts(attempt.lifecycleToken) else {
+                return
+            }
+            guard CastSession.shared.currentStatus.connected else {
+                self.invalidateAutomaticSkip()
+                return
+            }
+            let transition = self.macAutomaticSkipState.retry(
+                attemptToken: attempt.token,
+                lifecycleToken: attempt.lifecycleToken,
+                now: Date(),
+                maximumAttempts: self.macAutomaticSkipMaximumAttempts
+            )
+            switch transition {
+            case .ignored:
+                return
+            case .exhausted(let failed):
+                self.macAutomaticSkipRetryWorkItem = nil
+                self.recordDiagnostic(
+                    eventName: "playback_ad_seek_failed",
+                    severity: .warning,
+                    fields: [
+                        "range_id": failed.decision.rangeID,
+                        "attempts": String(failed.attemptNumber),
+                        "reason": "mac_ack_timeout"
+                    ]
+                )
+            case .retry(let retry):
+                self.recordDiagnostic(
+                    eventName: "playback_ad_seek_retry",
+                    severity: .warning,
+                    fields: [
+                        "range_id": retry.decision.rangeID,
+                        "attempt": String(retry.attemptNumber)
+                    ]
+                )
+                self.sendMacAutomaticSkipAttempt(id: id, attempt: retry)
+            }
+        }
+        macAutomaticSkipRetryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + macAutomaticSkipRetryDelay,
+            execute: workItem
+        )
+    }
+
+    private func cancelMacAutomaticSkipRetry() {
+        macAutomaticSkipRetryWorkItem?.cancel()
+        macAutomaticSkipRetryWorkItem = nil
+    }
+
+    private func finishAutomaticSkip(
+        id: Int,
+        decision: AdRemovalSkipDecision,
+        started: Date,
+        lifecycleToken: UInt64,
+        succeeded: Bool
+    ) {
+        guard automaticSkipLifecycle.accepts(lifecycleToken) else { return }
+        automaticSkipInFlight = false
+        guard succeeded else {
+            recordDiagnostic(
+                eventName: "playback_ad_seek_failed",
+                severity: .warning,
+                fields: ["range_id": decision.rangeID]
+            )
+            return
+        }
+        adRemovalSkipSession.didComplete(decision)
+        nowPlayingPosition = decision.targetPosition
+        updateNowPlaying(position: decision.targetPosition)
+        recordPlaybackProgress(
+            position: decision.targetPosition,
+            force: true,
+            allowRegress: false
+        )
+        emitAdRemovalEvent(type: "adSkip", id: id, decision: decision)
+        recordDiagnostic(
+            eventName: "playback_ad_seek_completed",
+            severity: .notice,
+            fields: [
+                "range_id": decision.rangeID,
+                "latency_ms": String(Int(Date().timeIntervalSince(started) * 1_000))
+            ]
+        )
+    }
+
+    private func invalidateAutomaticSkip() {
+        automaticSkipLifecycle.invalidate()
+        automaticSkipInFlight = false
+        macAutomaticSkipState.invalidate()
+        macSupersedingSeekFence = nil
+        cancelMacAutomaticSkipRetry()
     }
 
     private func undoPendingAdSkip(id: Int) {
@@ -975,9 +1199,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 rangeID: decision.rangeID
             )
             adRemovalSkipSession.didUndo(rangeID: result.disabledRangeID)
-            automaticSkipInFlight = false
+            invalidateAutomaticSkip()
             nowPlayingPosition = result.seekPosition
             if output == .mac || preferredOutput == .mac {
+                macSupersedingSeekFence = AdRemovalMacSupersedingSeekFence(
+                    targetPosition: result.seekPosition
+                )
                 CastSession.shared.sendCommand(["cmd": "seek", "seconds": result.seekPosition])
             } else {
                 player?.seek(
@@ -1046,12 +1273,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     @objc private func playerItemEnded(_ notification: Notification) {
-        guard output == .local else { return }
+        let episodeLabel = currentEpisodeID.map(String.init) ?? "none"
+        guard output == .local else {
+            PodsLog("playback_native_ended_ignored reason=non_local output=\(output.rawValue) episode_id=\(episodeLabel) player_id=\(currentId)")
+            return
+        }
         // Only the *current* AVPlayer item may complete — a replaced item's end
         // notification must not mark/skip the newly loaded episode.
         let endedItem = notification.object as AnyObject?
         let currentItem = player?.currentItem as AnyObject?
-        guard PlaybackProgressPolicy.isSameObject(endedItem, currentItem) else { return }
+        guard PlaybackProgressPolicy.isSameObject(endedItem, currentItem) else {
+            PodsLog("playback_native_ended_ignored reason=stale_item episode_id=\(episodeLabel) player_id=\(currentId)")
+            return
+        }
+        PodsLog("playback_native_ended_observed episode_id=\(episodeLabel) player_id=\(currentId)")
         recordCurrentProgress(force: true)
         emit(type: "ended", id: currentId, paused: true)
     }
@@ -1397,10 +1632,33 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else {
+            if type == "ended" {
+                let episodeLabel = currentEpisodeID.map(String.init) ?? "none"
+                PodsLog("playback_ended_bridge_failed reason=serialization episode_id=\(episodeLabel) player_id=\(id)")
+            }
             return
         }
+        let episodeLabel: String
+        if let episodeID = payload["episodeId"] {
+            episodeLabel = String(describing: episodeID)
+        } else {
+            episodeLabel = "none"
+        }
         DispatchQueue.main.async { [weak self] in
-            self?.webView?.evaluateJavaScript("window.PodsAudioBridge && window.PodsAudioBridge.emit(\(json));")
+            guard let self, let webView = self.webView else {
+                if type == "ended" {
+                    PodsLog("playback_ended_bridge_failed reason=webview_unavailable episode_id=\(episodeLabel) player_id=\(id)")
+                }
+                return
+            }
+            webView.evaluateJavaScript("Boolean(window.PodsAudioBridge && window.PodsAudioBridge.emit(\(json)))") { _, error in
+                guard type == "ended" else { return }
+                if let error {
+                    PodsLog("playback_ended_bridge_failed reason=evaluate_javascript episode_id=\(episodeLabel) player_id=\(id) error=\(error.localizedDescription)")
+                } else {
+                    PodsLog("playback_ended_bridge_delivered episode_id=\(episodeLabel) player_id=\(id)")
+                }
+            }
         }
     }
 

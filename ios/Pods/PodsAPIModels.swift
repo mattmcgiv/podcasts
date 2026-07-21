@@ -38,6 +38,13 @@ struct EpisodeDetail: Codable, Equatable {
     let ad_removal_action: String?
     let ad_removal_stage: String?
     let ad_removal_blocking_reason: String?
+    var show_notes: [EpisodeShowNote] = []
+    var ad_markers: [EpisodeAdMarker] = []
+}
+
+struct EpisodeAdMarker: Codable, Equatable {
+    let id: String
+    let start_time: Double
 }
 
 struct Show: Codable, Equatable {
@@ -132,13 +139,15 @@ struct RefreshStatus: Codable, Equatable {
     let last_source: String?
     let last_refreshed: Int
     let last_errors: Int
+    let is_refreshing: Bool
 
     static let empty = RefreshStatus(
         last_attempt_at: nil,
         last_success_at: nil,
         last_source: nil,
         last_refreshed: 0,
-        last_errors: 0
+        last_errors: 0,
+        is_refreshing: false
     )
 }
 
@@ -150,6 +159,7 @@ struct OPMLImportResult: Codable, Equatable {
 
 enum PodsBackendError: Error, CustomStringConvertible {
     case invalid(String)
+    case forbidden(String)
     case notFound
     case conflict(String)
     case database(String)
@@ -157,7 +167,7 @@ enum PodsBackendError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .invalid(let message), .conflict(let message), .database(let message), .upstream(let message):
+        case .invalid(let message), .forbidden(let message), .conflict(let message), .database(let message), .upstream(let message):
             return message
         case .notFound:
             return "not found"
@@ -166,6 +176,8 @@ enum PodsBackendError: Error, CustomStringConvertible {
 
     var statusCode: Int {
         switch self {
+        case .forbidden:
+            return 403
         case .invalid:
             return 422
         case .notFound:

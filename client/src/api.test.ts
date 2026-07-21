@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Api } from "./api";
 import { episode, HttpError, installApi, page } from "./test/mockApi";
 
@@ -23,8 +23,24 @@ describe("request wrapper", () => {
   });
 
   it("surfaces server error messages", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     installApi({ "POST /api/shows": new HttpError(409, { error: "already subscribed" }) });
     await expect(Api.subscribe("https://x.example/f")).rejects.toThrow("already subscribed");
+    expect(warning).toHaveBeenCalledWith(
+      "api_http_failed method=POST target=/api/shows status=409 message=already subscribed",
+    );
+    warning.mockRestore();
+  });
+
+  it("logs transport failures with method and target", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Load failed"));
+
+    await expect(Api.recent()).rejects.toThrow("Load failed");
+    expect(warning).toHaveBeenCalledWith(
+      "api_fetch_failed method=GET target=/api/recent?offset=0 error=TypeError: Load failed",
+    );
+    warning.mockRestore();
   });
 
   it("handles 204 and raw text responses", async () => {

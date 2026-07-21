@@ -84,7 +84,8 @@ final class AdRemovalStorageTests: XCTestCase {
         let database = try makeDatabase(in: directory)
         let jobStore = AdRemovalJobStore(database: database, now: { 1_000 })
         let episodeID = try XCTUnwrap(database.scalarInt64("SELECT id FROM episodes LIMIT 1"))
-        let job = try jobStore.enqueue(episodeID: episodeID)
+        let queued = try jobStore.enqueue(episodeID: episodeID)
+        let job = try jobStore.transition(jobID: queued.id, to: .downloading)
         let artifactStore = try AdRemovalArtifactStore(rootURL: directory.appendingPathComponent("AdRemoval"))
         let resumeData = Data(repeating: 0x5a, count: 4_096)
 

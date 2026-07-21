@@ -128,15 +128,24 @@ final class CastSession {
         }
     }
 
-    func sendCommand(_ body: [String: Any]) {
+    func sendCommand(_ body: [String: Any], completion: ((Bool) -> Void)? = nil) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                Self.completeCommand(completion, succeeded: false)
+                return
+            }
+            guard self.status.connected else {
+                Self.completeCommand(completion, succeeded: false)
+                return
+            }
             var payload = body
             payload["v"] = CastProtocol.version
             if let pairingToken {
                 payload["token"] = pairingToken
             }
-            self.sendRaw(payload)
+            self.sendRaw(payload) { succeeded in
+                Self.completeCommand(completion, succeeded: succeeded)
+            }
         }
     }
 
@@ -274,6 +283,7 @@ final class CastSession {
             if message.contains("denied") {
                 pairingToken = nil
             }
+            onEvent?(body)
         case "timeupdate", "play", "pause", "loadedmetadata", "ended", "state":
             onEvent?(body)
         default:
@@ -283,9 +293,21 @@ final class CastSession {
         }
     }
 
-    private func sendRaw(_ object: [String: Any]) {
-        guard let connection, let data = CastProtocol.encodeLine(object) else { return }
-        connection.send(content: data, completion: .contentProcessed { _ in })
+    private func sendRaw(_ object: [String: Any], completion: ((Bool) -> Void)? = nil) {
+        guard let connection, let data = CastProtocol.encodeLine(object) else {
+            completion?(false)
+            return
+        }
+        connection.send(content: data, completion: .contentProcessed { error in
+            completion?(error == nil)
+        })
+    }
+
+    private static func completeCommand(_ completion: ((Bool) -> Void)?, succeeded: Bool) {
+        guard let completion else { return }
+        DispatchQueue.main.async {
+            completion(succeeded)
+        }
     }
 
     private func publishStatus(_ mutate: (inout CastStatus) -> Void) {
