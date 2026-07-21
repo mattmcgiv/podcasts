@@ -969,17 +969,83 @@ final class PodsBackendTests: XCTestCase {
         let rootURL = URL(string: "http://127.0.0.1:18181/")!
         let (htmlData, htmlResponse) = try await URLSession.shared.data(from: rootURL)
         XCTAssertEqual((htmlResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(
+            (htmlResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "x-pods-local-server"),
+            "1"
+        )
         XCTAssertTrue(String(data: htmlData, encoding: .utf8)?.contains("./assets/app.js") == true)
+        XCTAssertEqual(
+            (htmlResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-security-policy"),
+            PodsStaticAssets.contentSecurityPolicy
+        )
+        XCTAssertTrue(PodsStaticAssets.contentSecurityPolicy.contains("default-src 'none'"))
+        XCTAssertTrue(PodsStaticAssets.contentSecurityPolicy.contains("script-src 'self'"))
+        XCTAssertTrue(PodsStaticAssets.contentSecurityPolicy.contains("script-src-attr 'none'"))
+        XCTAssertTrue(PodsStaticAssets.contentSecurityPolicy.contains("style-src-attr 'unsafe-inline'"))
+        XCTAssertTrue(PodsStaticAssets.contentSecurityPolicy.contains("connect-src 'self'"))
+        XCTAssertFalse(PodsStaticAssets.contentSecurityPolicy.contains("script-src 'unsafe-inline'"))
 
         let assetURL = URL(string: "http://127.0.0.1:18181/assets/app.js")!
         let (_, assetResponse) = try await URLSession.shared.data(from: assetURL)
         XCTAssertEqual((assetResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type"), "text/javascript; charset=utf-8")
+        XCTAssertEqual(
+            (assetResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-security-policy"),
+            PodsStaticAssets.contentSecurityPolicy
+        )
 
         let apiURL = URL(string: "http://127.0.0.1:18181/api/recent")!
         let (apiData, apiResponse) = try await URLSession.shared.data(from: apiURL)
         XCTAssertEqual((apiResponse as? HTTPURLResponse)?.statusCode, 200)
         let page = try JSONDecoder().decode(Page<EpisodeItem>.self, from: apiData)
         XCTAssertTrue(page.items.isEmpty)
+    }
+
+    func testLocalServerRejectsInvalidContentLengthsWithoutOverflow() {
+        for value in ["-1", "not-a-number", String(Int.max), "5000000"] {
+            let data = Data("POST /api/test HTTP/1.1\r\nContent-Length: \(value)\r\n\r\n".utf8)
+            switch PodsLocalServer.parseRequest(data) {
+            case .invalid:
+                break
+            case .incomplete, .complete:
+                XCTFail("content-length \(value) must be rejected")
+            }
+        }
+
+        let empty = Data("GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n".utf8)
+        switch PodsLocalServer.parseRequest(empty) {
+        case .complete(let request):
+            XCTAssertTrue(request.body.isEmpty)
+        case .incomplete, .invalid:
+            XCTFail("a valid empty request must parse")
+        }
+    }
+
+    func testLocalServerEnsureReadyRestartsAfterListenerStops() async throws {
+        let harness = try makeHarness()
+        let webRoot = harness.directory.appendingPathComponent("RecoveryWeb", isDirectory: true)
+        try FileManager.default.createDirectory(at: webRoot, withIntermediateDirectories: true)
+        try Data("<!doctype html><p>recovered</p>".utf8)
+            .write(to: webRoot.appendingPathComponent("index.html"))
+
+        let server = PodsLocalServer(
+            backend: harness.backend,
+            staticAssets: PodsStaticAssets(root: webRoot),
+            port: 18182
+        )
+        defer { server.stop() }
+
+        try await server.ensureReady()
+        let rootURL = URL(string: "http://127.0.0.1:18182/")!
+        let (initialData, initialResponse) = try await URLSession.shared.data(from: rootURL)
+        XCTAssertEqual((initialResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(data: initialData, encoding: .utf8), "<!doctype html><p>recovered</p>")
+
+        server.stop()
+
+        try await server.ensureReady()
+        let (recoveredData, recoveredResponse) = try await URLSession.shared.data(from: rootURL)
+        XCTAssertEqual((recoveredResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(data: recoveredData, encoding: .utf8), "<!doctype html><p>recovered</p>")
     }
 
     func testBootstrapReplacesEmptyLiveDatabaseFromSeed() throws {
@@ -1478,6 +1544,25 @@ final class PodsBackendTests: XCTestCase {
 
 @MainActor
 final class PodsWebViewRecoveryTests: XCTestCase {
+    func testBootDocumentTokenIdentifiesOnlyTheCurrentLoopbackDocument() throws {
+        let root = try XCTUnwrap(URL(string: "http://127.0.0.1:18180/?ui=progress-v1"))
+        let current = try XCTUnwrap(PodsBootDocument.url(rootURL: root, token: "attempt-2"))
+
+        XCTAssertTrue(PodsBootDocument.matches(current, rootURL: root, token: "attempt-2"))
+        XCTAssertFalse(PodsBootDocument.matches(current, rootURL: root, token: "attempt-1"))
+        XCTAssertFalse(
+            PodsBootDocument.matches(
+                URL(string: "https://example.com/?pods_boot=attempt-2"),
+                rootURL: root,
+                token: "attempt-2"
+            )
+        )
+        XCTAssertEqual(URLComponents(url: current, resolvingAgainstBaseURL: false)?.queryItems, [
+            URLQueryItem(name: "ui", value: "progress-v1"),
+            URLQueryItem(name: "pods_boot", value: "attempt-2")
+        ])
+    }
+
     private final class FakeWebView: PodsWebViewLoading {
         var url: URL?
         var loadedURLs: [URL] = []
@@ -1507,12 +1592,13 @@ final class PodsWebViewRecoveryTests: XCTestCase {
     }
 
     /// Deterministic delayed-work seam: captures scheduled closures so tests can run them without real time.
+    @MainActor
     private final class ManualScheduler {
         private(set) var scheduledCount = 0
         private(set) var cancelCount = 0
-        private var pending: [() -> Void] = []
+        private var pending: [@MainActor () -> Void] = []
 
-        func schedule(_ work: @escaping () -> Void) -> () -> Void {
+        func schedule(_ work: @escaping @MainActor () -> Void) -> () -> Void {
             scheduledCount += 1
             let index = pending.count
             pending.append(work)
@@ -1549,6 +1635,91 @@ final class PodsWebViewRecoveryTests: XCTestCase {
         webView.url = localRootURL
         webView.nextEvaluationResult = true
         return webView
+    }
+
+    func testActivationPolicyDoesNotRestartAnActiveBootRecovery() {
+        XCTAssertEqual(
+            PodsWebViewActivationPolicy.action(
+                state: .recovering,
+                recoveryAttempt: 1,
+                maximumAttempts: 3
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            PodsWebViewActivationPolicy.action(
+                state: .waitingForUI,
+                recoveryAttempt: 1,
+                maximumAttempts: 3
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            PodsWebViewActivationPolicy.action(
+                state: .ready,
+                recoveryAttempt: 0,
+                maximumAttempts: 3
+            ),
+            .verifyReadyUI
+        )
+    }
+
+    func testUIHealthCheckTimeoutRejectsItsLateCallback() {
+        let scheduler = ManualScheduler()
+        let fence = PodsWebViewHealthCheckFence(scheduleTimeout: scheduler.schedule)
+        let webView = NSObject()
+        var timeoutCount = 0
+        let attempt = fence.begin(
+            token: "boot-1",
+            webViewID: ObjectIdentifier(webView),
+            onTimeout: { timeoutCount += 1 }
+        )
+
+        scheduler.runAllPending()
+
+        XCTAssertEqual(timeoutCount, 1)
+        XCTAssertFalse(
+            fence.accept(
+                attempt,
+                currentToken: "boot-1",
+                currentWebViewID: ObjectIdentifier(webView)
+            )
+        )
+    }
+
+    func testUIHealthCheckRejectsReplacedWebViewAndCancelsAcceptedTimeout() {
+        let scheduler = ManualScheduler()
+        let fence = PodsWebViewHealthCheckFence(scheduleTimeout: scheduler.schedule)
+        let oldWebView = NSObject()
+        let currentWebView = NSObject()
+        var timeoutCount = 0
+        let staleAttempt = fence.begin(
+            token: "boot-1",
+            webViewID: ObjectIdentifier(oldWebView),
+            onTimeout: { timeoutCount += 1 }
+        )
+        let currentAttempt = fence.begin(
+            token: "boot-2",
+            webViewID: ObjectIdentifier(currentWebView),
+            onTimeout: { timeoutCount += 1 }
+        )
+
+        XCTAssertFalse(
+            fence.accept(
+                staleAttempt,
+                currentToken: "boot-2",
+                currentWebViewID: ObjectIdentifier(currentWebView)
+            )
+        )
+        XCTAssertTrue(
+            fence.accept(
+                currentAttempt,
+                currentToken: "boot-2",
+                currentWebViewID: ObjectIdentifier(currentWebView)
+            )
+        )
+        scheduler.runAllPending()
+        XCTAssertEqual(timeoutCount, 0)
     }
 
     func testWebContentTerminationReloadsLocalRoot() {
@@ -1746,5 +1917,54 @@ final class PodsWebViewRecoveryTests: XCTestCase {
 
         XCTAssertEqual(webView.evaluatedScripts.count, 2, "become-active must re-activate recovery")
         XCTAssertEqual(scheduler.scheduledCount, 2, "become-active must schedule a fresh delayed recheck")
+    }
+
+    func testBootRecoveryDoesNotDeclareReadyUntilServerAndReactAreReady() async {
+        var ensureCalls = 0
+        var loadCalls = 0
+        var states: [PodsWebViewBootRecovery.State] = []
+        let recovery = PodsWebViewBootRecovery(
+            ensureServerReady: {
+                ensureCalls += 1
+            },
+            loadRoot: {
+                loadCalls += 1
+            },
+            stateDidChange: { state in
+                states.append(state)
+            }
+        )
+
+        await recovery.recover(reason: "web-content-terminated")
+
+        XCTAssertEqual(ensureCalls, 1)
+        XCTAssertEqual(loadCalls, 1)
+        XCTAssertEqual(recovery.state, .waitingForUI)
+        XCTAssertEqual(states, [.recovering, .waitingForUI])
+
+        recovery.markUIReady()
+
+        XCTAssertEqual(recovery.state, .ready)
+        XCTAssertEqual(states, [.recovering, .waitingForUI, .ready])
+    }
+
+    func testBootRecoveryKeepsNativeFailureStateWhenServerCannotRecover() async {
+        struct Refused: LocalizedError {
+            var errorDescription: String? { "connection refused" }
+        }
+        var loadCalls = 0
+        let recovery = PodsWebViewBootRecovery(
+            ensureServerReady: {
+                throw Refused()
+            },
+            loadRoot: {
+                loadCalls += 1
+            }
+        )
+
+        await recovery.recover(reason: "foreground")
+
+        XCTAssertEqual(loadCalls, 0)
+        XCTAssertEqual(recovery.state, .failed("connection refused"))
     }
 }

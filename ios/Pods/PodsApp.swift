@@ -2,13 +2,28 @@ import BackgroundTasks
 import SwiftUI
 import UIKit
 
+private enum PodsAppRuntimeError: LocalizedError {
+    case localServerUnavailable(String?)
+    case staticAssetsUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .localServerUnavailable(let detail):
+            return detail.map { "Pods local server is unavailable: \($0)" }
+                ?? "Pods local server is unavailable"
+        case .staticAssetsUnavailable:
+            return "Pods packaged UI assets are unavailable"
+        }
+    }
+}
+
 @main
 struct PodsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
-            PodsWebView()
+            PodsWebView(appDelegate: appDelegate)
                 .ignoresSafeArea()
         }
     }
@@ -28,6 +43,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var adRemovalWork: Task<Void, Never>?
     private var adRemovalEnabled: (() -> Bool)?
     private var pendingAdRemovalBackgroundEvents: [(String, () -> Void)] = []
+    private var startupFailureDescription: String?
+    private var startupDatabase: PodsDatabase?
 
     func application(
         _ application: UIApplication,
@@ -51,6 +68,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let databaseURL = try DatabaseBootstrap.prepare()
             PodsDebugLog("Database prepared at \(databaseURL.path)")
             let database = try PodsDatabase(url: databaseURL)
+            startupDatabase = database
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let artifactStore = try AdRemovalArtifactStore.applicationDefault()
             let deepSeekCredentialStore = DeepSeekKeychainStore()
@@ -173,7 +191,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 object: nil
             )
             AudioBridge.shared.progressRecorder = backend
-            let server = PodsLocalServer(backend: backend)
+            guard let staticAssets = PodsStaticAssets.bundled() else {
+                throw PodsAppRuntimeError.staticAssetsUnavailable
+            }
+            let server = PodsLocalServer(backend: backend, staticAssets: staticAssets)
             try server.start()
             localServer = server
             refreshCoordinator = coordinator
@@ -185,9 +206,69 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             requestAdRemovalRun()
             PodsDebugLog("Local backend start requested")
         } catch {
+            startupFailureDescription = error.localizedDescription
             PodsLog("Pods local backend startup failed: \(error)")
+            if let startupDatabase {
+                do {
+                    try startMinimalCoreServices(database: startupDatabase)
+                    startupFailureDescription = nil
+                    PodsLog("Pods core UI recovered without optional startup services")
+                } catch {
+                    startupFailureDescription = error.localizedDescription
+                    PodsLog("Pods core UI fallback startup failed: \(error)")
+                }
+            }
         }
         return true
+    }
+
+    /// Used by WebView recovery to restore the loopback dependency before it
+    /// attempts another navigation. A positive HTTP probe is part of success.
+    @MainActor
+    func ensureLocalServerReady() async throws -> Bool {
+        if localServer == nil {
+            do {
+                let database: PodsDatabase
+                if let startupDatabase {
+                    database = startupDatabase
+                } else {
+                    let databaseURL = try DatabaseBootstrap.prepare()
+                    database = try PodsDatabase(url: databaseURL)
+                    startupDatabase = database
+                }
+                try startMinimalCoreServices(database: database)
+                startupFailureDescription = nil
+            } catch {
+                startupFailureDescription = error.localizedDescription
+                throw PodsAppRuntimeError.localServerUnavailable(startupFailureDescription)
+            }
+        }
+        guard let localServer else {
+            throw PodsAppRuntimeError.localServerUnavailable(startupFailureDescription)
+        }
+        return try await localServer.ensureReady()
+    }
+
+    private func startMinimalCoreServices(database: PodsDatabase) throws {
+        guard localServer == nil else { return }
+        guard let staticAssets = PodsStaticAssets.bundled() else {
+            throw PodsAppRuntimeError.staticAssetsUnavailable
+        }
+        let backend = PodsBackend(
+            database: database,
+            adRemovalDiagnostics: adRemovalDiagnostics
+        )
+        let coordinator = FeedRefreshCoordinator(backend: backend)
+        backend.setRefreshRequestHandler { source in
+            await coordinator.refreshNow(source: source)
+        }
+        AudioBridge.shared.progressRecorder = backend
+        let server = PodsLocalServer(backend: backend, staticAssets: staticAssets)
+        try server.start()
+        localServer = server
+        refreshCoordinator = coordinator
+        scheduleBackgroundRefresh()
+        PodsDebugLog("Minimal local backend start requested")
     }
 
     private static func repairAccidentalNextTenYearsSkipUndo(database: PodsDatabase) throws {

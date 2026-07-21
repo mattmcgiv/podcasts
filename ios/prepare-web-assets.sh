@@ -6,6 +6,84 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WEB_DIR="$ROOT/ios/Pods/Web"
 CONTAINER_BIN="${CONTAINER_BIN:-container}"
+ATOMIC_SWAP_BIN="${ATOMIC_SWAP_BIN:-}"
+STAGE_DIR=""
+
+cleanup_asset_swap() {
+  status=$?
+  trap - EXIT HUP INT TERM
+
+  if [ -n "$STAGE_DIR" ] && { [ -e "$STAGE_DIR" ] || [ -L "$STAGE_DIR" ]; }; then
+    rm -rf "$STAGE_DIR"
+  fi
+  exit "$status"
+}
+
+trap cleanup_asset_swap EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+atomic_activate_directory() {
+  if [ -n "$ATOMIC_SWAP_BIN" ]; then
+    "$ATOMIC_SWAP_BIN" "$1" "$2"
+  else
+    xcrun swift "$ROOT/ios/atomic-directory-swap.swift" "$1" "$2"
+  fi
+}
+
+validate_web_asset_graph() {
+  asset_root="$1"
+  index="$asset_root/index.html"
+  if [ ! -f "$index" ]; then
+    echo "error: staged iOS web assets are missing index.html" >&2
+    return 1
+  fi
+
+  symbolic_link="$(find "$asset_root" -type l -print | sed -n '1p')"
+  if [ -n "$symbolic_link" ]; then
+    echo "error: staged iOS web assets contain a symbolic link: $symbolic_link" >&2
+    return 1
+  fi
+
+  if grep -Eq '(src|href)="/(assets|manifest\.webmanifest|icon\.svg)' "$index"; then
+    echo "error: staged iOS index.html contains root-relative bundle assets" >&2
+    return 1
+  fi
+
+  references="$(
+    grep -Eio "(src|href)[[:space:]]*=[[:space:]]*\"[^\"]*\"|(src|href)[[:space:]]*=[[:space:]]*'[^']*'" "$index" \
+      || true
+  )"
+  while IFS= read -r attribute; do
+    [ -n "$attribute" ] || continue
+    reference="${attribute#*=}"
+    reference="$(printf '%s' "$reference" | sed 's/^[[:space:]]*//')"
+    reference="${reference#?}"
+    reference="${reference%?}"
+    case "$reference" in
+      ''|'#'*|'//'*|[A-Za-z]*:*) continue ;;
+    esac
+
+    relative_path="${reference%%\?*}"
+    relative_path="${relative_path%%\#*}"
+    relative_path="${relative_path#./}"
+    relative_path="${relative_path#/}"
+    [ -n "$relative_path" ] || continue
+    case "/$relative_path/" in
+      *'/../'*|*'/./'*)
+        echo "error: staged iOS index.html has invalid referenced asset: $reference" >&2
+        return 1
+        ;;
+    esac
+    if [ ! -f "$asset_root/$relative_path" ]; then
+      echo "error: staged iOS index.html has missing referenced asset: $reference" >&2
+      return 1
+    fi
+  done <<EOF
+$references
+EOF
+}
 
 if ! command -v "$CONTAINER_BIN" >/dev/null 2>&1; then
   echo "error: Apple container CLI not found in PATH" >&2
@@ -57,14 +135,22 @@ fi
 
 "$CONTAINER_BIN" exec -w /work/client pods-dev sh -lc 'if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/vite ]; then npm ci; fi; VITE_BASE=./ npm run build'
 
-rm -rf "$WEB_DIR"
-mkdir -p "$WEB_DIR"
-cp -R "$ROOT/client/dist/." "$WEB_DIR/"
-touch "$WEB_DIR/.gitkeep"
+validate_web_asset_graph "$ROOT/client/dist"
 
-if grep -Eq '(src|href)="/(assets|manifest\.webmanifest|icon\.svg)' "$WEB_DIR/index.html"; then
-  echo "error: staged iOS index.html contains root-relative bundle assets" >&2
-  exit 1
+STAGE_DIR="$(mktemp -d "$ROOT/ios/Pods/.Web.stage.XXXXXX")"
+cp -R "$ROOT/client/dist/." "$STAGE_DIR/"
+touch "$STAGE_DIR/.gitkeep"
+validate_web_asset_graph "$STAGE_DIR"
+
+if atomic_activate_directory "$STAGE_DIR" "$WEB_DIR"; then
+  :
+else
+  status=$?
+  echo "error: could not atomically activate staged iOS web assets" >&2
+  exit "$status"
 fi
+
+rm -rf "$STAGE_DIR"
+STAGE_DIR=""
 
 echo "Staged web assets in $WEB_DIR"

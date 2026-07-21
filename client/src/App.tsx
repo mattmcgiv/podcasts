@@ -1,7 +1,9 @@
+import { useEffect } from "react";
 import { MiniPlayer } from "./components/MiniPlayer";
 import { PlayerSheet } from "./components/PlayerSheet";
 import { TabBar } from "./components/TabBar";
 import { PlayerProvider } from "./player";
+import { postPodsLifecycleEvent } from "./podsLifecycle";
 import { useRoute } from "./router";
 import { PlayedView } from "./views/PlayedView";
 import { RecentView } from "./views/RecentView";
@@ -10,6 +12,10 @@ import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 
 export function App() {
+  useEffect(() => {
+    postPodsLifecycleEvent("ui-ready");
+  }, []);
+
   return (
     <PlayerProvider>
       <Shell />

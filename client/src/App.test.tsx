@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { episode, installApi, page } from "./test/mockApi";
 
@@ -11,7 +11,24 @@ const shellRoutes = {
   "GET /api/shows": [],
 };
 
+afterEach(() => {
+  delete window.webkit;
+});
+
 describe("App", () => {
+  it("notifies the native container after the UI commits", () => {
+    installApi(shellRoutes);
+    const postMessage = vi.fn();
+    Object.defineProperty(window, "webkit", {
+      configurable: true,
+      value: { messageHandlers: { podsLifecycle: { postMessage } } },
+    });
+
+    render(<App />);
+
+    expect(postMessage).toHaveBeenCalledWith({ event: "ui-ready" });
+  });
+
   it("opens directly into Listen without login", async () => {
     installApi(shellRoutes);
     render(<App />);

@@ -11,7 +11,7 @@ fail() {
 assert_file_contains() {
   file="$1"
   pattern="$2"
-  if ! grep -Fq "$pattern" "$file"; then
+  if ! grep -Fq -- "$pattern" "$file"; then
     echo "Expected $file to contain: $pattern" >&2
     echo "--- $file ---" >&2
     sed -n '1,200p' "$file" >&2
@@ -54,6 +54,29 @@ if [ -n "$json_output" ]; then
 {
   "result": {
     "connectionProperties": { "tunnelState": "${DEVICE_DETAILS_TUNNEL_STATE:-${DEVICE_TUNNEL_STATE:-unavailable}}" }
+  }
+}
+JSON
+      ;;
+    *"device info processes"*)
+      cat > "$json_output" <<JSON
+{
+  "result": {
+    "runningProcesses": [
+      { "processIdentifier": ${XCRUN_PROCESS_PID:-42}, "executable": "${XCRUN_PROCESS_EXECUTABLE:-file:///private/var/containers/Bundle/Application/TEST/Pods.app/Pods}" }
+    ]
+  }
+}
+JSON
+      ;;
+    *"device process launch"*)
+      cat > "$json_output" <<JSON
+{
+  "result": {
+    "process": {
+      "processIdentifier": ${XCRUN_LAUNCHED_PID:-42},
+      "executable": "${XCRUN_LAUNCHED_EXECUTABLE:-file:///private/var/containers/Bundle/Application/TEST/Pods.app/Pods}"
+    }
   }
 }
 JSON
@@ -136,6 +159,23 @@ exit 0
 STUB
   chmod +x "$tmp/bin/xcodebuild"
 
+  cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.mcgiv.pods</string>
+  <key>CFBundleExecutable</key>
+  <string>Pods</string>
+  <key>PodsBuildID</key>
+  <string>test-build</string>
+  <key>PodsRefreshNonce</key>
+  <string>test-nonce</string>
+</dict>
+</plist>
+PLIST
+
   write_xcrun_device_stub "$tmp/bin"
 
   HOME="$tmp/home" \
@@ -144,6 +184,10 @@ STUB
   IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
   IOS_TEAM_ID="TEAMID" \
   IOS_SKIP_WEB_ASSETS=1 \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_CHECK=: \
+  IOS_UI_STABILITY_SECONDS=0 \
   IOS_REFRESH_NOW_EPOCH=12345 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
   DEVICE_LIST_TUNNEL_STATE=disconnected \
@@ -155,7 +199,41 @@ STUB
     "$tmp/repo/ios/refresh-device.sh"
 
   assert_file_equals "$tmp/last-success" "12345"
+  assert_file_contains "$tmp/xcodebuild.log" "-skipPackagePluginValidation"
+  assert_file_contains "$tmp/xcodebuild.log" "-onlyUsePackageVersionsFromResolvedFile"
+  assert_file_contains "$tmp/xcodebuild.log" "PODS_BUILD_ID=test-build"
+  assert_file_contains "$tmp/xcodebuild.log" "PODS_REFRESH_NONCE=test-nonce"
   assert_file_contains "$tmp/xcrun.log" "devicectl device install app --device device-id"
+  assert_file_contains "$tmp/xcrun.log" "devicectl device process launch --device device-id --terminate-existing --json-output"
+  assert_file_contains "$tmp/xcrun.log" "devicectl device info processes --device device-id"
+
+  rm -f "$tmp/last-success"
+  set +e
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_CHECK=: \
+  IOS_UI_STABILITY_SECONDS=0 \
+  IOS_REFRESH_NOW_EPOCH=12345 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCODEBUILD_LOG="$tmp/xcodebuild.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  XCRUN_PROCESS_PID=43 \
+    "$tmp/repo/ios/refresh-device.sh"
+  mismatched_process_status=$?
+  set -e
+
+  [ "$mismatched_process_status" -ne 0 ] || fail "a different surviving PID must fail refresh verification"
+  [ ! -e "$tmp/last-success" ] || fail "a PID mismatch must not advance the success marker"
 }
 
 test_unlaunchable_install_does_not_record_success() {
@@ -175,6 +253,23 @@ STUB
 exit 0
 STUB
   chmod +x "$tmp/bin/xcodebuild"
+
+  cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.mcgiv.pods</string>
+  <key>CFBundleExecutable</key>
+  <string>Pods</string>
+  <key>PodsBuildID</key>
+  <string>test-build</string>
+  <key>PodsRefreshNonce</key>
+  <string>test-nonce</string>
+</dict>
+</plist>
+PLIST
   write_xcrun_device_stub "$tmp/bin"
 
   set +e
@@ -185,6 +280,8 @@ STUB
   IOS_TEAM_ID="TEAMID" \
   IOS_SKIP_WEB_ASSETS=1 \
   IOS_NOTIFY_FAILURE=0 \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
   DEVICE_DETAILS_TUNNEL_STATE=connected \
   XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
@@ -200,6 +297,161 @@ STUB
     fail "an unlaunchable install must not advance the success marker"
   fi
   assert_file_contains "$tmp/xcrun.log" "devicectl device process launch"
+}
+
+test_failed_default_ui_ready_check_does_not_record_success() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin" "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/repo/ios/verify-ui-ready.sh" <<'STUB'
+#!/bin/sh
+set -eu
+grep -Fq "devicectl device process launch" "$XCRUN_LOG" || exit 31
+[ ! -e "$IOS_REFRESH_SUCCESS_FILE" ] || exit 32
+printf '%s %s %s %s\n' "$IOS_UI_READY_AFTER_EPOCH" "$IOS_EXPECTED_BUILD_ID" "$IOS_EXPECTED_REFRESH_NONCE" "$IOS_BUNDLE_ID" > "$UI_READY_CHECK_LOG"
+exit 23
+STUB
+  chmod +x "$tmp/repo/ios/verify-ui-ready.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+  write_xcrun_device_stub "$tmp/bin"
+
+  cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.mcgiv.pods</string>
+  <key>CFBundleExecutable</key>
+  <string>Pods</string>
+  <key>PodsBuildID</key>
+  <string>test-build</string>
+  <key>PodsRefreshNonce</key>
+  <string>test-nonce</string>
+</dict>
+</plist>
+PLIST
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
+  IOS_REFRESH_NOW_EPOCH=23456 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  UI_READY_CHECK_LOG="$tmp/ui-ready-check.log" \
+    "$tmp/repo/ios/refresh-device.sh"
+  refresh_status=$?
+  set -e
+
+  [ "$refresh_status" -eq 23 ] || fail "a rejected UI readiness check should return its failure status, got $refresh_status"
+  if [ -e "$tmp/last-success" ]; then
+    fail "a refresh whose UI is not ready must not advance the success marker"
+  fi
+  assert_file_equals "$tmp/ui-ready-check.log" "23456 test-build test-nonce dev.mcgiv.pods"
+}
+
+test_ui_ready_verifier_requires_fresh_matching_build_marker() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+
+  cat > "$tmp/bin/xcrun" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$XCRUN_LOG"
+destination=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--destination" ]; then
+    shift
+    destination="$1"
+    break
+  fi
+  shift
+done
+[ -n "$destination" ] || exit 90
+printf '%s\n' "$READY_MARKER" > "$destination"
+STUB
+  chmod +x "$tmp/bin/xcrun"
+
+  set +e
+  READY_MARKER="199 test-build test-nonce" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_BUNDLE_ID="dev.mcgiv.pods" \
+  IOS_UI_READY_AFTER_EPOCH=200 \
+  IOS_EXPECTED_BUILD_ID="test-build" \
+  IOS_EXPECTED_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_TIMEOUT_SECONDS=0 \
+    "$ROOT/ios/verify-ui-ready.sh"
+  stale_status=$?
+
+  READY_MARKER="200 other-build test-nonce" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_BUNDLE_ID="dev.mcgiv.pods" \
+  IOS_UI_READY_AFTER_EPOCH=200 \
+  IOS_EXPECTED_BUILD_ID="test-build" \
+  IOS_EXPECTED_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_TIMEOUT_SECONDS=0 \
+    "$ROOT/ios/verify-ui-ready.sh"
+  wrong_build_status=$?
+
+  READY_MARKER="200 test-build other-nonce" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_BUNDLE_ID="dev.mcgiv.pods" \
+  IOS_UI_READY_AFTER_EPOCH=200 \
+  IOS_EXPECTED_BUILD_ID="test-build" \
+  IOS_EXPECTED_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_TIMEOUT_SECONDS=0 \
+    "$ROOT/ios/verify-ui-ready.sh"
+  wrong_nonce_status=$?
+
+  READY_MARKER="200 test-build test-nonce" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_BUNDLE_ID="dev.mcgiv.pods" \
+  IOS_UI_READY_AFTER_EPOCH=200 \
+  IOS_EXPECTED_BUILD_ID="test-build" \
+  IOS_EXPECTED_REFRESH_NONCE="test-nonce" \
+  IOS_UI_READY_TIMEOUT_SECONDS=0 \
+    "$ROOT/ios/verify-ui-ready.sh"
+  matching_status=$?
+  set -e
+
+  [ "$stale_status" -ne 0 ] || fail "a stale UI-ready marker must be rejected"
+  [ "$wrong_build_status" -ne 0 ] || fail "a UI-ready marker from another build must be rejected"
+  [ "$wrong_nonce_status" -ne 0 ] || fail "a UI-ready marker from another install attempt must be rejected"
+  [ "$matching_status" -eq 0 ] || fail "a fresh UI-ready marker for the installed build must be accepted"
+  assert_file_contains "$tmp/xcrun.log" "devicectl device copy from"
+  assert_file_contains "$tmp/xcrun.log" "--domain-type appDataContainer"
+  assert_file_contains "$tmp/xcrun.log" "--domain-identifier dev.mcgiv.pods"
+  assert_file_contains "$tmp/xcrun.log" "--source Library/Application Support/Pods/ui-ready.txt"
 }
 
 test_manual_refresh_checks_device_before_signing() {
@@ -392,8 +644,9 @@ STUB
 
 test_prepare_web_assets_starts_existing_stopped_container() {
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/repo/ios" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
+  mkdir -p "$tmp/repo/ios/Pods" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
   cp "$ROOT/ios/prepare-web-assets.sh" "$tmp/repo/ios/prepare-web-assets.sh"
+  cp "$ROOT/ios/atomic-directory-swap.swift" "$tmp/repo/ios/atomic-directory-swap.swift"
   chmod +x "$tmp/repo/ios/prepare-web-assets.sh"
 
   cat > "$tmp/repo/dev/up.sh" <<'STUB'
@@ -465,8 +718,9 @@ STUB
 
 test_prepare_web_assets_recreates_stale_container_mounts() {
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/repo/ios" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
+  mkdir -p "$tmp/repo/ios/Pods" "$tmp/repo/dev" "$tmp/repo/client" "$tmp/bin"
   cp "$ROOT/ios/prepare-web-assets.sh" "$tmp/repo/ios/prepare-web-assets.sh"
+  cp "$ROOT/ios/atomic-directory-swap.swift" "$tmp/repo/ios/atomic-directory-swap.swift"
   chmod +x "$tmp/repo/ios/prepare-web-assets.sh"
 
   cat > "$tmp/repo/dev/up.sh" <<'STUB'
@@ -654,6 +908,8 @@ STUB
 test_install_agent_generates_retrying_48_hour_refresh_plist
 test_successful_refresh_records_success_time
 test_unlaunchable_install_does_not_record_success
+test_failed_default_ui_ready_check_does_not_record_success
+test_ui_ready_verifier_requires_fresh_matching_build_marker
 test_manual_refresh_checks_device_before_signing
 test_due_refresh_invokes_installer
 test_due_refresh_opens_available_device_tunnel
