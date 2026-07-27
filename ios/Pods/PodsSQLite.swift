@@ -33,6 +33,7 @@ final class PodsDatabase {
 
     func installSchemaIfNeeded() throws {
         try executeScript(Self.schemaSQL)
+        try addColumnIfMissing(table: "podcasts", column: "is_subscribed", definition: "INTEGER NOT NULL DEFAULT 1")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_relative_path", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_sha256", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "audio_byte_count", definition: "INTEGER")
@@ -172,6 +173,7 @@ final class PodsDatabase {
         image_url TEXT NOT NULL DEFAULT '',
         site_url TEXT NOT NULL DEFAULT '',
         last_fetched_at INTEGER,
+        is_subscribed INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL
     );
 
@@ -190,6 +192,44 @@ final class PodsDatabase {
 
     CREATE INDEX IF NOT EXISTS idx_episodes_pub ON episodes (published_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_episodes_podcast ON episodes (podcast_id, published_at DESC);
+
+    CREATE TABLE IF NOT EXISTS follows (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        aliases_json TEXT NOT NULL,
+        last_checked_at INTEGER,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS follow_candidates (
+        id INTEGER PRIMARY KEY,
+        follow_id INTEGER NOT NULL REFERENCES follows(id) ON DELETE CASCADE,
+        source_episode_key TEXT NOT NULL,
+        feed_url TEXT NOT NULL,
+        feed_title TEXT NOT NULL,
+        feed_image_url TEXT NOT NULL,
+        guid TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        audio_url TEXT NOT NULL,
+        duration_secs INTEGER,
+        published_at INTEGER NOT NULL,
+        image_url TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence TEXT NOT NULL CHECK (confidence IN ('high', 'review')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        UNIQUE (follow_id, source_episode_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_follow_candidates_pending ON follow_candidates (follow_id, status, published_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_candidates_identity ON follow_candidates (follow_id, feed_url, guid);
+
+    CREATE TABLE IF NOT EXISTS follow_episodes (
+        follow_id INTEGER NOT NULL REFERENCES follows(id) ON DELETE CASCADE,
+        episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+        PRIMARY KEY (follow_id, episode_id)
+    );
 
     CREATE TABLE IF NOT EXISTS episode_state (
         episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,

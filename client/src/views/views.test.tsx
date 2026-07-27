@@ -14,6 +14,7 @@ import { RecentView } from "./RecentView";
 import { SearchView } from "./SearchView";
 import { ShowDetailView } from "./ShowDetailView";
 import { ShowsView } from "./ShowsView";
+import { FollowsView } from "./FollowsView";
 
 function wrap(ui: ReactNode) {
   return render(<PlayerProvider>{ui}</PlayerProvider>);
@@ -1227,6 +1228,47 @@ describe("RecentView", () => {
     for (const r of rows) {
       expect(within(r).getByText("Ad-free")).toBeInTheDocument();
     }
+  });
+});
+
+describe("FollowsView", () => {
+  it("adds a person, exposes the bounded-lookback explanation, and accepts reviewed appearances", async () => {
+    let candidates = [{
+      id: 9,
+      follow_id: 1,
+      appearance: {
+        source_episode_key: "candidate-9",
+        feed_url: "https://feeds.example/interviews",
+        feed_title: "Interviews",
+        feed_image_url: "",
+        guid: "guest-9",
+        title: "Elon Musk interview",
+        description: "",
+        audio_url: "https://audio.example/guest-9.mp3",
+        duration_secs: null,
+        published_at: 1_750_000_000,
+        image_url: "",
+        evidence: "name in title",
+        confidence: "review" as const,
+      },
+    }];
+    const { calls } = installApi({
+      "GET /api/follows": [{ id: 1, name: "Elon Musk", aliases: [], last_checked_at: null, pending_count: candidates.length, accepted_count: 0 }],
+      "GET /api/follow-candidates": () => candidates,
+      "POST /api/follows": { id: 2, name: "Balaji Srinivasan", aliases: [], last_checked_at: 1, pending_count: 0, accepted_count: 0 },
+      "POST /api/follow-candidates/9/accept": () => { candidates = []; return null; },
+    });
+    const user = userEvent.setup();
+    render(<FollowsView />);
+
+    expect(await screen.findByText(/first check looks back 30 days/i)).toBeInTheDocument();
+    expect(screen.getByText("Elon Musk interview")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(screen.queryByText("Elon Musk interview")).not.toBeInTheDocument());
+
+    await user.type(screen.getByRole("textbox", { name: "Person to follow" }), "Balaji Srinivasan");
+    await user.click(screen.getByRole("button", { name: "Follow" }));
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/follows")).toBe(true));
   });
 });
 

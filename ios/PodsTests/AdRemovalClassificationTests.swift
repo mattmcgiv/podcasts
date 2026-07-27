@@ -269,6 +269,10 @@ final class AdRemovalClassificationTests: XCTestCase {
     }
 
     private final class FakeClassifier: AdClassifier {
+        private enum FakeClassifierError: Error {
+            case responseQueueExhausted
+        }
+
         let descriptor: AdClassifierDescriptor
         private var responses: [Result<String, Error>]
         private(set) var prompts: [String] = []
@@ -290,6 +294,9 @@ final class AdRemovalClassificationTests: XCTestCase {
 
         func classify(window: AdClassificationWindow) async throws -> String {
             prompts.append(window.prompt)
+            guard !responses.isEmpty else {
+                throw FakeClassifierError.responseQueueExhausted
+            }
             return try responses.removeFirst().get()
         }
 
@@ -453,7 +460,7 @@ final class AdRemovalClassificationTests: XCTestCase {
             appVersion: "1.0",
             buildVersion: "1"
         ))
-        let response = #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"segment-1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"segment-2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"segment-3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
+        let response = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
         let classifier = FakeClassifier(responses: [.success(response)])
         let executor = AdRemovalPipelineExecutor(
             database: harness.database,
@@ -508,7 +515,8 @@ final class AdRemovalClassificationTests: XCTestCase {
 
     func testMalformedClassificationPersistsInvalidEvidenceButNeverManifest() async throws {
         let harness = try makeClassifyingHarness()
-        let classifier = FakeClassifier(responses: [.success(#"{"labels":[]}"#)])
+        let invalidResponse: Result<String, Error> = .success(#"{"labels":[]}"#)
+        let classifier = FakeClassifier(responses: Array(repeating: invalidResponse, count: 4))
         let executor = AdRemovalPipelineExecutor(
             database: harness.database,
             jobStore: harness.store,
@@ -521,16 +529,17 @@ final class AdRemovalClassificationTests: XCTestCase {
             try await executor.execute(stage: .classifying, job: harness.job)
             XCTFail("Expected invalid classifier output")
         } catch let error as AdClassifierOutputError {
-            XCTAssertEqual(error, .missingSegment("segment-0"))
+            XCTAssertEqual(error, .missingSegment("s0"))
         }
 
         XCTAssertTrue(try harness.store.skipRanges(episodeID: harness.episodeID).isEmpty)
         XCTAssertNil(try harness.store.job(id: harness.job.id)?.classificationRunID)
         let evidence = try harness.store.classificationEvidence(episodeID: harness.episodeID)
         XCTAssertEqual(evidence.count, 1)
-        XCTAssertFalse(evidence[0].schemaValid)
-        XCTAssertNotNil(evidence[0].validationError)
-        XCTAssertTrue(evidence[0].labels.isEmpty)
+        let invalidEvidence = try XCTUnwrap(evidence.first)
+        XCTAssertFalse(invalidEvidence.schemaValid)
+        XCTAssertNotNil(invalidEvidence.validationError)
+        XCTAssertTrue(invalidEvidence.labels.isEmpty)
         XCTAssertEqual(classifier.unloadCalls, 1)
     }
 
@@ -539,8 +548,8 @@ final class AdRemovalClassificationTests: XCTestCase {
 
         XCTAssertEqual(AdClassifierDescriptor.qwen3OneSevenBFourBitV1.modelRevision, manifest.revision)
         XCTAssertEqual(manifest.repository, "Qwen/Qwen3-1.7B-MLX-4bit")
-        XCTAssertEqual(manifest.revision, "32f3e8ecf65426fc3306969496342d504bfa13f3")
-        XCTAssertEqual(manifest.files.count, 10)
+        XCTAssertEqual(manifest.revision, "21457c6f51ed54a7c16e988c0844db973815c137")
+        XCTAssertEqual(manifest.files.count, 7)
         XCTAssertEqual(manifest.totalByteCount, 930_246_470)
         XCTAssertTrue(manifest.files.allSatisfy { file in
             file.sha256.count == 64 && file.byteCount > 0 && !file.relativePath.contains("..")
@@ -844,7 +853,7 @@ final class AdRemovalClassificationTests: XCTestCase {
 
         XCTAssertEqual(classifier.descriptor, AdClassifierDescriptor(
             modelID: "Qwen/Qwen3-1.7B-MLX-4bit",
-            modelRevision: "32f3e8ecf65426fc3306969496342d504bfa13f3",
+            modelRevision: "21457c6f51ed54a7c16e988c0844db973815c137",
             quantization: "4-bit",
             promptRevision: "ad-classifier-v1",
             maximumContextTokens: 8_192,

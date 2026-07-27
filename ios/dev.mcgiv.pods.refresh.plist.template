@@ -17,12 +17,24 @@
 		<key>IOS_TEAM_ID</key>
 		<string>__TEAM_ID__</string>
 		<key>IOS_REFRESH_SUCCESS_INTERVAL_SECONDS</key>
-		<string>172800</string>
+		<string>__SUCCESS_INTERVAL_SECONDS__</string>
+		<key>IOS_PROFILE_RENEWAL_WINDOW_SECONDS</key>
+		<string>__PROFILE_RENEWAL_WINDOW_SECONDS__</string>
+		<key>IOS_PROFILE_WARNING_SECONDS</key>
+		<string>__PROFILE_WARNING_SECONDS__</string>
+		<key>IOS_PROFILE_CRITICAL_SECONDS</key>
+		<string>__PROFILE_CRITICAL_SECONDS__</string>
+		<key>IOS_NOTIFY_FAILURE</key>
+		<string>0</string>
+		<key>IOS_SIGNING_ALERTS_ENABLED</key>
+		<string>1</string>
+		<key>IOS_SIGNING_REMINDERS_ENABLED</key>
+		<string>1</string>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>StartInterval</key>
-	<integer>900</integer>
+	<integer>__CHECK_INTERVAL_SECONDS__</integer>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>

@@ -10,6 +10,7 @@ import { RecentView } from "./views/RecentView";
 import { SearchView } from "./views/SearchView";
 import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
+import { FollowsView } from "./views/FollowsView";
 
 export function App() {
   useEffect(() => {
@@ -34,6 +35,7 @@ function Shell() {
         {route.tab === "search" && <SearchView />}
         {route.tab === "shows" &&
           (route.showId != null ? <ShowDetailView showId={route.showId} /> : <ShowsView />)}
+        {route.tab === "follows" && <FollowsView />}
       </main>
       <MiniPlayer />
       <TabBar active={route.tab} />

@@ -80,19 +80,28 @@ The script first verifies that CoreDevice reports the iPhone connected, then bui
 
 ## Automated Refresh
 
-Free Personal Team installs expire after 7 days. Install the launchd job to keep at least a five-day safety margin:
+Free Personal Team installs expire after 7 days. Install the launchd job to renew the actual provisioning profile before that deadline:
 
 ```sh
 IOS_DEVICE_ID=<device-id> IOS_TEAM_ID=<team-id> ios/install-refresh-agent.sh
 ```
 
-The agent runs at login and checks every 15 minutes. A recent successful install is skipped until it is 48 hours old. Once a refresh is due, the agent actively opens a CoreDevice tunnel before invoking Xcode; an unavailable or briefly disconnected phone is retried at the next check instead of waiting another 48 hours. The installer must also launch the newly installed app successfully before manual or automatic runs update:
+The agent runs at login and checks every 15 minutes. It performs a routine reinstall after 48 hours, but the embedded provisioning profile's verified expiration is the authoritative deadline. With 72 hours remaining, the agent archives only the matching expiring Pods profile from Xcode's active cache so automatic signing must request a fresh profile. A build is rejected before installation unless its profile belongs to `dev.mcgiv.pods` and has sufficient remaining lifetime.
+
+Once a refresh is due, the agent actively opens a CoreDevice tunnel before invoking Xcode; an unavailable or briefly disconnected phone is retried at the next check. The installer must launch the newly installed app, observe a fresh UI-ready marker twice, and confirm that exact process remains alive before updating:
 
 ```text
 ~/Library/Application Support/PodsRefresh/last-success-epoch
+~/Library/Application Support/PodsRefresh/profile-state
 ```
 
+The profile state records the UUID, creation time, expiration time, and verified install time. Expiring profiles are retained recoverably under `~/Library/Application Support/PodsRefresh/profile-backups/`.
+
 The Mac must be awake with the user logged in, and the iPhone must be reachable over USB or the same local network. A Personal Team app cannot be re-signed over the internet while the phone is away; the retry loop installs it automatically after the phone becomes reachable again.
+
+Each verified install also upserts two iCloud Reminders, at 48 hours and 12 hours before the real profile expiration. If renewal is blocked, macOS notifications escalate once per profile and severity instead of repeating every 15 minutes.
+
+For a bounded soak test, `ios/install-refresh-agent.sh` accepts `IOS_REFRESH_CHECK_INTERVAL_SECONDS` and `IOS_REFRESH_SUCCESS_INTERVAL_SECONDS`. Restore the defaults (`900` and `172800`) after testing.
 
 Logs:
 
@@ -102,7 +111,7 @@ tail -f ios/build/launchd.err.log
 launchctl print gui/$(id -u)/dev.mcgiv.pods.refresh
 ```
 
-Build or install failures show a macOS notification titled `Pods Refresh Failed`. An expected unavailable-phone retry is recorded by launchd without creating signing material or sending repeated notifications.
+Build or install failures show one deduplicated macOS notification titled `Pods Refresh Failed`. Expected unavailable-phone retries stay silent until the verified profile enters its warning window.
 
 ## Reinstall Acceptance Test
 

@@ -222,6 +222,25 @@ final class PodsBackend: PlaybackProgressRecording {
         if path == "/api/shows", request.method == "GET" {
             return .json(try shows())
         }
+        if path == "/api/follows", request.method == "GET" {
+            return .json(try follows())
+        }
+        if path == "/api/follows", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard let name = body["name"] as? String else { throw PodsBackendError.invalid("name is required") }
+            return .json(try await createFollow(name: name, aliases: body["aliases"] as? [String] ?? []), statusCode: 201)
+        }
+        if path == "/api/follow-candidates", request.method == "GET" {
+            return .json(try followCandidates())
+        }
+        if parts.count == 3, parts[0] == "api", parts[1] == "follows", let id = Int64(parts[2]) {
+            if request.method == "DELETE" { try deleteFollow(id: id); return .noContent() }
+            if request.method == "POST" { return .json(try await refreshFollow(id: id)) }
+        }
+        if parts.count == 4, parts[0] == "api", parts[1] == "follow-candidates", let id = Int64(parts[2]) {
+            if parts[3] == "accept", request.method == "POST" { try acceptFollowCandidate(id: id); return .noContent() }
+            if parts[3] == "reject", request.method == "POST" { try rejectFollowCandidate(id: id); return .noContent() }
+        }
         if path == "/api/shows", request.method == "POST" {
             let body = try request.jsonObject()
             guard let feedURL = body["feed_url"] as? String else {
@@ -442,7 +461,7 @@ final class PodsBackend: PlaybackProgressRecording {
 
     private func recent(offset: Int64) throws -> Page<EpisodeItem> {
         let rows = try database.query(
-            "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL ORDER BY e.published_at DESC, e.id DESC LIMIT ? OFFSET ?",
+            "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL AND \(Self.inListenPredicate) ORDER BY e.published_at DESC, e.id DESC LIMIT ? OFFSET ?",
             [.int(podsPageSize + 1), .int(offset)],
             map: Self.mapEpisodeItem
         )
@@ -451,7 +470,7 @@ final class PodsBackend: PlaybackProgressRecording {
 
     private func played(offset: Int64) throws -> Page<EpisodeItem> {
         let rows = try database.query(
-            "\(Self.episodeItemSelect) WHERE s.played_at IS NOT NULL ORDER BY s.played_at DESC, e.id DESC LIMIT ? OFFSET ?",
+            "\(Self.episodeItemSelect) WHERE s.played_at IS NOT NULL AND \(Self.inListenPredicate) ORDER BY s.played_at DESC, e.id DESC LIMIT ? OFFSET ?",
             [.int(podsPageSize + 1), .int(offset)],
             map: Self.mapEpisodeItem
         )
@@ -466,11 +485,11 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     private func shows() throws -> [Show] {
-        try database.query("\(Self.showSelect) ORDER BY p.title COLLATE NOCASE, p.id", map: Self.mapShow)
+        try database.query("\(Self.showSelect) WHERE p.is_subscribed = 1 ORDER BY p.title COLLATE NOCASE, p.id", map: Self.mapShow)
     }
 
     private func fetchShow(id: Int64) throws -> Show {
-        guard let show = try database.query("\(Self.showSelect) WHERE p.id = ?", [.int(id)], map: Self.mapShow).first else {
+        guard let show = try database.query("\(Self.showSelect) WHERE p.id = ? AND p.is_subscribed = 1", [.int(id)], map: Self.mapShow).first else {
             throw PodsBackendError.notFound
         }
         return show
@@ -481,7 +500,9 @@ final class PodsBackend: PlaybackProgressRecording {
         guard let url = URL(string: feedURL), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
             throw PodsBackendError.invalid("feed_url must be an http(s) URL")
         }
-        if try database.scalarInt64("SELECT id FROM podcasts WHERE feed_url = ?", [.text(feedURL)]) != nil {
+        let existingPodcastID = try database.scalarInt64("SELECT id FROM podcasts WHERE feed_url = ?", [.text(feedURL)])
+        if let existingPodcastID,
+           try database.scalarInt64("SELECT is_subscribed FROM podcasts WHERE id = ?", [.int(existingPodcastID)]) == 1 {
             throw PodsBackendError.conflict("already subscribed")
         }
 
@@ -491,8 +512,14 @@ final class PodsBackend: PlaybackProgressRecording {
         }
         let feed = try RSSParser.parse(data)
         let podcastID = try database.withTransaction { () -> Int64 in
-            try database.execute("INSERT INTO podcasts (feed_url, created_at) VALUES (?, ?)", [.text(feedURL), .int(nowUnix())])
-            let podcastID = database.lastInsertRowID()
+            let podcastID: Int64
+            if let existingPodcastID {
+                podcastID = existingPodcastID
+                try database.execute("UPDATE podcasts SET is_subscribed = 1 WHERE id = ?", [.int(podcastID)])
+            } else {
+                try database.execute("INSERT INTO podcasts (feed_url, created_at) VALUES (?, ?)", [.text(feedURL), .int(nowUnix())])
+                podcastID = database.lastInsertRowID()
+            }
             try upsertPodcastMeta(podcastID: podcastID, feed: feed)
             try upsertEpisodes(podcastID: podcastID, feed: feed)
             try saveFeedValidators(podcastID: podcastID, validators: validators)
@@ -558,6 +585,155 @@ final class PodsBackend: PlaybackProgressRecording {
             try database.execute("DELETE FROM podcasts WHERE id = ?", [.int(id)])
         }
         try adRemovalFileCleanup?.drain()
+    }
+
+    private func follows() throws -> [Follow] {
+        try database.query(
+            """
+            SELECT f.id, f.name, f.aliases_json, f.last_checked_at,
+              (SELECT COUNT(*) FROM follow_candidates c WHERE c.follow_id = f.id AND c.status = 'pending'),
+              (SELECT COUNT(*) FROM follow_candidates c WHERE c.follow_id = f.id AND c.status = 'accepted')
+            FROM follows f ORDER BY f.name COLLATE NOCASE, f.id
+            """,
+            map: Self.mapFollow
+        )
+    }
+
+    private func createFollow(name rawName: String, aliases rawAliases: [String]) async throws -> Follow {
+        guard directorySearcher is PersonAppearanceSearching else {
+            throw PodsBackendError.upstream("Podcast Index appearance search is unavailable")
+        }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.count >= 2 else { throw PodsBackendError.invalid("name must be at least 2 characters") }
+        let aliases = Self.cleanAliases(rawAliases, name: name)
+        let aliasesJSON = String(data: try JSONEncoder().encode(aliases), encoding: .utf8)!
+        let id = try database.withTransaction { () -> Int64 in
+            if try database.scalarInt64("SELECT id FROM follows WHERE name = ?", [.text(name)]) != nil {
+                throw PodsBackendError.conflict("already following \(name)")
+            }
+            try database.execute(
+                "INSERT INTO follows (name, aliases_json, created_at) VALUES (?, ?, ?)",
+                [.text(name), .text(aliasesJSON), .int(nowUnix())]
+            )
+            return database.lastInsertRowID()
+        }
+        return try await refreshFollow(id: id)
+    }
+
+    private func deleteFollow(id: Int64) throws {
+        guard try database.scalarInt64("SELECT id FROM follows WHERE id = ?", [.int(id)]) != nil else {
+            throw PodsBackendError.notFound
+        }
+        try database.execute("DELETE FROM follows WHERE id = ?", [.int(id)])
+    }
+
+    private func followCandidates() throws -> [FollowCandidate] {
+        try database.query(
+            """
+            SELECT c.id, c.follow_id, c.source_episode_key, c.feed_url, c.feed_title, c.feed_image_url,
+              c.guid, c.title, c.description, c.audio_url, c.duration_secs, c.published_at, c.image_url,
+              c.evidence, c.confidence
+            FROM follow_candidates c WHERE c.status = 'pending'
+            ORDER BY c.published_at DESC, c.id DESC
+            """,
+            map: Self.mapFollowCandidate
+        )
+    }
+
+    private func refreshFollow(id: Int64) async throws -> Follow {
+        guard let follow = try follows().first(where: { $0.id == id }) else { throw PodsBackendError.notFound }
+        guard let searcher = directorySearcher as? PersonAppearanceSearching else {
+            throw PodsBackendError.upstream("Podcast Index appearance search is unavailable")
+        }
+        // An initial setup is intentionally bounded. A follow is for new
+        // appearances, not an unbounded historical discovery import.
+        let lookbackDays: Int64 = follow.last_checked_at == nil ? 30 : 7
+        let cutoff = nowUnix() - lookbackDays * 86_400
+        for name in [follow.name] + follow.aliases {
+            for appearance in try await searcher.searchAppearances(person: name) {
+                guard appearance.published_at >= cutoff else { continue }
+                let candidateID = try storeFollowCandidate(followID: id, appearance: appearance)
+                if appearance.confidence == "high", let candidateID {
+                    try acceptFollowCandidate(id: candidateID)
+                }
+            }
+        }
+        try database.execute("UPDATE follows SET last_checked_at = ? WHERE id = ?", [.int(nowUnix()), .int(id)])
+        guard let updated = try follows().first(where: { $0.id == id }) else { throw PodsBackendError.notFound }
+        return updated
+    }
+
+    private func refreshFollowsAfterFeedRefresh() async {
+        guard directorySearcher is PersonAppearanceSearching else { return }
+        let ids = (try? database.query("SELECT id FROM follows ORDER BY id") { sqlite3_column_int64($0, 0) }) ?? []
+        for id in ids {
+            do {
+                _ = try await refreshFollow(id: id)
+            } catch {
+                PodsDebugLog("Follow refresh failed followID=\(id) error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func storeFollowCandidate(followID: Int64, appearance: DirectoryAppearance) throws -> Int64? {
+        if try database.scalarInt64(
+            "SELECT id FROM follow_candidates WHERE follow_id = ? AND (source_episode_key = ? OR (feed_url = ? AND guid = ?))",
+            [.int(followID), .text(appearance.source_episode_key), .text(appearance.feed_url), .text(appearance.guid)]
+        ) != nil { return nil }
+        try database.execute(
+            """
+            INSERT INTO follow_candidates (follow_id, source_episode_key, feed_url, feed_title, feed_image_url, guid, title, description, audio_url, duration_secs, published_at, image_url, evidence, confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [.int(followID), .text(appearance.source_episode_key), .text(appearance.feed_url), .text(appearance.feed_title), .text(appearance.feed_image_url), .text(appearance.guid), .text(appearance.title), .text(appearance.description), .text(appearance.audio_url), appearance.duration_secs.map(SQLiteValue.int) ?? .null, .int(appearance.published_at), .text(appearance.image_url), .text(appearance.evidence), .text(appearance.confidence), .int(nowUnix())]
+        )
+        return database.lastInsertRowID()
+    }
+
+    private func acceptFollowCandidate(id: Int64) throws {
+        let candidates = try database.query(
+            """
+            SELECT c.id, c.follow_id, c.source_episode_key, c.feed_url, c.feed_title, c.feed_image_url,
+              c.guid, c.title, c.description, c.audio_url, c.duration_secs, c.published_at, c.image_url,
+              c.evidence, c.confidence
+            FROM follow_candidates c WHERE c.id = ? AND c.status = 'pending'
+            """, [.int(id)], map: Self.mapFollowCandidate
+        )
+        guard let candidate = candidates.first else { throw PodsBackendError.notFound }
+        try database.withTransaction {
+            let a = candidate.appearance
+            let podcastID: Int64
+            if let existing = try database.scalarInt64("SELECT id FROM podcasts WHERE feed_url = ?", [.text(a.feed_url)]) {
+                podcastID = existing
+            } else {
+                try database.execute(
+                    "INSERT INTO podcasts (feed_url, title, description, image_url, is_subscribed, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+                    [.text(a.feed_url), .text(a.feed_title), .text(""), .text(a.feed_image_url), .int(nowUnix())]
+                )
+                podcastID = database.lastInsertRowID()
+            }
+            try database.execute(
+                """
+                INSERT INTO episodes (podcast_id, guid, title, notes_html, audio_url, duration_secs, published_at, image_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(podcast_id, guid) DO UPDATE SET title=excluded.title, notes_html=excluded.notes_html, audio_url=excluded.audio_url, duration_secs=excluded.duration_secs, published_at=excluded.published_at, image_url=excluded.image_url
+                """,
+                [.int(podcastID), .text(a.guid), .text(a.title), .text(a.description), .text(a.audio_url), a.duration_secs.map(SQLiteValue.int) ?? .null, .int(a.published_at), .text(a.image_url)]
+            )
+            guard let episodeID = try database.scalarInt64("SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?", [.int(podcastID), .text(a.guid)]) else {
+                throw PodsBackendError.database("could not load accepted appearance")
+            }
+            try database.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (?, ?) ON CONFLICT(episode_id) DO NOTHING", [.int(episodeID), .int(nowUnix())])
+            try database.execute("INSERT OR IGNORE INTO follow_episodes (follow_id, episode_id) VALUES (?, ?)", [.int(candidate.follow_id), .int(episodeID)])
+            try database.execute("UPDATE follow_candidates SET status = 'accepted' WHERE id = ?", [.int(id)])
+            try database.execute("DELETE FROM episodes_fts WHERE rowid = ?", [.int(episodeID)])
+            try database.execute("INSERT INTO episodes_fts (rowid, title, notes) VALUES (?, ?, ?)", [.int(episodeID), .text(a.title), .text(stripHTML(a.description))])
+        }
+        NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
+    }
+
+    private func rejectFollowCandidate(id: Int64) throws {
+        try database.execute("UPDATE follow_candidates SET status = 'rejected' WHERE id = ? AND status = 'pending'", [.int(id)])
     }
 
     private func episodeDetail(id: Int64) throws -> EpisodeDetail {
@@ -965,7 +1141,7 @@ final class PodsBackend: PlaybackProgressRecording {
         if context == "show" {
             sql = "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL AND e.podcast_id = ?3 AND (e.published_at > ?1 OR (e.published_at = ?1 AND e.id > ?2)) ORDER BY e.published_at ASC, e.id ASC LIMIT 1"
         } else {
-            sql = "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL AND (e.published_at < ?1 OR (e.published_at = ?1 AND e.id < ?2)) AND ?3 = ?3 ORDER BY e.published_at DESC, e.id DESC LIMIT 1"
+            sql = "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL AND \(Self.inListenPredicate) AND (e.published_at < ?1 OR (e.published_at = ?1 AND e.id < ?2)) AND ?3 = ?3 ORDER BY e.published_at DESC, e.id DESC LIMIT 1"
         }
         return try database.query(sql, [.int(cur.0), .int(after), .int(cur.1)], map: Self.mapEpisodeItem).first
     }
@@ -1003,7 +1179,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private func refreshAll() async -> RefreshResult {
         let rows: [(Int64, String)]
         do {
-            rows = try database.query("SELECT id, feed_url FROM podcasts ORDER BY id") { statement in
+            rows = try database.query("SELECT id, feed_url FROM podcasts WHERE is_subscribed = 1 ORDER BY id") { statement in
                 (sqlite3_column_int64(statement, 0), sqliteString(statement, 1))
             }
         } catch {
@@ -1029,6 +1205,7 @@ final class PodsBackend: PlaybackProgressRecording {
             }
         }
         PodsDebugLog("Refresh finished ok=\(ok) errors=\(errors)")
+        await refreshFollowsAfterFeedRefresh()
         return RefreshResult(refreshed: ok, errors: errors)
     }
 
@@ -1219,7 +1396,7 @@ final class PodsBackend: PlaybackProgressRecording {
         let episodes = (try? database.query(sql, [.text(matchExpression)], map: Self.mapEpisodeItem)) ?? []
         let podcasts: [DirectoryPodcast]
         if directorySearcher.isConfigured {
-            let subscribedFeeds = try Set(database.query("SELECT feed_url FROM podcasts", map: { sqliteString($0, 0) }))
+            let subscribedFeeds = try Set(database.query("SELECT feed_url FROM podcasts WHERE is_subscribed = 1", map: { sqliteString($0, 0) }))
             podcasts = try await directorySearcher.search(query: query).map { podcast in
                 DirectoryPodcast(
                     title: podcast.title,
@@ -1365,6 +1542,10 @@ final class PodsBackend: PlaybackProgressRecording {
     LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id
     """
 
+    private static let inListenPredicate = """
+    (p.is_subscribed = 1 OR EXISTS (SELECT 1 FROM follow_episodes fe WHERE fe.episode_id = e.id))
+    """
+
     private static let showSelect = """
     SELECT p.id, p.feed_url, p.title, p.description, p.image_url, p.site_url,
     (SELECT COUNT(*) FROM episodes e WHERE e.podcast_id = p.id) AS episode_count,
@@ -1426,6 +1607,50 @@ final class PodsBackend: PlaybackProgressRecording {
             episode_count: sqlite3_column_int64(statement, 6),
             unplayed_count: sqlite3_column_int64(statement, 7)
         )
+    }
+
+    private static func mapFollow(_ statement: OpaquePointer?) -> Follow {
+        let aliases = (try? JSONDecoder().decode([String].self, from: Data(sqliteString(statement, 2).utf8))) ?? []
+        return Follow(
+            id: sqlite3_column_int64(statement, 0),
+            name: sqliteString(statement, 1),
+            aliases: aliases,
+            last_checked_at: sqliteOptionalInt64(statement, 3),
+            pending_count: sqlite3_column_int64(statement, 4),
+            accepted_count: sqlite3_column_int64(statement, 5)
+        )
+    }
+
+    private static func mapFollowCandidate(_ statement: OpaquePointer?) -> FollowCandidate {
+        FollowCandidate(
+            id: sqlite3_column_int64(statement, 0),
+            follow_id: sqlite3_column_int64(statement, 1),
+            appearance: DirectoryAppearance(
+                source_episode_key: sqliteString(statement, 2),
+                feed_url: sqliteString(statement, 3),
+                feed_title: sqliteString(statement, 4),
+                feed_image_url: sqliteString(statement, 5),
+                guid: sqliteString(statement, 6),
+                title: sqliteString(statement, 7),
+                description: sqliteString(statement, 8),
+                audio_url: sqliteString(statement, 9),
+                duration_secs: sqliteOptionalInt64(statement, 10),
+                published_at: sqlite3_column_int64(statement, 11),
+                image_url: sqliteString(statement, 12),
+                evidence: sqliteString(statement, 13),
+                confidence: sqliteString(statement, 14)
+            )
+        )
+    }
+
+    private static func cleanAliases(_ rawAliases: [String], name: String) -> [String] {
+        var seen = Set<String>()
+        return rawAliases.compactMap { alias in
+            let value = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.count >= 2, value.caseInsensitiveCompare(name) != .orderedSame else { return nil }
+            guard seen.insert(value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)).inserted else { return nil }
+            return value
+        }
     }
 }
 

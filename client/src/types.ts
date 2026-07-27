@@ -89,6 +89,37 @@ export interface SearchResults {
   episodes: EpisodeItem[];
 }
 
+export interface Follow {
+  id: number;
+  name: string;
+  aliases: string[];
+  last_checked_at: number | null;
+  pending_count: number;
+  accepted_count: number;
+}
+
+export interface DirectoryAppearance {
+  source_episode_key: string;
+  feed_url: string;
+  feed_title: string;
+  feed_image_url: string;
+  guid: string;
+  title: string;
+  description: string;
+  audio_url: string;
+  duration_secs: number | null;
+  published_at: number;
+  image_url: string;
+  evidence: string;
+  confidence: "high" | "review";
+}
+
+export interface FollowCandidate {
+  id: number;
+  follow_id: number;
+  appearance: DirectoryAppearance;
+}
+
 export interface Settings {
   speed: number;
   autoplay: boolean;

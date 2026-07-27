@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type Tab = "recent" | "played" | "search" | "shows";
+export type Tab = "recent" | "played" | "search" | "shows" | "follows";
 
 export interface Route {
   tab: Tab;
@@ -14,6 +14,8 @@ export function parseHash(hash: string): Route {
       return { tab: "played" };
     case "search":
       return { tab: "search" };
+    case "follows":
+      return { tab: "follows" };
     case "shows": {
       const id = Number(parts[1]);
       return Number.isInteger(id) && id > 0 ? { tab: "shows", showId: id } : { tab: "shows" };

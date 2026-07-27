@@ -4,6 +4,8 @@ import type {
   EpisodeDetail,
   EpisodeItem,
   EpisodeShowNote,
+  Follow,
+  FollowCandidate,
   Page,
   PlayContext,
   RefreshStatus,
@@ -88,6 +90,16 @@ export const Api = {
   recent: (offset = 0) => request<Page<EpisodeItem>>(`/recent?offset=${offset}`),
   played: (offset = 0) => request<Page<EpisodeItem>>(`/played?offset=${offset}`),
   shows: () => request<Show[]>("/shows"),
+  follows: () => request<Follow[]>("/follows"),
+  addFollow: (name: string, aliases: string[]) =>
+    request<Follow>("/follows", { method: "POST", body: JSON.stringify({ name, aliases }) }),
+  refreshFollow: (id: number) => request<Follow>(`/follows/${id}`, { method: "POST" }),
+  deleteFollow: (id: number) => request<void>(`/follows/${id}`, { method: "DELETE" }),
+  followCandidates: () => request<FollowCandidate[]>("/follow-candidates"),
+  acceptFollowCandidate: (id: number) =>
+    request<void>(`/follow-candidates/${id}/accept`, { method: "POST" }),
+  rejectFollowCandidate: (id: number) =>
+    request<void>(`/follow-candidates/${id}/reject`, { method: "POST" }),
   show: (id: number, offset = 0) =>
     request<ShowDetailResponse>(`/shows/${id}?offset=${offset}`),
   showSearch: (id: number, q: string) =>

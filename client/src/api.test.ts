@@ -67,4 +67,15 @@ describe("request wrapper", () => {
     expect(calls[2].url.searchParams.get("after")).toBe("42");
     expect(calls[2].url.searchParams.get("context")).toBe("show");
   });
+
+  it("posts and reviews person follows", async () => {
+    const { calls } = installApi({
+      "POST /api/follows": { id: 1, name: "Balaji Srinivasan", aliases: [], last_checked_at: null, pending_count: 0, accepted_count: 0 },
+      "POST /api/follow-candidates/5/accept": null,
+    });
+    await Api.addFollow("Balaji Srinivasan", ["Balaji S Srinivasan"]);
+    await Api.acceptFollowCandidate(5);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ name: "Balaji Srinivasan", aliases: ["Balaji S Srinivasan"] });
+    expect(calls[1].key).toBe("POST /api/follow-candidates/5/accept");
+  });
 });

@@ -299,6 +299,18 @@ final class PodsBackendTests: XCTestCase {
         }
     }
 
+    private struct MockAppearanceSearcher: PodcastDirectorySearching, PersonAppearanceSearching {
+        var appearances: [String: [DirectoryAppearance]]
+
+        var isConfigured: Bool { true }
+
+        func search(query: String) async throws -> [DirectoryPodcast] { [] }
+
+        func searchAppearances(person: String) async throws -> [DirectoryAppearance] {
+            appearances[person] ?? []
+        }
+    }
+
     private struct Harness {
         let backend: PodsBackend
         let fetcher: MockFeedFetcher
@@ -396,6 +408,96 @@ final class PodsBackendTests: XCTestCase {
         let response = try await call(harness.backend, "GET", "/api/recent")
         XCTAssertEqual(response.statusCode, 200)
         let page = try decode(Page<EpisodeItem>.self, from: response)
+        XCTAssertTrue(page.items.isEmpty)
+    }
+
+    func testFollowAcceptsHighConfidenceAppearanceIntoListen() async throws {
+        let appearance = DirectoryAppearance(
+            source_episode_key: "appearance-1",
+            feed_url: "https://feeds.example/interviews.xml",
+            feed_title: "Interviews",
+            feed_image_url: "https://images.example/show.jpg",
+            guid: "guest-1",
+            title: "Balaji Srinivasan on Network States",
+            description: "A full conversation with Balaji Srinivasan.",
+            audio_url: "https://audio.example/guest-1.mp3",
+            duration_secs: 3600,
+            published_at: nowUnix(),
+            image_url: "https://images.example/episode.jpg",
+            evidence: "person tag: guest",
+            confidence: "high"
+        )
+        let harness = try makeHarness(directorySearcher: MockAppearanceSearcher(appearances: ["Balaji Srinivasan": [appearance]]))
+
+        let created = try await call(harness.backend, "POST", "/api/follows", json: ["name": "Balaji Srinivasan"])
+        XCTAssertEqual(created.statusCode, 201)
+        let follow = try decode(Follow.self, from: created)
+        XCTAssertEqual(follow.accepted_count, 1)
+        XCTAssertEqual(follow.pending_count, 0)
+
+        let refreshed = try await call(harness.backend, "POST", "/api/follows/\(follow.id)")
+        let refreshedFollow = try decode(Follow.self, from: refreshed)
+        XCTAssertEqual(refreshedFollow.accepted_count, 1, "repeat checks dedupe an already accepted appearance")
+
+        let recent = try await call(harness.backend, "GET", "/api/recent")
+        let page = try decode(Page<EpisodeItem>.self, from: recent)
+        XCTAssertEqual(page.items.map(\.title), [appearance.title])
+        let shows = try await call(harness.backend, "GET", "/api/shows")
+        let showList = try decode([Show].self, from: shows)
+        XCTAssertTrue(showList.isEmpty, "appearance sources are not subscriptions")
+    }
+
+    func testFollowKeepsAmbiguousAppearanceOutOfListenUntilAccepted() async throws {
+        let appearance = DirectoryAppearance(
+            source_episode_key: "appearance-2",
+            feed_url: "https://feeds.example/tech.xml",
+            feed_title: "Tech Talk",
+            feed_image_url: "",
+            guid: "guest-2",
+            title: "The future of Elon Musk's companies",
+            description: "A discussion about Elon Musk.",
+            audio_url: "https://audio.example/guest-2.mp3",
+            duration_secs: nil,
+            published_at: nowUnix(),
+            image_url: "",
+            evidence: "name in title",
+            confidence: "review"
+        )
+        let harness = try makeHarness(directorySearcher: MockAppearanceSearcher(appearances: ["Elon Musk": [appearance]]))
+        _ = try await call(harness.backend, "POST", "/api/follows", json: ["name": "Elon Musk"])
+
+        let before = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        XCTAssertTrue(before.items.isEmpty)
+        let candidates = try decode([FollowCandidate].self, from: try await call(harness.backend, "GET", "/api/follow-candidates"))
+        XCTAssertEqual(candidates.count, 1)
+
+        let accepted = try await call(harness.backend, "POST", "/api/follow-candidates/\(candidates[0].id)/accept")
+        XCTAssertEqual(accepted.statusCode, 204)
+        let after = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        XCTAssertEqual(after.items.map(\.title), [appearance.title])
+    }
+
+    func testFirstFollowCheckExcludesAppearancesOlderThanThirtyDays() async throws {
+        let appearance = DirectoryAppearance(
+            source_episode_key: "old-appearance",
+            feed_url: "https://feeds.example/old.xml",
+            feed_title: "Old Interviews",
+            feed_image_url: "",
+            guid: "old-guest",
+            title: "Balaji Srinivasan interview",
+            description: "A conversation with Balaji Srinivasan.",
+            audio_url: "https://audio.example/old.mp3",
+            duration_secs: nil,
+            published_at: nowUnix() - 31 * 86_400,
+            image_url: "",
+            evidence: "person tag: guest",
+            confidence: "high"
+        )
+        let harness = try makeHarness(directorySearcher: MockAppearanceSearcher(appearances: ["Balaji Srinivasan": [appearance]]))
+        let response = try await call(harness.backend, "POST", "/api/follows", json: ["name": "Balaji Srinivasan"])
+        XCTAssertEqual(try decode(Follow.self, from: response).accepted_count, 0)
+        let recent = try await call(harness.backend, "GET", "/api/recent")
+        let page = try decode(Page<EpisodeItem>.self, from: recent)
         XCTAssertTrue(page.items.isEmpty)
     }
 

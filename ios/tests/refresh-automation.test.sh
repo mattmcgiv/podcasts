@@ -105,6 +105,94 @@ STUB
   chmod +x "$bin_dir/xcrun"
 }
 
+test_profile_metadata_reports_identity_and_expiration() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  cat > "$tmp/profile.mobileprovision" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>UUID</key>
+  <string>fresh-profile</string>
+  <key>CreationDate</key>
+  <date>2026-07-23T12:00:00Z</date>
+  <key>ExpirationDate</key>
+  <date>2026-07-30T12:00:00Z</date>
+  <key>Entitlements</key>
+  <dict>
+    <key>application-identifier</key>
+    <string>TEAMID.dev.mcgiv.pods</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+  cat > "$tmp/bin/security" <<'STUB'
+#!/bin/sh
+for argument in "$@"; do
+  profile="$argument"
+done
+cat "$profile"
+STUB
+  chmod +x "$tmp/bin/security"
+
+  IOS_SECURITY_BIN="$tmp/bin/security" \
+    "$ROOT/ios/profile-metadata.sh" "$tmp/profile.mobileprovision" > "$tmp/metadata"
+
+  assert_file_contains "$tmp/metadata" "profile_uuid=fresh-profile"
+  assert_file_contains "$tmp/metadata" "profile_creation_epoch=1784808000"
+  assert_file_contains "$tmp/metadata" "profile_expiration_epoch=1785412800"
+  assert_file_contains "$tmp/metadata" "application_identifier=TEAMID.dev.mcgiv.pods"
+}
+
+test_signing_alerts_escalate_without_spamming() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  cat > "$tmp/bin/osascript" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' "$*" >> "$OSASCRIPT_LOG"
+STUB
+  chmod +x "$tmp/bin/osascript"
+
+  IOS_ALERT_STATE_FILE="$tmp/alert-state" \
+  IOS_OSASCRIPT_BIN="$tmp/bin/osascript" \
+  OSASCRIPT_LOG="$tmp/osascript.log" \
+    "$ROOT/ios/signing-alert.sh" warning profile-one 900000 "Pods signing expires in 48 hours"
+  IOS_ALERT_STATE_FILE="$tmp/alert-state" \
+  IOS_OSASCRIPT_BIN="$tmp/bin/osascript" \
+  OSASCRIPT_LOG="$tmp/osascript.log" \
+    "$ROOT/ios/signing-alert.sh" warning profile-one 900000 "Pods signing expires in 48 hours"
+  IOS_ALERT_STATE_FILE="$tmp/alert-state" \
+  IOS_OSASCRIPT_BIN="$tmp/bin/osascript" \
+  OSASCRIPT_LOG="$tmp/osascript.log" \
+    "$ROOT/ios/signing-alert.sh" critical profile-one 900000 "Pods signing expires in 12 hours"
+
+  alert_count="$(wc -l < "$tmp/osascript.log" | tr -d '[:space:]')"
+  [ "$alert_count" = "2" ] || fail "expected one warning and one critical alert, got $alert_count"
+  assert_file_contains "$tmp/alert-state" "profile-one:warning"
+  assert_file_contains "$tmp/alert-state" "profile-one:critical"
+}
+
+test_signing_reminders_follow_verified_profile_expiration() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/bin"
+  cat > "$tmp/bin/osascript" <<'STUB'
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' "$*" > "$OSASCRIPT_LOG"
+STUB
+  chmod +x "$tmp/bin/osascript"
+
+  IOS_OSASCRIPT_BIN="$tmp/bin/osascript" \
+  IOS_PROFILE_WARNING_SECONDS=172800 \
+  IOS_PROFILE_CRITICAL_SECONDS=43200 \
+  OSASCRIPT_LOG="$tmp/osascript.log" \
+    "$ROOT/ios/update-signing-reminders.sh" profile-one 900000
+
+  assert_file_equals "$tmp/osascript.log" "- 727200 856800 900000 profile-one"
+}
+
 test_install_agent_generates_retrying_48_hour_refresh_plist() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
@@ -133,11 +221,34 @@ STUB
   assert_file_contains "$plist" "<integer>900</integer>"
   assert_file_contains "$plist" "<key>IOS_REFRESH_SUCCESS_INTERVAL_SECONDS</key>"
   assert_file_contains "$plist" "<string>172800</string>"
+  assert_file_contains "$plist" "<key>IOS_PROFILE_RENEWAL_WINDOW_SECONDS</key>"
+  assert_file_contains "$plist" "<string>259200</string>"
+  assert_file_contains "$plist" "<key>IOS_PROFILE_WARNING_SECONDS</key>"
+  assert_file_contains "$plist" "<string>172800</string>"
+  assert_file_contains "$plist" "<key>IOS_PROFILE_CRITICAL_SECONDS</key>"
+  assert_file_contains "$plist" "<string>43200</string>"
+  assert_file_contains "$plist" "<key>IOS_NOTIFY_FAILURE</key>"
+  assert_file_contains "$plist" "<string>0</string>"
+  assert_file_contains "$plist" "<key>IOS_SIGNING_ALERTS_ENABLED</key>"
+  assert_file_contains "$plist" "<string>1</string>"
   assert_file_contains "$plist" "<key>RunAtLoad</key>"
   assert_file_contains "$plist" "<true/>"
   assert_file_contains "$plist" "<key>PATH</key>"
   assert_file_contains "$plist" "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   assert_file_contains "$tmp/launchctl.log" "bootstrap gui/"
+
+  LAUNCHCTL_LOG="$tmp/launchctl.log" \
+  HOME="$tmp/home" \
+  PATH="$tmp/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_REFRESH_CHECK_INTERVAL_SECONDS=60 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=120 \
+    "$tmp/repo/ios/install-refresh-agent.sh" >/dev/null
+
+  assert_file_contains "$plist" "<integer>60</integer>"
+  assert_file_contains "$plist" "<string>120</string>"
 }
 
 test_successful_refresh_records_success_time() {
@@ -159,6 +270,23 @@ exit 0
 STUB
   chmod +x "$tmp/bin/xcodebuild"
 
+  cat > "$tmp/profile-metadata.sh" <<'STUB'
+#!/bin/sh
+cat <<'STATE'
+profile_uuid=fresh-profile
+profile_creation_epoch=10000
+profile_expiration_epoch=900000
+application_identifier=TEAMID.dev.mcgiv.pods
+STATE
+STUB
+  chmod +x "$tmp/profile-metadata.sh"
+
+  cat > "$tmp/update-reminders.sh" <<'STUB'
+#!/bin/sh
+printf '%s %s\n' "$1" "$2" > "$REMINDER_LOG"
+STUB
+  chmod +x "$tmp/update-reminders.sh"
+
   cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -175,6 +303,7 @@ STUB
 </dict>
 </plist>
 PLIST
+  touch "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/embedded.mobileprovision"
 
   write_xcrun_device_stub "$tmp/bin"
 
@@ -190,6 +319,10 @@ PLIST
   IOS_UI_STABILITY_SECONDS=0 \
   IOS_REFRESH_NOW_EPOCH=12345 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
+  IOS_SIGNING_REMINDER_BIN="$tmp/update-reminders.sh" \
+  REMINDER_LOG="$tmp/reminder.log" \
   DEVICE_LIST_TUNNEL_STATE=disconnected \
   DEVICE_DETAILS_TUNNEL_STATE=connected \
   XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
@@ -199,6 +332,11 @@ PLIST
     "$tmp/repo/ios/refresh-device.sh"
 
   assert_file_equals "$tmp/last-success" "12345"
+  assert_file_contains "$tmp/profile-state" "profile_uuid=fresh-profile"
+  assert_file_contains "$tmp/profile-state" "profile_creation_epoch=10000"
+  assert_file_contains "$tmp/profile-state" "profile_expiration_epoch=900000"
+  assert_file_contains "$tmp/profile-state" "last_success_epoch=12345"
+  assert_file_equals "$tmp/reminder.log" "fresh-profile 900000"
   assert_file_contains "$tmp/xcodebuild.log" "-skipPackagePluginValidation"
   assert_file_contains "$tmp/xcodebuild.log" "-onlyUsePackageVersionsFromResolvedFile"
   assert_file_contains "$tmp/xcodebuild.log" "PODS_BUILD_ID=test-build"
@@ -222,6 +360,10 @@ PLIST
   IOS_UI_STABILITY_SECONDS=0 \
   IOS_REFRESH_NOW_EPOCH=12345 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
+  IOS_SIGNING_REMINDER_BIN="$tmp/update-reminders.sh" \
+  REMINDER_LOG="$tmp/reminder.log" \
   DEVICE_DETAILS_TUNNEL_STATE=connected \
   XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
   XCODEBUILD_LOG="$tmp/xcodebuild.log" \
@@ -234,6 +376,184 @@ PLIST
 
   [ "$mismatched_process_status" -ne 0 ] || fail "a different surviving PID must fail refresh verification"
   [ ! -e "$tmp/last-success" ] || fail "a PID mismatch must not advance the success marker"
+}
+
+test_forced_renewal_rejects_expiring_profile_before_install() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin" "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+
+  cat > "$tmp/profile-metadata.sh" <<'STUB'
+#!/bin/sh
+cat <<'STATE'
+profile_uuid=reused-expiring-profile
+profile_creation_epoch=100000
+profile_expiration_epoch=200100
+application_identifier=TEAMID.dev.mcgiv.pods
+STATE
+STUB
+  chmod +x "$tmp/profile-metadata.sh"
+
+  cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.mcgiv.pods</string>
+  <key>CFBundleExecutable</key>
+  <string>Pods</string>
+  <key>PodsBuildID</key>
+  <string>test-build</string>
+  <key>PodsRefreshNonce</key>
+  <string>test-nonce</string>
+</dict>
+</plist>
+PLIST
+  touch "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/embedded.mobileprovision"
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_FORCE_PROFILE_RENEWAL=1 \
+  IOS_PROFILE_FRESH_VALIDITY_SECONDS=518400 \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
+  IOS_REFRESH_NOW_EPOCH=200000 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-device.sh"
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "forced renewal must reject a profile with only seconds remaining"
+  [ ! -e "$tmp/last-success" ] || fail "rejected profile must not advance the success marker"
+  [ ! -e "$tmp/profile-state" ] || fail "rejected profile must not update profile state"
+  if grep -Fq "devicectl device install app" "$tmp/xcrun.log"; then
+    fail "an expiring profile must be rejected before installation"
+  fi
+}
+
+test_forced_renewal_archives_only_expiring_matching_profile() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin" "$tmp/cache" "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app"
+  cp "$ROOT/ios/refresh-device.sh" "$tmp/repo/ios/refresh-device.sh"
+  chmod +x "$tmp/repo/ios/refresh-device.sh"
+  touch "$tmp/cache/pods-expiring.mobileprovision"
+  touch "$tmp/cache/unrelated.mobileprovision"
+
+  cat > "$tmp/repo/ios/check-xcode.sh" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/repo/ios/check-xcode.sh"
+
+  cat > "$tmp/bin/xcodebuild" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+  chmod +x "$tmp/bin/xcodebuild"
+
+  cat > "$tmp/profile-metadata.sh" <<'STUB'
+#!/bin/sh
+case "$(basename "$1")" in
+  pods-expiring.mobileprovision)
+    uuid="pods-expiring"
+    expiration=200100
+    application_identifier="TEAMID.dev.mcgiv.pods"
+    ;;
+  unrelated.mobileprovision)
+    uuid="unrelated"
+    expiration=200100
+    application_identifier="OTHERID.other.app"
+    ;;
+  embedded.mobileprovision)
+    uuid="pods-fresh"
+    expiration=900000
+    application_identifier="TEAMID.dev.mcgiv.pods"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+printf 'profile_uuid=%s\n' "$uuid"
+printf 'profile_creation_epoch=100000\n'
+printf 'profile_expiration_epoch=%s\n' "$expiration"
+printf 'application_identifier=%s\n' "$application_identifier"
+STUB
+  chmod +x "$tmp/profile-metadata.sh"
+
+  cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.mcgiv.pods</string>
+  <key>CFBundleExecutable</key>
+  <string>Pods</string>
+  <key>PodsBuildID</key>
+  <string>test-build</string>
+  <key>PodsRefreshNonce</key>
+  <string>test-nonce</string>
+</dict>
+</plist>
+PLIST
+  touch "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/embedded.mobileprovision"
+  write_xcrun_device_stub "$tmp/bin"
+
+  HOME="$tmp/home" \
+  IOS_BUILD_DIR="$tmp/build" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_XCODE_DESTINATION="platform=iOS,id=xcode-id" \
+  IOS_TEAM_ID="TEAMID" \
+  IOS_SKIP_WEB_ASSETS=1 \
+  IOS_NOTIFY_FAILURE=0 \
+  IOS_FORCE_PROFILE_RENEWAL=1 \
+  IOS_PROFILE_FRESH_VALIDITY_SECONDS=518400 \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
+  IOS_PROFILE_CACHE_DIRS="$tmp/cache" \
+  IOS_PROFILE_BACKUP_DIR="$tmp/backups" \
+  IOS_SOURCE_BUILD_ID="test-build" \
+  IOS_REFRESH_NONCE="test-nonce" \
+  IOS_REFRESH_NOW_EPOCH=200000 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_UI_READY_CHECK=: \
+  IOS_UI_STABILITY_SECONDS=0 \
+  DEVICE_DETAILS_TUNNEL_STATE=connected \
+  XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+  XCRUN_LOG="$tmp/xcrun.log" \
+    "$tmp/repo/ios/refresh-device.sh"
+
+  [ ! -e "$tmp/cache/pods-expiring.mobileprovision" ] || fail "expiring Pods profile should leave Xcode's active cache"
+  assert_file_exists "$tmp/backups/pods-expiring.mobileprovision"
+  assert_file_exists "$tmp/cache/unrelated.mobileprovision"
 }
 
 test_unlaunchable_install_does_not_record_success() {
@@ -254,6 +574,17 @@ exit 0
 STUB
   chmod +x "$tmp/bin/xcodebuild"
 
+  cat > "$tmp/profile-metadata.sh" <<'STUB'
+#!/bin/sh
+cat <<'STATE'
+profile_uuid=fresh-profile
+profile_creation_epoch=10000
+profile_expiration_epoch=900000
+application_identifier=TEAMID.dev.mcgiv.pods
+STATE
+STUB
+  chmod +x "$tmp/profile-metadata.sh"
+
   cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -270,6 +601,7 @@ STUB
 </dict>
 </plist>
 PLIST
+  touch "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/embedded.mobileprovision"
   write_xcrun_device_stub "$tmp/bin"
 
   set +e
@@ -282,7 +614,10 @@ PLIST
   IOS_NOTIFY_FAILURE=0 \
   IOS_SOURCE_BUILD_ID="test-build" \
   IOS_REFRESH_NONCE="test-nonce" \
+  IOS_REFRESH_NOW_EPOCH=12345 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
   DEVICE_DETAILS_TUNNEL_STATE=connected \
   XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
   XCRUN_BIN="$tmp/bin/xcrun" \
@@ -328,6 +663,17 @@ STUB
   chmod +x "$tmp/bin/xcodebuild"
   write_xcrun_device_stub "$tmp/bin"
 
+  cat > "$tmp/profile-metadata.sh" <<'STUB'
+#!/bin/sh
+cat <<'STATE'
+profile_uuid=fresh-profile
+profile_creation_epoch=10000
+profile_expiration_epoch=900000
+application_identifier=TEAMID.dev.mcgiv.pods
+STATE
+STUB
+  chmod +x "$tmp/profile-metadata.sh"
+
   cat > "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -344,6 +690,7 @@ STUB
 </dict>
 </plist>
 PLIST
+  touch "$tmp/build/DerivedData/Build/Products/Debug-iphoneos/Pods.app/embedded.mobileprovision"
 
   set +e
   HOME="$tmp/home" \
@@ -357,6 +704,8 @@ PLIST
   IOS_REFRESH_NONCE="test-nonce" \
   IOS_REFRESH_NOW_EPOCH=23456 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_METADATA_BIN="$tmp/profile-metadata.sh" \
   DEVICE_DETAILS_TUNNEL_STATE=connected \
   XCODEBUILD_BIN="$tmp/bin/xcodebuild" \
   XCRUN_BIN="$tmp/bin/xcrun" \
@@ -584,6 +933,11 @@ test_recent_success_skips_refresh() {
   cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
   chmod +x "$tmp/repo/ios/refresh-if-due.sh"
   printf '100000\n' > "$tmp/last-success"
+  cat > "$tmp/profile-state" <<'STATE'
+profile_uuid=fresh-profile
+profile_expiration_epoch=500000
+last_success_epoch=100000
+STATE
 
   cat > "$tmp/refresh-device.sh" <<'STUB'
 #!/bin/sh
@@ -596,6 +950,7 @@ STUB
   IOS_REFRESH_NOW_EPOCH=100100 \
   IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
   IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
   REFRESH_CALLED_FILE="$tmp/refresh-called" \
     "$tmp/repo/ios/refresh-if-due.sh"
@@ -605,7 +960,43 @@ STUB
   fi
 }
 
-test_due_refresh_waits_for_connected_device_before_signing() {
+test_profile_expiry_overrides_recent_success() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+  printf '100000\n' > "$tmp/last-success"
+  cat > "$tmp/profile-state" <<'STATE'
+profile_uuid=expiring-profile
+profile_expiration_epoch=200100
+last_success_epoch=100000
+STATE
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+printf 'force=%s\n' "${IOS_FORCE_PROFILE_RENEWAL:-0}" > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=200000 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_RENEWAL_WINDOW_SECONDS=259200 \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+  DEVICE_TUNNEL_STATE=connected \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+
+  assert_file_equals "$tmp/refresh-called" "force=1"
+}
+
+test_missing_profile_state_forces_verified_renewal() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
   cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
@@ -614,9 +1005,51 @@ test_due_refresh_waits_for_connected_device_before_signing() {
 
   cat > "$tmp/refresh-device.sh" <<'STUB'
 #!/bin/sh
+printf 'force=%s\n' "${IOS_FORCE_PROFILE_RENEWAL:-0}" > "$REFRESH_CALLED_FILE"
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  write_xcrun_device_stub "$tmp/bin"
+
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=100100 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/missing-profile-state" \
+  IOS_PROFILE_RENEWAL_WINDOW_SECONDS=259200 \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  REFRESH_CALLED_FILE="$tmp/refresh-called" \
+  DEVICE_TUNNEL_STATE=connected \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+
+  assert_file_equals "$tmp/refresh-called" "force=1"
+}
+
+test_due_refresh_waits_for_connected_device_before_signing() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+  printf '100000\n' > "$tmp/last-success"
+  cat > "$tmp/profile-state" <<'STATE'
+profile_uuid=expiring-profile
+profile_expiration_epoch=400000
+last_success_epoch=100000
+STATE
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
 printf 'called\n' > "$REFRESH_CALLED_FILE"
 STUB
   chmod +x "$tmp/refresh-device.sh"
+
+  cat > "$tmp/signing-alert.sh" <<'STUB'
+#!/bin/sh
+printf '%s %s %s\n' "$1" "$2" "$3" > "$SIGNING_ALERT_LOG"
+STUB
+  chmod +x "$tmp/signing-alert.sh"
 
   write_xcrun_device_stub "$tmp/bin"
 
@@ -626,7 +1059,12 @@ STUB
   IOS_REFRESH_NOW_EPOCH=300000 \
   IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
   IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_PROFILE_WARNING_SECONDS=172800 \
+  IOS_PROFILE_CRITICAL_SECONDS=43200 \
   IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  IOS_SIGNING_ALERT_BIN="$tmp/signing-alert.sh" \
+  SIGNING_ALERT_LOG="$tmp/signing-alert.log" \
   REFRESH_CALLED_FILE="$tmp/refresh-called" \
   DEVICE_TUNNEL_STATE=unavailable \
   XCRUN_BIN="$tmp/bin/xcrun" \
@@ -640,6 +1078,90 @@ STUB
     fail "an unavailable device must not trigger a build/sign/install"
   fi
   assert_file_contains "$tmp/xcrun.log" "devicectl device info details"
+  assert_file_equals "$tmp/signing-alert.log" "warning expiring-profile 400000"
+}
+
+test_failed_refresh_preserves_status_and_emits_deduplicated_alert() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+  printf '100000\n' > "$tmp/last-success"
+  cat > "$tmp/profile-state" <<'STATE'
+profile_uuid=current-profile
+profile_expiration_epoch=900000
+last_success_epoch=100000
+STATE
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+exit 23
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  cat > "$tmp/signing-alert.sh" <<'STUB'
+#!/bin/sh
+printf '%s %s %s\n' "$1" "$2" "$3" > "$SIGNING_ALERT_LOG"
+STUB
+  chmod +x "$tmp/signing-alert.sh"
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=300000 \
+  IOS_REFRESH_SUCCESS_INTERVAL_SECONDS=172800 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/profile-state" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  IOS_SIGNING_ALERT_BIN="$tmp/signing-alert.sh" \
+  SIGNING_ALERT_LOG="$tmp/signing-alert.log" \
+  DEVICE_TUNNEL_STATE=connected \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+  status=$?
+  set -e
+
+  [ "$status" -eq 23 ] || fail "failed refresh should preserve exit 23, got $status"
+  assert_file_equals "$tmp/signing-alert.log" "failure current-profile 900000"
+}
+
+test_initial_renewal_failure_alerts_when_profile_state_is_missing() {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/repo/ios" "$tmp/home" "$tmp/bin"
+  cp "$ROOT/ios/refresh-if-due.sh" "$tmp/repo/ios/refresh-if-due.sh"
+  chmod +x "$tmp/repo/ios/refresh-if-due.sh"
+
+  cat > "$tmp/refresh-device.sh" <<'STUB'
+#!/bin/sh
+exit 65
+STUB
+  chmod +x "$tmp/refresh-device.sh"
+
+  cat > "$tmp/signing-alert.sh" <<'STUB'
+#!/bin/sh
+printf '%s %s %s\n' "$1" "$2" "$3" > "$SIGNING_ALERT_LOG"
+STUB
+  chmod +x "$tmp/signing-alert.sh"
+  write_xcrun_device_stub "$tmp/bin"
+
+  set +e
+  HOME="$tmp/home" \
+  IOS_DEVICE_ID="device-id" \
+  IOS_REFRESH_NOW_EPOCH=300000 \
+  IOS_REFRESH_SUCCESS_FILE="$tmp/last-success" \
+  IOS_REFRESH_PROFILE_STATE_FILE="$tmp/missing-profile-state" \
+  IOS_REFRESH_SCRIPT="$tmp/refresh-device.sh" \
+  IOS_SIGNING_ALERT_BIN="$tmp/signing-alert.sh" \
+  SIGNING_ALERT_LOG="$tmp/signing-alert.log" \
+  DEVICE_TUNNEL_STATE=connected \
+  XCRUN_BIN="$tmp/bin/xcrun" \
+    "$tmp/repo/ios/refresh-if-due.sh"
+  status=$?
+  set -e
+
+  [ "$status" -eq 65 ] || fail "initial renewal failure should preserve exit 65, got $status"
+  assert_file_equals "$tmp/signing-alert.log" "failure unknown-profile 300000"
 }
 
 test_prepare_web_assets_starts_existing_stopped_container() {
@@ -905,8 +1427,13 @@ STUB
   fi
 }
 
+test_profile_metadata_reports_identity_and_expiration
+test_signing_alerts_escalate_without_spamming
+test_signing_reminders_follow_verified_profile_expiration
 test_install_agent_generates_retrying_48_hour_refresh_plist
 test_successful_refresh_records_success_time
+test_forced_renewal_rejects_expiring_profile_before_install
+test_forced_renewal_archives_only_expiring_matching_profile
 test_unlaunchable_install_does_not_record_success
 test_failed_default_ui_ready_check_does_not_record_success
 test_ui_ready_verifier_requires_fresh_matching_build_marker
@@ -914,7 +1441,11 @@ test_manual_refresh_checks_device_before_signing
 test_due_refresh_invokes_installer
 test_due_refresh_opens_available_device_tunnel
 test_recent_success_skips_refresh
+test_profile_expiry_overrides_recent_success
+test_missing_profile_state_forces_verified_renewal
 test_due_refresh_waits_for_connected_device_before_signing
+test_failed_refresh_preserves_status_and_emits_deduplicated_alert
+test_initial_renewal_failure_alerts_when_profile_state_is_missing
 test_prepare_web_assets_starts_existing_stopped_container
 test_prepare_web_assets_recreates_stale_container_mounts
 test_dev_up_starts_existing_stopped_container

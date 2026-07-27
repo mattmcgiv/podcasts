@@ -7,6 +7,10 @@ protocol PodcastDirectorySearching {
     func search(query: String) async throws -> [DirectoryPodcast]
 }
 
+protocol PersonAppearanceSearching {
+    func searchAppearances(person: String) async throws -> [DirectoryAppearance]
+}
+
 struct DisabledPodcastDirectorySearcher: PodcastDirectorySearching {
     var isConfigured: Bool {
         false
@@ -17,7 +21,7 @@ struct DisabledPodcastDirectorySearcher: PodcastDirectorySearching {
     }
 }
 
-struct PodcastIndexClient: PodcastDirectorySearching {
+struct PodcastIndexClient: PodcastDirectorySearching, PersonAppearanceSearching {
     private struct SearchResponse: Decodable {
         let feeds: [Feed]
     }
@@ -29,6 +33,30 @@ struct PodcastIndexClient: PodcastDirectorySearching {
         let description: String?
         let image: String?
         let artwork: String?
+    }
+
+    private struct PersonSearchResponse: Decodable {
+        let items: [PersonSearchItem]
+    }
+
+    private struct PersonSearchItem: Decodable {
+        let id: Int64?
+        let guid: String?
+        let title: String?
+        let description: String?
+        let datePublished: Int64?
+        let duration: Int64?
+        let enclosureUrl: String?
+        let image: String?
+        let feedUrl: String?
+        let feedTitle: String?
+        let feedImage: String?
+        let persons: [Person]?
+    }
+
+    private struct Person: Decodable {
+        let name: String?
+        let role: String?
     }
 
     private let key: String
@@ -111,6 +139,78 @@ struct PodcastIndexClient: PodcastDirectorySearching {
         }
     }
 
+    func searchAppearances(person: String) async throws -> [DirectoryAppearance] {
+        let items: PersonSearchResponse = try await get("search/byperson", queryItems: [
+            URLQueryItem(name: "q", value: person),
+            URLQueryItem(name: "max", value: "100"),
+            URLQueryItem(name: "fulltext", value: nil),
+        ])
+        let normalizedPerson = normalized(person)
+        return items.items.compactMap { item in
+            guard let feedURL = nonEmpty(item.feedUrl),
+                  let audioURL = nonEmpty(item.enclosureUrl),
+                  let guid = nonEmpty(item.guid) ?? item.id.map(String.init),
+                  let key = item.id.map(String.init) ?? nonEmpty(item.guid) else {
+                return nil
+            }
+            let title = item.title ?? ""
+            let description = item.description ?? ""
+            let personTag = item.persons?.first { normalized($0.name ?? "") == normalizedPerson }
+            let titleHasName = normalized(title).contains(normalizedPerson)
+            let descriptionHasName = normalized(description).contains(normalizedPerson)
+            let confidence: String
+            let evidence: String
+            if let personTag {
+                confidence = "high"
+                evidence = "person tag" + (personTag.role.map { ": \($0)" } ?? "")
+            } else if titleHasName && descriptionHasName {
+                confidence = "high"
+                evidence = "name in title and description"
+            } else if titleHasName || descriptionHasName {
+                confidence = "review"
+                evidence = titleHasName ? "name in title" : "name in description"
+            } else {
+                return nil
+            }
+            return DirectoryAppearance(
+                source_episode_key: key,
+                feed_url: feedURL,
+                feed_title: item.feedTitle ?? "",
+                feed_image_url: item.feedImage ?? "",
+                guid: guid,
+                title: title,
+                description: description,
+                audio_url: audioURL,
+                duration_secs: item.duration,
+                published_at: item.datePublished ?? 0,
+                image_url: item.image ?? "",
+                evidence: evidence,
+                confidence: confidence
+            )
+        }
+    }
+
+    private func get<T: Decodable>(_ path: String, queryItems: [URLQueryItem]) async throws -> T {
+        var endpoint = baseURL
+        endpoint.appendPathComponent(path)
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw PodsBackendError.upstream("invalid Podcast Index URL")
+        }
+        components.queryItems = queryItems
+        guard let url = components.url else { throw PodsBackendError.upstream("invalid Podcast Index URL") }
+        var request = URLRequest(url: url)
+        let now = Int64(Date().timeIntervalSince1970)
+        request.setValue(String(now), forHTTPHeaderField: "X-Auth-Date")
+        request.setValue(key, forHTTPHeaderField: "X-Auth-Key")
+        request.setValue(Self.authHeader(key: key, secret: secret, timestamp: now), forHTTPHeaderField: "Authorization")
+        request.setValue("Pods/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw PodsBackendError.upstream("Podcast Index request failed")
+        }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
     static func authHeader(key: String, secret: String, timestamp: Int64) -> String {
         let value = "\(key)\(secret)\(timestamp)"
         let digest = Insecure.SHA1.hash(data: Data(value.utf8))
@@ -130,4 +230,11 @@ private func nonEmpty(_ value: String?) -> String? {
         return nil
     }
     return value
+}
+
+private func normalized(_ value: String) -> String {
+    value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .lowercased()
+        .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        .joined(separator: " ")
 }

@@ -122,6 +122,40 @@ struct DirectoryPodcast: Codable, Equatable {
     let subscribed: Bool
 }
 
+/// A possible full-length appearance returned by a directory. Candidates are
+/// deliberately kept out of Listen until Pods has either high-confidence
+/// evidence or the owner accepts them in review.
+struct DirectoryAppearance: Codable, Equatable {
+    let source_episode_key: String
+    let feed_url: String
+    let feed_title: String
+    let feed_image_url: String
+    let guid: String
+    let title: String
+    let description: String
+    let audio_url: String
+    let duration_secs: Int64?
+    let published_at: Int64
+    let image_url: String
+    let evidence: String
+    let confidence: String
+}
+
+struct Follow: Codable, Equatable {
+    let id: Int64
+    let name: String
+    let aliases: [String]
+    let last_checked_at: Int64?
+    let pending_count: Int64
+    let accepted_count: Int64
+}
+
+struct FollowCandidate: Codable, Equatable {
+    let id: Int64
+    let follow_id: Int64
+    let appearance: DirectoryAppearance
+}
+
 struct SearchResults: Codable {
     let directory_configured: Bool
     let podcasts: [DirectoryPodcast]

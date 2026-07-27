@@ -227,7 +227,8 @@ input {
 
 .episode-list,
 .podcast-results,
-.show-list {
+.show-list,
+.follow-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -239,6 +240,73 @@ input {
   align-items: center;
   gap: 4px;
   border-bottom: 1px solid var(--line);
+}
+
+.follow-intro {
+  margin: 0 0 14px;
+  line-height: 1.45;
+}
+
+.follow-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.follow-form input {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-raised);
+  color: var(--text);
+  padding: 0 12px;
+}
+
+.follow-form input:nth-child(2) {
+  grid-column: 1 / -1;
+}
+
+.follow-form button,
+.text-btn {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 9px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.follow-form button {
+  background: var(--accent);
+  color: #fff;
+}
+
+.follow-form button:disabled,
+.text-btn:disabled {
+  opacity: 0.5;
+}
+
+.follow-row,
+.candidate-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 0;
+}
+
+.candidate-row {
+  gap: 10px;
+}
+
+.candidate-actions {
+  display: flex;
+  flex-direction: column;
+}
+
+.text-btn.danger {
+  color: var(--danger);
 }
 
 .row-main,
