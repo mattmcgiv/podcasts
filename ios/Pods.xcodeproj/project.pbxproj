@@ -227,6 +227,7 @@
 			buildPhases = (
 				10A000000000000000000050 /* Sources */,
 				10A000000000000000000020 /* Frameworks */,
+				10A000000000000000000053 /* Verify Web Assets */,
 				10A000000000000000000051 /* Resources */,
 				10A000000000000000000052 /* Write Podcast Index Credentials */,
 			);
@@ -316,6 +317,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		10A000000000000000000053 /* Verify Web Assets */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Verify Web Assets";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$PROJECT_DIR/verify-web-assets.sh\"";
+		};
 		10A000000000000000000052 /* Write Podcast Index Credentials */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

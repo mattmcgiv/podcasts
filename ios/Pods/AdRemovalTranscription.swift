@@ -8,12 +8,41 @@ protocol AdTranscribing: AnyObject {
     func transcribe(audioURL: URL, episodeID: Int64) async throws -> [AdTranscriptSegment]
 }
 
-enum AdRemovalTranscriptionError: Error, Equatable {
+enum AdRemovalTranscriptionError: Error, Equatable, CustomNSError {
     case invalidSegment
     case speechTranscriberUnavailable
     case englishLocaleUnsupported
     case speechModelUnavailable
     case noFinalizedResults
+
+    static let errorDomain = "Pods.AdRemovalTranscriptionError"
+
+    var errorCode: Int {
+        switch self {
+        case .invalidSegment: 1
+        case .speechTranscriberUnavailable: 2
+        case .englishLocaleUnsupported: 3
+        case .speechModelUnavailable: 4
+        case .noFinalizedResults: 5
+        }
+    }
+
+    var errorUserInfo: [String: Any] {
+        let description: String
+        switch self {
+        case .invalidSegment:
+            description = "Speech analysis returned an invalid transcript segment."
+        case .speechTranscriberUnavailable:
+            description = "On-device speech transcription is unavailable."
+        case .englishLocaleUnsupported:
+            description = "The installed speech transcriber does not support English."
+        case .speechModelUnavailable:
+            description = "The required on-device speech model is unavailable."
+        case .noFinalizedResults:
+            description = "Speech analysis completed without any usable finalized transcript segments."
+        }
+        return [NSLocalizedDescriptionKey: description]
+    }
 }
 
 enum AdTranscriptSegmentFactory {
@@ -52,9 +81,37 @@ enum AdTranscriptSegmentFactory {
     }
 }
 
+struct AdTranscriptResultAccumulator {
+    let language: String
+    private(set) var segments: [AdTranscriptSegment] = []
+    private(set) var observedFinalResultCount = 0
+    private(set) var rejectedFinalResultCount = 0
+
+    mutating func consume(
+        isFinal: Bool,
+        startTime: Double,
+        endTime: Double,
+        text: String
+    ) {
+        guard isFinal else { return }
+        observedFinalResultCount += 1
+        do {
+            segments.append(try AdTranscriptSegmentFactory.make(
+                index: segments.count,
+                language: language,
+                startTime: startTime,
+                endTime: endTime,
+                text: text
+            ))
+        } catch {
+            rejectedFinalResultCount += 1
+        }
+    }
+}
+
 @available(iOS 26.0, *)
 final class AppleSpeechAnalyzerTranscriber: AdTranscribing {
-    let version = "apple-speechanalyzer-en-v1"
+    let version = "apple-speechanalyzer-en-v2"
     private let diagnostics: AdRemovalDiagnostics?
 
     init(diagnostics: AdRemovalDiagnostics? = nil) {
@@ -78,18 +135,17 @@ final class AppleSpeechAnalyzerTranscriber: AdTranscribing {
         try await ensureModel(for: transcriber, locale: locale, episodeID: episodeID)
         let audioFile = try AVAudioFile(forReading: audioURL)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
-        let resultTask = Task { () throws -> [AdTranscriptSegment] in
-            var segments: [AdTranscriptSegment] = []
-            for try await result in transcriber.results where result.isFinal {
-                segments.append(try AdTranscriptSegmentFactory.make(
-                    index: segments.count,
-                    language: locale.identifier,
+        let resultTask = Task { () throws -> AdTranscriptResultAccumulator in
+            var accumulator = AdTranscriptResultAccumulator(language: locale.identifier)
+            for try await result in transcriber.results {
+                accumulator.consume(
+                    isFinal: result.isFinal,
                     startTime: CMTimeGetSeconds(result.range.start),
                     endTime: CMTimeGetSeconds(CMTimeRangeGetEnd(result.range)),
                     text: String(result.text.characters)
-                ))
+                )
             }
-            return segments
+            return accumulator
         }
 
         record(
@@ -104,18 +160,38 @@ final class AppleSpeechAnalyzerTranscriber: AdTranscribing {
             } else {
                 await analyzer.cancelAndFinishNow()
             }
-            let segments = try await resultTask.value
+            let result = try await resultTask.value
             await SpeechModels.endRetention()
-            guard !segments.isEmpty else {
+            if result.rejectedFinalResultCount > 0 {
+                record(
+                    eventName: "transcription_results_rejected",
+                    severity: .warning,
+                    episodeID: episodeID,
+                    fields: [
+                        "observed_final_result_count": String(result.observedFinalResultCount),
+                        "rejected_final_result_count": String(result.rejectedFinalResultCount)
+                    ]
+                )
+            }
+            guard !result.segments.isEmpty else {
+                record(
+                    eventName: "transcription_no_usable_results",
+                    severity: .error,
+                    episodeID: episodeID,
+                    fields: [
+                        "observed_final_result_count": String(result.observedFinalResultCount),
+                        "rejected_final_result_count": String(result.rejectedFinalResultCount)
+                    ]
+                )
                 throw AdRemovalTranscriptionError.noFinalizedResults
             }
             record(
                 eventName: "transcription_completed",
                 severity: .notice,
                 episodeID: episodeID,
-                fields: ["finalized_segment_count": String(segments.count)]
+                fields: ["finalized_segment_count": String(result.segments.count)]
             )
-            return segments
+            return result.segments
         } catch {
             resultTask.cancel()
             await analyzer.cancelAndFinishNow()
