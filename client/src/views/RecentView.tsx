@@ -37,8 +37,6 @@ export const MARK_PLAYED_REFLOW_GUARD_MS = 1_000;
 
 /** Backend caps batch statuses at 50 episode ids per request. */
 const AD_STATUS_BATCH_MAX = 50;
-const PULL_TO_REFRESH_THRESHOLD_PX = 72;
-const PULL_TO_REFRESH_MAX_PX = 112;
 
 function isTerminalAdState(state: EpisodeItem["ad_removal_state"]): boolean {
   return state === "ad-free" || state === "failed" || state === "unfiltered";
@@ -91,11 +89,7 @@ export function RecentView() {
   const [sortAscending, setSortAscending] = useState(true);
   const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
-  const [pullDistance, setPullDistance] = useState(0);
-  const [pullRefreshing, setPullRefreshing] = useState(false);
   const markPlayedGuardUntilRef = useRef(0);
-  const pullStartYRef = useRef<number | null>(null);
-  const pullDistanceRef = useRef(0);
 
   const items = list.items;
 
@@ -330,55 +324,8 @@ export function RecentView() {
       .catch(() => list.reload());
   }
 
-  function beginPullRefresh(clientY: number) {
-    if (pullRefreshing || window.scrollY > 0 || document.documentElement.scrollTop > 0) return;
-    pullStartYRef.current = clientY;
-  }
-
-  function trackPullRefresh(clientY: number) {
-    const startY = pullStartYRef.current;
-    if (startY == null) return;
-    const distance = Math.min(PULL_TO_REFRESH_MAX_PX, Math.max(0, clientY - startY));
-    pullDistanceRef.current = distance;
-    setPullDistance(distance);
-  }
-
-  function completePullRefresh() {
-    const shouldRefresh = pullStartYRef.current != null && pullDistanceRef.current >= PULL_TO_REFRESH_THRESHOLD_PX;
-    pullStartYRef.current = null;
-    pullDistanceRef.current = 0;
-    setPullDistance(0);
-    if (!shouldRefresh || pullRefreshing) return;
-
-    setPullRefreshing(true);
-    void Api.refresh()
-      .then(() => {
-        list.reload();
-        return Api.refreshStatus();
-      })
-      .then(setRefreshStatus)
-      .catch(() => {})
-      .finally(() => setPullRefreshing(false));
-  }
-
   return (
-    <section
-      className="view"
-      aria-label="Listen"
-      onPointerDown={(event) => beginPullRefresh(event.clientY)}
-      onPointerMove={(event) => trackPullRefresh(event.clientY)}
-      onPointerCancel={completePullRefresh}
-      onPointerUp={completePullRefresh}
-    >
-      {(pullDistance > 0 || pullRefreshing) && (
-        <p className="pull-refresh-status" role="status">
-          {pullRefreshing
-            ? "Refreshing feeds…"
-            : pullDistance >= PULL_TO_REFRESH_THRESHOLD_PX
-              ? "Release to refresh"
-              : "Pull to refresh"}
-        </p>
-      )}
+    <section className="view">
       <header className="view-header">
         <h1>{APP_NAME}</h1>
         <button
