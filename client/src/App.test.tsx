@@ -60,13 +60,14 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fresh Episode");
 
-    const main = screen.getByRole("main");
-    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
-    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    const episodeRow = screen.getByText("Fresh Episode").closest("button")!;
+    fireEvent.touchStart(episodeRow, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(episodeRow, { changedTouches: [{ clientX: 90, clientY: 248 }] });
     await screen.findByRole("heading", { name: "Played" });
 
-    fireEvent.touchStart(main, { touches: [{ clientX: 80, clientY: 240 }] });
-    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 275, clientY: 246 }] });
+    const playedView = screen.getByRole("main");
+    fireEvent.touchStart(playedView, { touches: [{ clientX: 80, clientY: 240 }] });
+    fireEvent.touchEnd(playedView, { changedTouches: [{ clientX: 275, clientY: 246 }] });
     await screen.findByText("Fresh Episode");
   });
 });

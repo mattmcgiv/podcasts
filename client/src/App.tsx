@@ -20,8 +20,8 @@ const SWIPE_DIRECTION_RATIO = 1.4;
 
 type SwipeDirection = "forward" | "back";
 
-function isInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest("button, input, textarea, select, a, [role=button], [role=switch]") != null;
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest("input, textarea, select, [contenteditable=true]") != null;
 }
 
 export function App() {
@@ -49,7 +49,7 @@ function Shell() {
   }, [route.tab, swipeDirection]);
 
   function onTouchStart(event: React.TouchEvent<HTMLElement>) {
-    if (event.touches.length !== 1 || isInteractiveTarget(event.target)) {
+    if (event.touches.length !== 1 || isTextEntryTarget(event.target)) {
       swipeStart.current = null;
       return;
     }
