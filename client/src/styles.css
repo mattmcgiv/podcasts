@@ -804,12 +804,12 @@ input[type="search"]::-webkit-search-cancel-button {
 .tab {
   flex: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
   color: var(--text-dim);
-  font-size: 10.5px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .tab.active {
