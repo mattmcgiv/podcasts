@@ -7,6 +7,9 @@
   --accent: #4f9cf9;
   --danger: #f06a6a;
   --line: #232a32;
+  --play-control-bg: var(--accent);
+  --play-control-color: #06121f;
+  --play-control-border: transparent;
   --chrome-surface: color-mix(in srgb, var(--bg-overlay) 94%, transparent);
   --tabbar-h: 56px;
   --mini-h: 56px;
@@ -22,6 +25,9 @@
   --accent: #1468d4;
   --danger: #bd2731;
   --line: #d9e1eb;
+  --play-control-bg: var(--bg);
+  --play-control-color: var(--accent);
+  --play-control-border: var(--accent);
   color-scheme: light;
 }
 
@@ -39,6 +45,9 @@
     --accent: #1468d4;
     --danger: #bd2731;
     --line: #d9e1eb;
+    --play-control-bg: var(--bg);
+    --play-control-color: var(--accent);
+    --play-control-border: var(--accent);
     color-scheme: light;
   }
 }
@@ -87,6 +96,30 @@ input {
 
 .content {
   padding-bottom: calc(var(--tabbar-h) + var(--mini-h) + env(safe-area-inset-bottom) + 16px);
+  overflow-x: clip;
+  touch-action: pan-y;
+}
+
+.tab-swipe-screen {
+  min-height: 100%;
+}
+
+.tab-swipe-screen.tab-swipe-forward {
+  animation: tab-enter-from-right 260ms cubic-bezier(0.22, 0.8, 0.24, 1) both;
+}
+
+.tab-swipe-screen.tab-swipe-back {
+  animation: tab-enter-from-left 260ms cubic-bezier(0.22, 0.8, 0.24, 1) both;
+}
+
+@keyframes tab-enter-from-right {
+  from { opacity: 0.5; transform: translateX(22px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes tab-enter-from-left {
+  from { opacity: 0.5; transform: translateX(-22px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 .view {
@@ -1055,8 +1088,9 @@ input[type="search"]::-webkit-search-cancel-button {
   width: 76px;
   height: 76px;
   border-radius: 50%;
-  background: var(--accent);
-  color: #06121f;
+  background: var(--play-control-bg);
+  border: 2px solid var(--play-control-border);
+  color: var(--play-control-color);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1362,8 +1396,13 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .tab-swipe-screen.tab-swipe-forward,
+  .tab-swipe-screen.tab-swipe-back,
   .refresh-progress::before {
     animation: none;
+  }
+
+  .refresh-progress::before {
     inset-inline-start: 27%;
     opacity: 1;
   }

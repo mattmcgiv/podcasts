@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -53,5 +53,20 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     await screen.findByRole("dialog", { name: "Settings" });
+  });
+
+  it("switches primary tabs with horizontal swipes", async () => {
+    installApi(shellRoutes);
+    render(<App />);
+    await screen.findByText("Fresh Episode");
+
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    await screen.findByRole("heading", { name: "Played" });
+
+    fireEvent.touchStart(main, { touches: [{ clientX: 80, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 275, clientY: 246 }] });
+    await screen.findByText("Fresh Episode");
   });
 });
