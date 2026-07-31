@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 
 export type Tab = "recent" | "played" | "search" | "shows" | "follows";
 
@@ -15,7 +16,7 @@ export function parseHash(hash: string): Route {
     case "search":
       return { tab: "search" };
     case "follows":
-      return { tab: "follows" };
+      return FOLLOW_APPEARANCES_ENABLED ? { tab: "follows" } : { tab: "recent" };
     case "shows": {
       const id = Number(parts[1]);
       return Number.isInteger(id) && id > 0 ? { tab: "shows", showId: id } : { tab: "shows" };

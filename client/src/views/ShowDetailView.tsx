@@ -22,6 +22,7 @@ export function ShowDetailView({ showId }: { showId: number }) {
   const [searchItems, setSearchItems] = useState<EpisodeItem[] | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [listenConfirmation, setListenConfirmation] = useState<ListenConfirmation | null>(null);
+  const [confirmingUnsubscribe, setConfirmingUnsubscribe] = useState(false);
   const player = usePlayer();
   const trimmedSearch = searchQuery.trim();
   const isSearching = trimmedSearch.length > 0;
@@ -90,13 +91,14 @@ export function ShowDetailView({ showId }: { showId: number }) {
 
   async function unsubscribe() {
     if (!show) return;
-    if (!window.confirm(`Unsubscribe from “${show.title}”? Its episodes disappear from Pods.`)) return;
     try {
       await Api.unsubscribe(show.id);
       emitEpisodesChanged();
       navigate("#/shows");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConfirmingUnsubscribe(false);
     }
   }
 
@@ -145,9 +147,16 @@ export function ShowDetailView({ showId }: { showId: number }) {
             <p className="row-sub">
               {show.episode_count} episodes · {show.unplayed_count} unplayed
             </p>
-            <button className="ghost-btn danger small" onClick={() => void unsubscribe()}>
+            <button className="ghost-btn danger small" onClick={() => setConfirmingUnsubscribe(true)}>
               Unsubscribe
             </button>
+            {confirmingUnsubscribe && (
+              <div className="unsubscribe-confirmation" role="dialog" aria-label={`Unsubscribe from ${show.title}`}>
+                <p>Remove this show and its episodes from Pods?</p>
+                <button className="ghost-btn" onClick={() => setConfirmingUnsubscribe(false)}>Keep show</button>
+                <button className="ghost-btn danger" onClick={() => void unsubscribe()}>Confirm unsubscribe</button>
+              </div>
+            )}
           </div>
         </div>
       )}

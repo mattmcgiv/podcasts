@@ -1285,7 +1285,7 @@ describe("FollowsView", () => {
     render(<FollowsView />);
 
     expect(await screen.findByText(/first check looks back 30 days/i)).toBeInTheDocument();
-    expect(screen.getByText("Elon Musk interview")).toBeInTheDocument();
+    expect(await screen.findByText("Elon Musk interview")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Add" }));
     await waitFor(() => expect(screen.queryByText("Elon Musk interview")).not.toBeInTheDocument());
 
@@ -1470,7 +1470,7 @@ describe("ShowsView", () => {
 });
 
 describe("ShowDetailView", () => {
-  it("renders episodes and unsubscribes with confirmation", async () => {
+  it("renders episodes and unsubscribes with an in-app confirmation", async () => {
     const { calls } = installApi({
       ...settings,
       "GET /api/shows/5": {
@@ -1479,7 +1479,6 @@ describe("ShowDetailView", () => {
       },
       "DELETE /api/shows/5": null,
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     wrap(<ShowDetailView showId={5} />);
 
@@ -1488,6 +1487,9 @@ describe("ShowDetailView", () => {
     expect(screen.getByText("About alpha")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Unsubscribe" }));
+    expect(screen.getByRole("dialog", { name: "Unsubscribe from Alpha Show" })).toBeInTheDocument();
+    expect(calls.some((c) => c.key === "DELETE /api/shows/5")).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Confirm unsubscribe" }));
     await waitFor(() => expect(calls.some((c) => c.key === "DELETE /api/shows/5")).toBe(true));
     expect(window.location.hash).toBe("#/shows");
   });
@@ -1497,11 +1499,11 @@ describe("ShowDetailView", () => {
       ...settings,
       "GET /api/shows/5": { show: show(), episodes: page([]) },
     });
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     const user = userEvent.setup();
     wrap(<ShowDetailView showId={5} />);
     await screen.findByRole("button", { name: "Unsubscribe" });
     await user.click(screen.getByRole("button", { name: "Unsubscribe" }));
+    await user.click(screen.getByRole("button", { name: "Keep show" }));
     expect(calls.some((c) => c.key === "DELETE /api/shows/5")).toBe(false);
   });
 

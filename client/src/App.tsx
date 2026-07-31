@@ -11,6 +11,7 @@ import { SearchView } from "./views/SearchView";
 import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 import { FollowsView } from "./views/FollowsView";
+import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 
 export function App() {
   useEffect(() => {
@@ -35,7 +36,7 @@ function Shell() {
         {route.tab === "search" && <SearchView />}
         {route.tab === "shows" &&
           (route.showId != null ? <ShowDetailView showId={route.showId} /> : <ShowsView />)}
-        {route.tab === "follows" && <FollowsView />}
+        {FOLLOW_APPEARANCES_ENABLED && route.tab === "follows" && <FollowsView />}
       </main>
       <MiniPlayer />
       <TabBar active={route.tab} />

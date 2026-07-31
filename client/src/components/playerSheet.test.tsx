@@ -208,6 +208,27 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(sheet.querySelectorAll(".show-note.is-ad")).toHaveLength(1);
   });
 
+  it("keeps the Mac output label stable after the speaker identifies itself", async () => {
+    window.webkit = {
+      messageHandlers: { podsAudio: { postMessage() {} } },
+    };
+    try {
+      const { user } = setup();
+      await user.click(screen.getByText("start"));
+      await screen.findByRole("dialog", { name: "Player" });
+
+      window.PodsAudioBridge?.emit({
+        type: "cast",
+        cast: { available: true, connected: true, name: "Matthew's Mac", output: "mac" },
+      });
+
+      expect(await screen.findByRole("button", { name: "Mac" })).toHaveTextContent("Mac");
+      expect(screen.getByRole("button", { name: "Mac" })).not.toHaveTextContent("Matthew's Mac");
+    } finally {
+      window.webkit = undefined;
+    }
+  });
+
   it("autoplay switch persists the setting", async () => {
     const { calls, user } = setup();
     await user.click(screen.getByText("start"));

@@ -5,10 +5,6 @@ import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
 import { PauseIcon, PlayIcon } from "./MiniPlayer";
 
-function shortName(name: string): string {
-  return name.replace(/^Pods Speaker\s*\(/, "").replace(/\)$/, "").slice(0, 22);
-}
-
 let nextSpeedInteraction = 1;
 
 function speedCorrelationID(): string {
@@ -195,9 +191,7 @@ export function PlayerSheet() {
                 }
               >
                 {p.cast.connected || p.cast.output === "mac"
-                  ? p.cast.name
-                    ? `Mac · ${shortName(p.cast.name)}`
-                    : "Mac"
+                  ? "Mac"
                   : p.cast.available
                     ? "Mac"
                     : "Mac (offline)"}

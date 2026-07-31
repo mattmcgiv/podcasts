@@ -9,7 +9,7 @@ describe("parseHash", () => {
     expect(parseHash("#/recent")).toEqual({ tab: "recent" });
     expect(parseHash("#/played")).toEqual({ tab: "played" });
     expect(parseHash("#/search")).toEqual({ tab: "search" });
-    expect(parseHash("#/follows")).toEqual({ tab: "follows" });
+    expect(parseHash("#/follows")).toEqual({ tab: "recent" });
     expect(parseHash("#/shows")).toEqual({ tab: "shows" });
     expect(parseHash("#/shows/12")).toEqual({ tab: "shows", showId: 12 });
     expect(parseHash("#/shows/banana")).toEqual({ tab: "shows" });
