@@ -392,8 +392,12 @@ export function RecentView() {
             onClick={checkForNewEpisodes}
             disabled={checkingForEpisodes}
           >
-            <span className="refresh-glyph" aria-hidden>↻</span>
-            {checkingForEpisodes ? "Checking for new episodes…" : "Check for new episodes"}
+            {checkingForEpisodes ? (
+              <>
+                <span>Checking feeds</span>
+                <span className="refresh-progress" role="progressbar" aria-label="Checking feeds" aria-valuetext="Checking feeds" />
+              </>
+            ) : "Check for new episodes"}
           </button>
           {checkStatus && <p className="status" role="status">{checkStatus}</p>}
         </div>

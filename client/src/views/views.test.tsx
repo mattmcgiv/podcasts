@@ -46,6 +46,26 @@ const settings: MockRoutes = {
 };
 
 describe("RecentView", () => {
+  it("shows inline refresh progress while checking for new episodes", async () => {
+    let finishRefresh: () => void = () => {};
+    const refresh = new Promise<{ refreshed: number; errors: number }>((resolve) => {
+      finishRefresh = () => resolve({ refreshed: 0, errors: 0 });
+    });
+    installApi({
+      ...settings,
+      "GET /api/recent": page([]),
+      "POST /api/refresh": () => refresh,
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+
+    await user.click(await screen.findByRole("button", { name: "Check for new episodes" }));
+    expect(screen.getByRole("progressbar", { name: "Checking feeds" })).toBeInTheDocument();
+
+    finishRefresh();
+    await screen.findByText("Checked 0 feeds");
+  });
+
   it("checks for new episodes from the empty Listen state", async () => {
     const { calls } = installApi({
       ...settings,

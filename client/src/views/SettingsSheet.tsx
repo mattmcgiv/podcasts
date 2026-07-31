@@ -337,8 +337,12 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
               Export OPML
             </button>
             <button className={`ghost-btn refresh-action${refreshing ? " is-refreshing" : ""}`} onClick={() => void refreshAll()} disabled={refreshing}>
-              <span className="refresh-glyph" aria-hidden>↻</span>
-              {refreshing ? "Refreshing feeds…" : "Refresh all feeds"}
+              {refreshing ? (
+                <>
+                  <span>Refreshing feeds</span>
+                  <span className="refresh-progress" role="progressbar" aria-label="Refreshing feeds" aria-valuetext="Refreshing feeds" />
+                </>
+              ) : "Refresh all feeds"}
             </button>
           </div>
 
