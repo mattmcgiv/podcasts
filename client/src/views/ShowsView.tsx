@@ -1,22 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Api } from "../api";
 import { Artwork } from "../components/Artwork";
-import { onEpisodesChanged } from "../events";
+import { EpisodeRow } from "../components/EpisodeRow";
+import { emitEpisodesChanged, onEpisodesChanged } from "../events";
+import { usePlayer } from "../player";
 import { navigate } from "../router";
-import type { Show } from "../types";
-import { SettingsSheet } from "./SettingsSheet";
+import type { DirectoryPodcast, SearchResults, Show } from "../types";
+
+export const SHOW_SEARCH_DEBOUNCE_MS = 300;
 
 export function ShowsView() {
   const [shows, setShows] = useState<Show[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showsError, setShowsError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResults | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const searchQuery = query.trim();
+  const searchActive = searchQuery.length >= 3;
 
   useEffect(() => {
     let live = true;
     const load = () =>
       Api.shows()
-        .then((s) => live && setShows(s))
-        .catch((e) => live && setError(e instanceof Error ? e.message : String(e)));
+        .then((nextShows) => live && setShows(nextShows))
+        .catch((error) => live && setShowsError(error instanceof Error ? error.message : String(error)));
     void load();
     const off = onEpisodesChanged(() => void load());
     return () => {
@@ -25,46 +34,165 @@ export function ShowsView() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!searchActive) {
+      setResults(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+
+    let live = true;
+    setSearching(true);
+    setSearchError(null);
+    const timer = window.setTimeout(() => {
+      void Api.search(searchQuery)
+        .then((nextResults) => {
+          if (live) setResults(nextResults);
+        })
+        .catch((error) => {
+          if (live) setSearchError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          if (live) setSearching(false);
+        });
+    }, SHOW_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [searchActive, searchQuery]);
+
+  function clearSearch() {
+    setQuery("");
+    inputRef.current?.focus();
+  }
+
   return (
     <section className="view">
       <header className="view-header">
         <h1>Shows</h1>
-        <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="Settings">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden>
-            <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="2" />
-            <path
-              d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 00-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 00-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 005 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 002 1.2l.4 2.7h4.4l.4-2.7a7 7 0 002-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-            />
-          </svg>
-        </button>
       </header>
 
-      {error && <p className="error">{error}</p>}
-      {shows == null && !error && <p className="muted">Loading…</p>}
-      {shows != null && shows.length === 0 && (
-        <p className="empty">No subscriptions yet. Find podcasts in the Search tab or import an OPML in settings.</p>
+      <div className="shows-search search-input-wrap">
+        <input
+          ref={inputRef}
+          type="search"
+          placeholder="Search podcasts and your episodes"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          aria-label="Search podcasts and your episodes"
+        />
+        {query !== "" && (
+          <button type="button" className="search-clear" aria-label="Clear search" onClick={clearSearch}>
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden>
+              <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.22" />
+              <path d="M8.6 8.6l6.8 6.8M15.4 8.6l-6.8 6.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      {searchActive ? (
+        <SearchResultsView results={results} searching={searching} error={searchError} />
+      ) : (
+        <>
+          <p className="shows-intro">You've subscribed to these feeds.</p>
+          {showsError && <p className="error">{showsError}</p>}
+          {shows == null && !showsError && <p className="muted">Loading…</p>}
+          {shows != null && shows.length === 0 && (
+            <p className="empty">No subscriptions yet. Search for podcasts above or import an OPML in Settings.</p>
+          )}
+          <ul className="show-list">
+            {shows?.map((show) => (
+              <li key={show.id}>
+                <button className="show-row" onClick={() => navigate(`#/shows/${show.id}`)}>
+                  <Artwork src={show.image_url} size={56} />
+                  <span className="row-text">
+                    <span className="row-title">{show.title}</span>
+                    <span className="row-sub">
+                      {show.unplayed_count > 0 ? `${show.unplayed_count} unplayed` : "all played"} · {show.episode_count} episodes
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
-      <ul className="show-list">
-        {shows?.map((s) => (
-          <li key={s.id}>
-            <button className="show-row" onClick={() => navigate(`#/shows/${s.id}`)}>
-              <Artwork src={s.image_url} size={56} />
-              <span className="row-text">
-                <span className="row-title">{s.title}</span>
-                <span className="row-sub">
-                  {s.unplayed_count > 0 ? `${s.unplayed_count} unplayed` : "all played"} ·{" "}
-                  {s.episode_count} episodes
-                </span>
-              </span>
-            </button>
-          </li>
-        ))}
+    </section>
+  );
+}
+
+function SearchResultsView({ results, searching, error }: { results: SearchResults | null; searching: boolean; error: string | null }) {
+  const player = usePlayer();
+  if (searching && results == null) return <p className="muted">Searching podcasts and episodes…</p>;
+  if (error) return <p className="error">{error}</p>;
+  if (!results) return null;
+
+  return (
+    <div className="shows-search-results">
+      <h2 className="section-title">Podcasts</h2>
+      {!results.directory_configured && (
+        <p className="muted">Directory search is off — add Podcast Index keys and reinstall the app, or paste an RSS URL in Settings.</p>
+      )}
+      {results.directory_configured && results.podcasts.length === 0 && <p className="muted">No podcasts found.</p>}
+      <ul className="podcast-results">
+        {results.podcasts.map((podcast) => <DirectoryRow key={podcast.feed_url} podcast={podcast} />)}
       </ul>
 
-      {settingsOpen && <SettingsSheet onClose={() => setSettingsOpen(false)} />}
-    </section>
+      <h2 className="section-title">Your episodes</h2>
+      {results.episodes.length === 0 && <p className="muted">No matches in your library.</p>}
+      <ul className="episode-list">
+        {results.episodes.map((item) => (
+          <EpisodeRow
+            key={item.id}
+            item={item}
+            onPlay={(episode) => player.playEpisode(episode, "recent")}
+            actionLabel={item.played_at ? "Mark unplayed" : "Mark played"}
+            onAction={(episode) =>
+              void (item.played_at ? Api.unmarkPlayed(episode.id) : Api.markPlayed(episode.id))
+                .then(emitEpisodesChanged)
+                .catch(() => {})
+            }
+            actionDone={item.played_at != null}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function DirectoryRow({ podcast }: { podcast: DirectoryPodcast }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">(podcast.subscribed ? "done" : "idle");
+  const [error, setError] = useState<string | null>(null);
+
+  async function subscribe() {
+    if (state !== "idle") return;
+    setState("busy");
+    setError(null);
+    try {
+      await Api.subscribe(podcast.feed_url);
+      setState("done");
+      emitEpisodesChanged();
+    } catch (nextError) {
+      setState("idle");
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    }
+  }
+
+  return (
+    <li className="podcast-row">
+      <Artwork src={podcast.image_url} size={56} />
+      <span className="row-text">
+        <span className="row-title">{podcast.title}</span>
+        <span className="row-sub">{podcast.author}</span>
+        {error && <span className="error small">{error}</span>}
+      </span>
+      <button className={`subscribe-btn${state === "done" ? " done" : ""}`} disabled={state !== "idle"} onClick={() => void subscribe()}>
+        {state === "done" ? "Subscribed" : state === "busy" ? "…" : "Subscribe"}
+      </button>
+    </li>
   );
 }

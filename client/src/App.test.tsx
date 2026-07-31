@@ -51,7 +51,7 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Shows" }));
     await screen.findByRole("heading", { name: "Shows" });
 
-    await user.click(screen.getByRole("button", { name: "Search" }));
-    await screen.findByRole("heading", { name: "Search" });
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByRole("dialog", { name: "Settings" });
   });
 });

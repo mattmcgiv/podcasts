@@ -11,7 +11,6 @@ import type { EpisodeItem } from "../types";
 import { AD_SETTINGS_POLL_INTERVAL_MS, AD_STATUS_POLL_INTERVAL_MS } from "../views/RecentView";
 import { PlayedView } from "./PlayedView";
 import { RecentView } from "./RecentView";
-import { SearchView } from "./SearchView";
 import { ShowDetailView } from "./ShowDetailView";
 import { ShowsView } from "./ShowsView";
 import { FollowsView } from "./FollowsView";
@@ -1389,7 +1388,7 @@ describe("PlayedView", () => {
   });
 });
 
-describe("SearchView", () => {
+describe("ShowsView search", () => {
   it("searches both directories and renders results", async () => {
     const { calls } = installApi({
       ...settings,
@@ -1404,10 +1403,9 @@ describe("SearchView", () => {
       "POST /api/shows": show({ title: "Found Pod" }),
     });
     const user = userEvent.setup();
-    wrap(<SearchView />);
+    wrap(<ShowsView />);
 
     await user.type(screen.getByRole("searchbox"), "found");
-    await user.click(screen.getByRole("button", { name: "Search" }));
 
     await screen.findByText("Found Pod");
     expect(screen.getByText("Matching Episode")).toBeInTheDocument();
@@ -1432,9 +1430,8 @@ describe("SearchView", () => {
       "POST /api/shows": new HttpError(502, { error: "upstream error: timeout" }),
     });
     const user = userEvent.setup();
-    wrap(<SearchView />);
+    wrap(<ShowsView />);
     await user.type(screen.getByRole("searchbox"), "broken");
-    await user.click(screen.getByRole("button", { name: "Search" }));
     await user.click(await screen.findByRole("button", { name: "Subscribe" }));
     await screen.findByText(/upstream error/);
     expect(screen.getByRole("button", { name: "Subscribe" })).toBeEnabled();
@@ -1443,7 +1440,7 @@ describe("SearchView", () => {
   it("clears the input with the × button in one tap", async () => {
     installApi({ ...settings });
     const user = userEvent.setup();
-    wrap(<SearchView />);
+    wrap(<ShowsView />);
     const box = screen.getByRole("searchbox");
     expect(screen.queryByRole("button", { name: "Clear search" })).not.toBeInTheDocument();
     await user.type(box, "quantum");
@@ -1459,10 +1456,29 @@ describe("SearchView", () => {
       "GET /api/search": { directory_configured: false, podcasts: [], episodes: [] },
     });
     const user = userEvent.setup();
-    wrap(<SearchView />);
-    await user.type(screen.getByRole("searchbox"), "x");
-    await user.click(screen.getByRole("button", { name: "Search" }));
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "xyz");
     await screen.findByText(/Directory search is off/);
+  });
+
+  it("does not search until three characters, then debounces the request", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/shows": [show()],
+      "GET /api/search": { directory_configured: true, podcasts: [], episodes: [] },
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+
+    const input = screen.getByRole("searchbox");
+    await user.type(input, "ab");
+    expect(calls.some((call) => call.key === "GET /api/search")).toBe(false);
+    expect(screen.getByText("Alpha Show")).toBeInTheDocument();
+
+    await user.type(input, "c");
+    expect(screen.queryByText("Alpha Show")).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.some((call) => call.key === "GET /api/search")).toBe(true));
+    expect(calls.find((call) => call.key === "GET /api/search")?.url.searchParams.get("q")).toBe("abc");
   });
 });
 
@@ -1475,13 +1491,11 @@ describe("ShowsView", () => {
     expect(window.location.hash).toBe("#/shows/5");
   });
 
-  it("opens settings from the gear", async () => {
+  it("describes the subscribed feeds", async () => {
     installApi({ ...settings, "GET /api/shows": [] });
-    const user = userEvent.setup();
     wrap(<ShowsView />);
-    await screen.findByText(/No subscriptions yet/);
-    await user.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    await screen.findByText("You've subscribed to these feeds.");
+    expect(screen.getByText(/No subscriptions yet/)).toBeInTheDocument();
   });
 });
 

@@ -4,15 +4,15 @@ import { PlayerSheet } from "./components/PlayerSheet";
 import { TabBar } from "./components/TabBar";
 import { PlayerProvider } from "./player";
 import { postPodsLifecycleEvent } from "./podsLifecycle";
-import { useRoute } from "./router";
+import { navigate, useRoute } from "./router";
 import { PlayedView } from "./views/PlayedView";
 import { RecentView } from "./views/RecentView";
-import { SearchView } from "./views/SearchView";
 import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 import { FollowsView } from "./views/FollowsView";
 import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 import { applyThemePreference, currentThemePreference } from "./theme";
+import { SettingsSheet } from "./views/SettingsSheet";
 
 export function App() {
   useEffect(() => {
@@ -35,9 +35,9 @@ function Shell() {
       <main className="content">
         {route.tab === "recent" && <RecentView />}
         {route.tab === "played" && <PlayedView />}
-        {route.tab === "search" && <SearchView />}
         {route.tab === "shows" &&
           (route.showId != null ? <ShowDetailView showId={route.showId} /> : <ShowsView />)}
+        {route.tab === "settings" && <SettingsSheet onClose={() => navigate("#/shows")} />}
         {FOLLOW_APPEARANCES_ENABLED && route.tab === "follows" && <FollowsView />}
       </main>
       <MiniPlayer />

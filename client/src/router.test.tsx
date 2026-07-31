@@ -8,7 +8,8 @@ describe("parseHash", () => {
     expect(parseHash("#/")).toEqual({ tab: "recent" });
     expect(parseHash("#/recent")).toEqual({ tab: "recent" });
     expect(parseHash("#/played")).toEqual({ tab: "played" });
-    expect(parseHash("#/search")).toEqual({ tab: "search" });
+    expect(parseHash("#/search")).toEqual({ tab: "shows" });
+    expect(parseHash("#/settings")).toEqual({ tab: "settings" });
     expect(parseHash("#/follows")).toEqual({ tab: "recent" });
     expect(parseHash("#/shows")).toEqual({ tab: "shows" });
     expect(parseHash("#/shows/12")).toEqual({ tab: "shows", showId: 12 });

@@ -610,6 +610,34 @@ input {
   gap: 8px;
 }
 
+.shows-search {
+  margin: 2px 0 18px;
+}
+
+.shows-search input {
+  min-height: 46px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--text);
+  outline: none;
+  padding: 12px 42px 12px 14px;
+}
+
+.shows-search input:focus {
+  border-color: var(--accent);
+}
+
+.shows-intro {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+.shows-search-results .section-title:first-child {
+  margin-top: 0;
+}
+
 .search-input-wrap {
   position: relative;
   flex: 1;
