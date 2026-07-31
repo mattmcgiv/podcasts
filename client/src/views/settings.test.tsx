@@ -56,6 +56,16 @@ describe("SettingsSheet", () => {
     expect(screen.getByText(/1 feed failed/)).toBeInTheDocument();
   });
 
+  it("persists the selected appearance preference", async () => {
+    installApi({});
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Light appearance" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(window.localStorage.getItem("pods-theme-preference")).toBe("light");
+  });
+
   it("adds a feed by URL", async () => {
     const { calls } = installApi({
       "POST /api/shows": {

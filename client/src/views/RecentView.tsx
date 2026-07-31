@@ -5,6 +5,7 @@ import { APP_NAME } from "../config";
 import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { useList } from "../hooks";
 import { usePlayer } from "../player";
+import { refreshFeeds } from "../refreshFeeds";
 import type { AdRemovalSettings, AdRemovalStage, EpisodeItem, RefreshStatus } from "../types";
 import type { AdRemovalStatusItem } from "../types";
 
@@ -89,6 +90,8 @@ export function RecentView() {
   const [sortAscending, setSortAscending] = useState(true);
   const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
+  const [checkingForEpisodes, setCheckingForEpisodes] = useState(false);
+  const [checkStatus, setCheckStatus] = useState<string | null>(null);
   const markPlayedGuardUntilRef = useRef(0);
 
   const items = list.items;
@@ -324,6 +327,28 @@ export function RecentView() {
       .catch(() => list.reload());
   }
 
+  function checkForNewEpisodes() {
+    if (checkingForEpisodes) return;
+    setCheckingForEpisodes(true);
+    setCheckStatus(null);
+    void refreshFeeds()
+      .then(async (result) => {
+        emitEpisodesChanged();
+        try {
+          setRefreshStatus(await Api.refreshStatus());
+        } catch {
+          // The completed refresh remains useful even when its audit status is unavailable.
+        }
+        setCheckStatus(
+          result.errors
+            ? `Checked ${result.refreshed} feeds · ${result.errors} failed`
+            : `Checked ${result.refreshed} feeds`,
+        );
+      })
+      .catch((error) => setCheckStatus(error instanceof Error ? error.message : String(error)))
+      .finally(() => setCheckingForEpisodes(false));
+  }
+
   return (
     <section className="view">
       <header className="view-header">
@@ -360,10 +385,18 @@ export function RecentView() {
       {list.error && <p className="error">{list.error}</p>}
       {list.items == null && !list.error && <p className="muted">Loading…</p>}
       {list.items != null && list.items.length === 0 && (
-        <p className="empty">
-          Nothing new. Subscribe to podcasts in the Search tab. Feeds refresh
-          automatically while Pods is open, or use Refresh all feeds in Settings.
-        </p>
+        <div className="empty listen-empty-state">
+          <p>Nothing new. Subscribe to podcasts in the Search tab, or check your feeds now.</p>
+          <button
+            className={`primary-action refresh-action${checkingForEpisodes ? " is-refreshing" : ""}`}
+            onClick={checkForNewEpisodes}
+            disabled={checkingForEpisodes}
+          >
+            <span className="refresh-glyph" aria-hidden>↻</span>
+            {checkingForEpisodes ? "Checking for new episodes…" : "Check for new episodes"}
+          </button>
+          {checkStatus && <p className="status" role="status">{checkStatus}</p>}
+        </div>
       )}
       <ul className="episode-list">
         {sortedItems?.map((item) => (

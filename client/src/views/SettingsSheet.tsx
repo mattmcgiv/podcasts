@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
+import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
 import type { AdRemovalSettings, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
@@ -33,6 +34,8 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
   const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
+  const [themePreference, setThemePreference] = useState<ThemePreference>(currentThemePreference);
+  const [refreshing, setRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -107,18 +110,28 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   }
 
   async function refreshAll() {
+    setRefreshing(true);
     await run("Refreshing", async () => {
-      const r = await refreshFeeds();
-      // Always reload after an explicit user-initiated refresh so the UI
-      // reflects current state (even if no feeds were pulled this pass).
-      emitEpisodesChanged();
       try {
-        setRefreshStatus(await Api.refreshStatus());
-      } catch {
-        // The manual refresh succeeded; leave the previous audit status in place.
+        const r = await refreshFeeds();
+        // Always reload after an explicit user-initiated refresh so the UI
+        // reflects current state (even if no feeds were pulled this pass).
+        emitEpisodesChanged();
+        try {
+          setRefreshStatus(await Api.refreshStatus());
+        } catch {
+          // The manual refresh succeeded; leave the previous audit status in place.
+        }
+        return `Refreshed ${r.refreshed} feeds${r.errors ? `, ${r.errors} failed` : ""}`;
+      } finally {
+        setRefreshing(false);
       }
-      return `Refreshed ${r.refreshed} feeds${r.errors ? `, ${r.errors} failed` : ""}`;
     });
+  }
+
+  function setTheme(preference: ThemePreference) {
+    setThemePreference(preference);
+    applyThemePreference(preference);
   }
 
   async function enableAdRemoval() {
@@ -198,8 +211,25 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       </header>
 
       <div className="settings-body">
+        <section className="settings-section settings-appearance" aria-labelledby="appearance-title">
+          <h2 className="section-title" id="appearance-title">Appearance</h2>
+          <p className="settings-detail">Choose how Pods looks on this iPhone.</p>
+          <div className="theme-picker" role="group" aria-label="Appearance">
+            {(["system", "light", "dark"] as const).map((preference) => (
+              <button
+                key={preference}
+                className={`theme-choice${themePreference === preference ? " is-selected" : ""}`}
+                onClick={() => setTheme(preference)}
+                aria-pressed={themePreference === preference}
+                aria-label={`${preference[0].toUpperCase()}${preference.slice(1)} appearance`}
+              >
+                {preference[0].toUpperCase()}{preference.slice(1)}
+              </button>
+            ))}
+          </div>
+        </section>
         {adRemoval && (
-          <section className="ad-removal-settings" aria-labelledby="ad-removal-title">
+          <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
               Transcript text is sent to DeepSeek V4 Pro for ad classification and generated show notes. Audio stays on this iPhone.
@@ -267,44 +297,53 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           </section>
         )}
 
-        <h2 className="section-title">Add a feed by URL</h2>
-        <div className="add-url-row">
-          <input
-            type="url"
-            placeholder="https://example.com/feed.xml"
-            value={feedUrl}
-            onChange={(e) => setFeedUrl(e.target.value)}
-            aria-label="Feed URL"
-          />
-          <button onClick={() => void addByUrl()} disabled={!feedUrl.trim()}>
-            Add
-          </button>
-        </div>
+        <section className="settings-section" aria-labelledby="add-feed-title">
+          <h2 className="section-title" id="add-feed-title">Add a feed</h2>
+          <p className="settings-detail">Paste a podcast RSS feed URL.</p>
+          <div className="add-url-row">
+            <input
+              type="url"
+              placeholder="https://example.com/feed.xml"
+              value={feedUrl}
+              onChange={(e) => setFeedUrl(e.target.value)}
+              aria-label="Feed URL"
+            />
+            <button onClick={() => void addByUrl()} disabled={!feedUrl.trim()}>
+              Add
+            </button>
+          </div>
+        </section>
 
-        <h2 className="section-title">Subscriptions</h2>
-        <button className="ghost-btn" onClick={() => fileRef.current?.click()}>
-          Import OPML
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".opml,.xml,text/xml"
-          hidden
-          data-testid="opml-file"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void importOpml(f);
-            e.target.value = "";
-          }}
-        />
-        <button className="ghost-btn" onClick={() => void exportOpml()}>
-          Export OPML
-        </button>
-        <button className="ghost-btn" onClick={() => void refreshAll()}>
-          Refresh all feeds
-        </button>
+        <section className="settings-section" aria-labelledby="subscriptions-title">
+          <h2 className="section-title" id="subscriptions-title">Library</h2>
+          <p className="settings-detail">Import, export, or refresh your subscriptions.</p>
+          <div className="settings-action-list">
+            <button className="ghost-btn" onClick={() => fileRef.current?.click()}>
+              Import OPML
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".opml,.xml,text/xml"
+              hidden
+              data-testid="opml-file"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void importOpml(f);
+                e.target.value = "";
+              }}
+            />
+            <button className="ghost-btn" onClick={() => void exportOpml()}>
+              Export OPML
+            </button>
+            <button className={`ghost-btn refresh-action${refreshing ? " is-refreshing" : ""}`} onClick={() => void refreshAll()} disabled={refreshing}>
+              <span className="refresh-glyph" aria-hidden>↻</span>
+              {refreshing ? "Refreshing feeds…" : "Refresh all feeds"}
+            </button>
+          </div>
 
-        {refreshStatus && <p className="muted">{formatRefreshStatus(refreshStatus)}</p>}
+          {refreshStatus && <p className="muted">{formatRefreshStatus(refreshStatus)}</p>}
+        </section>
 
         {status && <p className="status">{status}</p>}
       </div>

@@ -47,6 +47,22 @@ const settings: MockRoutes = {
 };
 
 describe("RecentView", () => {
+  it("checks for new episodes from the empty Listen state", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": page([]),
+      "POST /api/refresh": { refreshed: 2, errors: 0 },
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+
+    await screen.findByText(/Nothing new/);
+    await user.click(screen.getByRole("button", { name: "Check for new episodes" }));
+
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/refresh")).toBe(true));
+    expect(await screen.findByText("Checked 2 feeds")).toBeInTheDocument();
+  });
+
   it("shows the latest successful feed refresh above the footer nav and updates it", async () => {
     let statusCalls = 0;
     installApi({

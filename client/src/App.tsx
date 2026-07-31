@@ -12,10 +12,12 @@ import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 import { FollowsView } from "./views/FollowsView";
 import { FOLLOW_APPEARANCES_ENABLED } from "./config";
+import { applyThemePreference, currentThemePreference } from "./theme";
 
 export function App() {
   useEffect(() => {
     postPodsLifecycleEvent("ui-ready");
+    applyThemePreference(currentThemePreference(), false);
   }, []);
 
   return (
