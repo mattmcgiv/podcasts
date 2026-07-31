@@ -95,6 +95,7 @@ input {
 }
 
 .content {
+  min-height: 100dvh;
   padding-bottom: calc(var(--tabbar-h) + var(--mini-h) + env(safe-area-inset-bottom) + 16px);
   overflow-x: clip;
   touch-action: pan-y;
