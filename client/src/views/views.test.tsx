@@ -47,6 +47,26 @@ const settings: MockRoutes = {
 };
 
 describe("RecentView", () => {
+  it("pulls down at the top of Listen to refresh feeds and reload the list", async () => {
+    let recentCalls = 0;
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/recent": () => page([episode({ id: ++recentCalls, title: recentCalls === 1 ? "Before refresh" : "After refresh" })]),
+      "POST /api/refresh": { refreshed: 1, errors: 0 },
+    });
+    wrap(<RecentView />);
+    await screen.findByText("Before refresh");
+
+    const listen = screen.getByText("Before refresh").closest("section")!;
+    fireEvent.pointerDown(listen, { clientY: 10 });
+    fireEvent.pointerMove(listen, { clientY: 100 });
+    expect(screen.getByRole("status")).toHaveTextContent("Release to refresh");
+    fireEvent.pointerUp(listen, { clientY: 100 });
+
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/refresh")).toBe(true));
+    expect(await screen.findByText("After refresh")).toBeInTheDocument();
+  });
+
   it("shows the latest successful feed refresh above the footer nav and updates it", async () => {
     let statusCalls = 0;
     installApi({

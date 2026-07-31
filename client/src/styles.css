@@ -80,6 +80,14 @@ input {
   flex: 1;
 }
 
+.pull-refresh-status {
+  margin: 8px 0 -2px;
+  min-height: 20px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+}
+
 .feed-refresh-status {
   position: fixed;
   left: 0;
