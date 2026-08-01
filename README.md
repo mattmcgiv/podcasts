@@ -1,22 +1,55 @@
 # Pods
 
-A single-user, mobile-first podcast app. The iPhone app bundles the React UI and runs a native Swift backend in-process on `127.0.0.1:18180`.
+A single-user, mobile-first podcast app for iPhone. The app bundles a React UI and runs a native Swift backend in-process on `127.0.0.1:18180`.
 
-No discovery. No recommendations. Just your episodes, newest first.
+No discovery feed. No recommendations. Your subscriptions, unplayed episodes first (oldest by default), with mark-played archive.
+
+## What it does
+
+- **Listen / Played / Shows / Settings** tabs, with horizontal swipe between primary tabs
+- **Search in Shows** for Podcast Index directory results and your local episodes (search is not a separate tab)
+- **Native feed refresh** on the iPhone (foreground catch-up plus opportunistic background refresh; manual refresh always works)
+- **Playback** with scrubber, skip back/forward, speeds through 3×, autoplay next, and mini player
+- **On-device ad removal** (optional): download audio, local speech transcription, DeepSeek classification of ad ranges, automatic skip during playback with undo
+- **Generated show notes / chapters** from the episode transcript when ad-removal processing is ready
+- **Play on Mac** via the optional **Pods Speaker** menu-bar app (LAN cast, not AirPlay; progress saves on the phone)
+- **Library tools**: subscribe by search or RSS URL, OPML import/export, unsubscribe
+- **Appearance**: system, light, or dark theme
+
+People-following / guest appearances exist in the codebase but stay off by default (`FOLLOW_APPEARANCES_ENABLED` in `client/src/config.ts`).
 
 ## Layout
 
-- `client/` — React app (runtime deps: react + react-dom, nothing else)
-- `ios/` — private iPhone target, Swift backend, local server, reinstall automation
-- `mac/` — optional **Pods Speaker** menu-bar app (play phone-controlled audio on the Mac without AirPlay)
+| Path | Role |
+|------|------|
+| `client/` | React UI (runtime deps: `react` + `react-dom` only) |
+| `ios/` | Private iPhone target, Swift backend, local server, reinstall automation |
+| `mac/` | Optional **Pods Speaker** menu-bar companion |
+| `docs/` | Design notes (for example on-device ad removal) |
+| `dev/` | Isolated Apple `container` workflow for frontend tooling |
+| `shared/` | Small shared Swift helpers |
+
+## Architecture
+
+```
+iPhone (Pods.app)
+├── WKWebView  →  bundled React client
+└── Swift backend  →  loopback HTTP on 127.0.0.1:18180
+    ├── SQLite library (Application Support)
+    ├── RSS refresh + Podcast Index search
+    ├── Audio / ad-removal pipeline
+    └── Cast control channel → Mac Pods Speaker (optional)
+```
+
+The React client talks to the Swift backend through `window.PODS_API_BASE`. Backend behavior for the app lives in `ios/Pods/`, not in a remote server.
 
 ## Renaming the app
 
-The display name lives in two places: `client/src/config.ts` (`APP_NAME`) and `client/public/manifest.webmanifest`. Change both, done.
+The display name lives in two places: `client/src/config.ts` (`APP_NAME`) and `client/public/manifest.webmanifest`. Change both.
 
 ## Development — read this first
 
-All client toolchain execution happens **inside an isolated VM** (Apple `container` CLI, macOS 26 Containerization framework). The host never runs `npm`, `npx`, or `node` — see `AGENTS.md` for the rules and `dev/` for the container setup.
+All client toolchain work runs **inside an isolated VM** (Apple `container` CLI, macOS Containerization). The host never runs `npm`, `npx`, or `node`. See `AGENTS.md` for the rules and `dev/` for container setup.
 
 ```sh
 dev/up.sh        # build image + start the long-lived dev container
@@ -28,7 +61,7 @@ The Vite dev server publishes to http://127.0.0.1:5173. The user-facing backend 
 
 ### Troubleshooting the container runtime
 
-Homebrew's `container` bottle doesn't link `libexec`, so the apiserver crash-loops with
+Homebrew's `container` bottle does not link `libexec`, so the apiserver can crash-loop with
 "cannot find any plugins with type network". Fix (one-time, survives upgrades):
 
 ```sh
@@ -41,7 +74,9 @@ prompts interactively). Kernel can be (re)installed with `container system kerne
 
 ## Configuration
 
-Podcast Index show search reads credentials from the host-only file `~/.config/podcasts/credentials.env` during the Xcode build. The build writes those values into the signed app bundle as `PodcastIndexCredentials.plist`; no credential file is committed to the repo.
+### Podcast Index (show search)
+
+Podcast Index credentials live in the host-only file `~/.config/podcasts/credentials.env`. The Xcode build writes them into the signed app bundle as `PodcastIndexCredentials.plist`. No credential file is committed.
 
 Required keys:
 
@@ -56,13 +91,29 @@ Optional:
 PODCASTINDEX_BASE_URL=https://api.podcastindex.org/api/1.0
 ```
 
+Without keys, local episode search still works. Directory subscribe-by-search reports `directory_configured: false`. You can still paste an RSS URL in Settings.
+
+### Ad removal (optional)
+
+Ad removal is off by default. In Settings:
+
+1. Save a DeepSeek API key (transcript text goes to DeepSeek for classification and show notes; audio stays on the phone).
+2. Enable ad removal and accept the model download when prompted.
+3. New subscribed episodes after the enrollment cutoff prepare in the background. Existing episodes can use **Prepare ad-free**.
+
+Details, storage rules, and acceptance criteria: `docs/ad-removal-design.md` and `docs/ad-removal-v1-acceptance.md`.
+
 ## iOS app
 
 The private iPhone target lives under `ios/`.
 
 - Full Xcode is required; Command Line Tools are not enough.
-- Free Personal Team installs expire after 7 days. The launchd agent checks every 15 minutes, reinstalls after 48 hours since the last success, and retries when the phone is temporarily unavailable.
-- Reinstall-over-existing must preserve the live SQLite DB in Application Support; uninstalling the app deletes that state.
-- Generated web assets and seed DBs are ignored by Git.
+- Free Personal Team installs expire after 7 days. The launchd agent checks on a timer, reinstalls before profile expiry, and retries when the phone is briefly unavailable.
+- Reinstall-over-existing must preserve the live SQLite DB in Application Support. Uninstalling the app deletes that state.
+- Generated web assets (`ios/Pods/Web/`) and seed DBs are ignored by Git. Stage UI with `ios/prepare-web-assets.sh`.
 
-See `ios/README.md` for setup, seed DB staging, refresh automation, and reinstall acceptance tests.
+See `ios/README.md` for Xcode setup, seed DB staging, feed refresh behavior, refresh automation, and reinstall acceptance tests.
+
+## Mac speaker (optional)
+
+`mac/PodsSpeaker` plays episode audio on the Mac while you control playback from the iPhone. Phone and Mac must share the same Wi‑Fi. See `mac/README.md`.
