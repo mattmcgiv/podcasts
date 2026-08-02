@@ -916,19 +916,21 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .player-sheet,
 .settings-sheet {
-  position: fixed;
   inset: 0;
   background: var(--bg);
-  z-index: 30;
 }
 
 .player-sheet {
+  position: fixed;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 .settings-sheet {
+  position: relative;
+  min-height: 100dvh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }

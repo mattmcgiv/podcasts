@@ -136,13 +136,10 @@ describe("SettingsSheet", () => {
     await screen.findByText("refresh blew up");
   });
 
-  it("closes via the header button", async () => {
+  it("does not render a close button", async () => {
     installApi({});
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(<SettingsSheet onClose={onClose} />);
-    await user.click(screen.getByRole("button", { name: "Close settings" }));
-    expect(onClose).toHaveBeenCalled();
+    render(<SettingsSheet onClose={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Close settings" })).not.toBeInTheDocument();
   });
 
   it("enables cloud ad removal after the API key is configured", async () => {

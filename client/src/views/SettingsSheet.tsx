@@ -29,6 +29,8 @@ function formatRefreshStatus(refreshStatus: RefreshStatus): string {
 }
 
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
+  // Settings is a top-level route; retain the prop for call-site compatibility.
+  void onClose;
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
@@ -201,11 +203,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   return (
     <div className="settings-sheet" role="dialog" aria-label="Settings">
       <header className="sheet-header">
-        <button className="icon-btn" onClick={onClose} aria-label="Close settings">
-          <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden>
-            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-        </button>
+        <span className="sheet-spacer" />
         <span className="sheet-show">Settings</span>
         <span className="sheet-spacer" />
       </header>
