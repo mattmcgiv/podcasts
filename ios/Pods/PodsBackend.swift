@@ -91,7 +91,8 @@ final class PodsBackend: PlaybackProgressRecording {
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
         deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore(),
-        episodeShowNotesService: EpisodeShowNotesService? = nil
+        episodeShowNotesService: EpisodeShowNotesService? = nil,
+        recoverInterruptedPlayedCleanup: Bool = false
     ) {
         self.database = database
         self.feedFetcher = feedFetcher
@@ -105,6 +106,9 @@ final class PodsBackend: PlaybackProgressRecording {
             AdRemovalFileCleanup(database: database, artifactStore: $0)
         }
         recoverInterruptedRefreshAttempts()
+        if recoverInterruptedPlayedCleanup {
+            recoverInterruptedPlayedCleanupAfterColdStart()
+        }
     }
 
     func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
@@ -1066,24 +1070,19 @@ final class PodsBackend: PlaybackProgressRecording {
     private func setPlayed(id: Int64) async throws {
         try episodeExists(id: id)
         let ts = nowUnix()
-        // Make the persisted source unavailable before awaiting cancellation.
-        // The service tombstone covers the await itself; this cancelled stage
-        // closes the handoff between cancellation completion and cleanup.
-        try database.execute(
-            """
-            UPDATE ad_removal_jobs
-            SET stage = 'cancelled', blocking_reason = NULL, updated_at = ?
-            WHERE episode_id = ?
-            """,
-            [.int(ts), .int(id)]
-        )
-        // The classifier/transcriber/downloader may still hold episode input
-        // in memory. Drain that worker before deleting its durable sources.
-        await cancelAdRemovalPipeline(.episode(id))
-        // A generation task may still hold the transcript in memory. Wait for
-        // it to finish cancelling before deleting the episode's source data.
-        await episodeShowNotesService?.cancel(episodeID: id)
+        // The user's tap is authoritative. Persist both the played state and
+        // the pipeline tombstone in one transaction before starting any work
+        // that can suspend. Reads and app restarts must observe the tap even if
+        // cancellation is slow or the process is terminated during cleanup.
         try database.withTransaction {
+            try database.execute(
+                """
+                UPDATE ad_removal_jobs
+                SET stage = 'cancelled', blocking_reason = NULL, updated_at = ?
+                WHERE episode_id = ?
+                """,
+                [.int(ts), .int(id)]
+            )
             try database.execute(
                 """
                 INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
@@ -1091,11 +1090,60 @@ final class PodsBackend: PlaybackProgressRecording {
                 """,
                 [.int(id), .int(ts), .int(ts)]
             )
-            try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
         }
-        try adRemovalFileCleanup?.drain()
+
+        // Cancellation and artifact cleanup are deliberately detached from the
+        // HTTP response. The cancelled job is a durable restart marker; init
+        // reconciles it if this task is interrupted by process termination.
+        Task { [weak self] in
+            await self?.finishPlayedCleanup(id: id)
+        }
+    }
+
+    private func finishPlayedCleanup(id: Int64) async {
+        // Workers can still hold episode input in memory. Drain them before
+        // deleting durable sources so a cancelled worker cannot write late.
+        await cancelAdRemovalPipeline(.episode(id))
+        await episodeShowNotesService?.cancel(episodeID: id)
+        do {
+            try database.withTransaction {
+                try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
+            }
+            try adRemovalFileCleanup?.drain()
+        } catch {
+            PodsLog("Pods played-episode background cleanup failed episodeID=\(id): \(error)")
+        }
         if let adRemovalRunRequestHandler {
             await adRemovalRunRequestHandler()
+        }
+    }
+
+    /// A process can be terminated after the played-state transaction commits
+    /// but before its background cancellation finishes. No old worker survives
+    /// a relaunch, so stale metadata for played episodes is safe to reconcile
+    /// synchronously before the scheduler is allowed to resume.
+    private func recoverInterruptedPlayedCleanupAfterColdStart() {
+        do {
+            let episodeIDs = try database.query(
+                """
+                SELECT j.episode_id
+                FROM ad_removal_jobs j
+                JOIN episode_state s ON s.episode_id = j.episode_id
+                WHERE s.played_at IS NOT NULL
+                ORDER BY j.episode_id
+                """,
+                map: { sqlite3_column_int64($0, 0) }
+            )
+            guard !episodeIDs.isEmpty else { return }
+            try database.withTransaction {
+                for episodeID in episodeIDs {
+                    try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: episodeID)
+                }
+            }
+            try adRemovalFileCleanup?.drain()
+            PodsLog("Pods recovered played-episode cleanup count=\(episodeIDs.count)")
+        } catch {
+            PodsLog("Pods played-episode cleanup recovery failed: \(error)")
         }
     }
 

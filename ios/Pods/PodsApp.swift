@@ -197,7 +197,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
                 deepSeekCredentialStore: deepSeekCredentialStore,
-                episodeShowNotesService: episodeShowNotesService
+                episodeShowNotesService: episodeShowNotesService,
+                recoverInterruptedPlayedCleanup: true
             )
             let coordinator = FeedRefreshCoordinator(backend: backend)
             backend.setRefreshRequestHandler { source in

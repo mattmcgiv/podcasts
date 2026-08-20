@@ -662,7 +662,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(invalidSettings.statusCode, 422)
     }
 
-    func testMarkPlayedAwaitsShowNotesCancellationBeforeMetadataCleanup() async throws {
+    func testMarkPlayedPersistsBeforeShowNotesCancellationAndDefersMetadataCleanup() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/show-notes-cancellation.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
@@ -728,6 +728,17 @@ final class PodsBackendTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(observedCancellation, "mark-played must cancel active show-note generation")
+        let response = await markPlayed.value
+        XCTAssertEqual(response.statusCode, 204)
+        let recentWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(backend, "GET", "/api/recent")
+        )
+        XCTAssertFalse(recentWhileCancellationIsBlocked.items.contains { $0.id == episodeID })
+        XCTAssertNotNil(try harness.database.scalarInt64(
+            "SELECT played_at FROM episode_state WHERE episode_id = ?",
+            [.int(episodeID)]
+        ))
         let cancellingJob = try XCTUnwrap(jobStore.job(episodeID: episodeID))
         XCTAssertEqual(
             cancellingJob.stage,
@@ -740,14 +751,12 @@ final class PodsBackendTests: XCTestCase {
         )
 
         await generator.releaseAfterCancellation()
-        let response = await markPlayed.value
-        XCTAssertEqual(response.statusCode, 204)
+        for _ in 0..<200 {
+            if try jobStore.job(episodeID: episodeID) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertNil(try jobStore.job(episodeID: episodeID))
         XCTAssertTrue(try jobStore.transcriptSegments(episodeID: episodeID).isEmpty)
-        XCTAssertNotNil(try harness.database.scalarInt64(
-            "SELECT played_at FROM episode_state WHERE episode_id = ?",
-            [.int(episodeID)]
-        ))
         do {
             _ = try await generation.value
             XCTFail("Expected mark-played to cancel in-flight show-note generation")
@@ -756,7 +765,7 @@ final class PodsBackendTests: XCTestCase {
         }
     }
 
-    func testMarkPlayedDrainsPipelineAndRejectsCancelledClassifierWrite() async throws {
+    func testMarkPlayedIsImmediatelyDurableWhileCleanupContinuesInBackground() async throws {
         let harness = try makeHarness()
         let prepared = try await prepareClassifyingEpisode(harness, guid: "pipeline-mark-played")
         let executor = CancellationHoldingClassificationExecutor(store: prepared.store)
@@ -779,12 +788,35 @@ final class PodsBackendTests: XCTestCase {
         await executor.waitUntilCancellationObserved()
 
         let completedBeforeRelease = await completion.isCompleted()
-        XCTAssertFalse(completedBeforeRelease, "mark-played returned before pipeline termination")
+        XCTAssertTrue(
+            completedBeforeRelease,
+            "mark-played must return without waiting for background pipeline cancellation"
+        )
+        let recentWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(harness.backend, "GET", "/api/recent")
+        )
+        XCTAssertFalse(
+            recentWhileCancellationIsBlocked.items.contains { $0.id == prepared.episodeID },
+            "the user's mark-played tap must become authoritative before background cancellation finishes"
+        )
+        let playedWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(harness.backend, "GET", "/api/played")
+        )
+        XCTAssertTrue(
+            playedWhileCancellationIsBlocked.items.contains { $0.id == prepared.episodeID },
+            "the played list must expose the durable tap while cleanup remains blocked"
+        )
         XCTAssertEqual(try prepared.store.job(id: prepared.job.id)?.stage, .cancelled)
         await executor.release()
 
         let response = await markPlayed.value
         XCTAssertEqual(response.statusCode, 204)
+        for _ in 0..<200 {
+            if try prepared.store.job(id: prepared.job.id) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         let staleWriteSucceeded = await executor.didPersistAfterCancellation()
         XCTAssertEqual(staleWriteSucceeded, false)
         XCTAssertNil(try prepared.store.job(id: prepared.job.id))
@@ -795,6 +827,42 @@ final class PodsBackendTests: XCTestCase {
         } catch is CancellationError {
             // Expected.
         }
+    }
+
+    func testBackendStartupReconcilesInterruptedPlayedCleanup() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "played-cleanup-restart")
+        try harness.database.withTransaction {
+            try harness.database.execute(
+                "UPDATE ad_removal_jobs SET stage = 'cancelled', updated_at = 2_000 WHERE episode_id = ?",
+                [.int(prepared.episodeID)]
+            )
+            try harness.database.execute(
+                """
+                INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, 2_000, 2_000)
+                ON CONFLICT (episode_id) DO UPDATE SET played_at = 2_000, updated_at = 2_000
+                """,
+                [.int(prepared.episodeID)]
+            )
+        }
+
+        let restartedBackend = PodsBackend(
+            database: harness.database,
+            feedFetcher: harness.fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: harness.adRemovalArtifactStore,
+            recoverInterruptedPlayedCleanup: true
+        )
+
+        let played = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(restartedBackend, "GET", "/api/played")
+        )
+        XCTAssertTrue(played.items.contains { $0.id == prepared.episodeID })
+        XCTAssertNil(
+            try prepared.store.job(episodeID: prepared.episodeID),
+            "startup must finish cleanup that was interrupted after the authoritative tap committed"
+        )
     }
 
     func testFeatureCleanupWaitsForPipelineTerminationBeforeDeletingLateWrites() async throws {
@@ -1431,6 +1499,10 @@ final class PodsBackendTests: XCTestCase {
 
         let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
         XCTAssertEqual(played.statusCode, 204)
+        for _ in 0..<200 {
+            if try store.job(episodeID: episode.id) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: try harness.adRemovalArtifactStore.url(for: audioArtifact.relativePath).path
         ))
