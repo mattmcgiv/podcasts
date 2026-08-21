@@ -287,6 +287,63 @@ final class PodsBackendTests: XCTestCase {
         override func stopLoading() {}
     }
 
+    private final class SchemeRetryURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var requested: [URL] = []
+        private static var failSchemes: Set<String> = ["http"]
+
+        static func reset(failSchemes: Set<String> = ["http"]) {
+            lock.lock()
+            defer { lock.unlock() }
+            requested = []
+            Self.failSchemes = failSchemes
+        }
+
+        static func requestedURLs() -> [URL] {
+            lock.lock()
+            defer { lock.unlock() }
+            return requested
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool {
+            request.url?.host == "retry.example"
+        }
+
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+            request
+        }
+
+        override func startLoading() {
+            Self.lock.lock()
+            Self.requested.append(request.url!)
+            let shouldFail = Self.failSchemes.contains(request.url?.scheme ?? "")
+            Self.lock.unlock()
+            guard !shouldFail else {
+                // Mirrors the on-device ATS violation for http feed URLs.
+                let atsError = URLError(
+                    URLError.Code(rawValue: -1022),
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection."
+                    ]
+                )
+                client?.urlProtocol(self, didFailWithError: atsError)
+                return
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("<rss/>".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
+    }
+
     private struct MockDirectorySearcher: PodcastDirectorySearching {
         var podcasts: [DirectoryPodcast]
 
@@ -1820,6 +1877,68 @@ final class PodsBackendTests: XCTestCase {
         )
 
         XCTAssertEqual(FeedRequestCaptureURLProtocol.request()?.timeoutInterval, 12)
+    }
+
+    func testFeedFetcherRetriesHTTPFeedOverHTTPSWhenTheFirstFetchFails() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: ["http"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        let response = try await fetcher.response(
+            for: try XCTUnwrap(URL(string: "http://retry.example/feed.xml")),
+            validators: FeedValidators()
+        )
+
+        guard case .data(let data, _) = response else {
+            return XCTFail("expected feed data after the https retry")
+        }
+        XCTAssertEqual(String(data: data, encoding: .utf8), "<rss/>")
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["http://retry.example/feed.xml", "https://retry.example/feed.xml"]
+        )
+    }
+
+    func testFeedFetcherDoesNotRetryWhenTheListedFeedIsAlreadyHTTPS() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: ["https"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        do {
+            _ = try await fetcher.response(
+                for: try XCTUnwrap(URL(string: "https://retry.example/feed.xml")),
+                validators: FeedValidators()
+            )
+            XCTFail("expected the https failure to propagate")
+        } catch {
+            // Expected: https failures are not retried against themselves.
+        }
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["https://retry.example/feed.xml"]
+        )
+    }
+
+    func testFeedFetcherDoesNotRetryWhenTheHTTPFeedSucceeds() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: [])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        _ = try await fetcher.response(
+            for: try XCTUnwrap(URL(string: "http://retry.example/feed.xml")),
+            validators: FeedValidators()
+        )
+
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["http://retry.example/feed.xml"]
+        )
     }
 
     func testManualRefreshUsesTheNativeCoordinatorAndOverridesTheFreshnessWindow() async throws {

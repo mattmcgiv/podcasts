@@ -71,6 +71,20 @@ struct URLSessionFeedFetcher: ConditionalFeedFetching {
     }
 
     func response(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
+        do {
+            return try await fetchResponse(for: url, validators: validators)
+        } catch {
+            guard url.scheme?.lowercased() == "http",
+                  let upgraded = Self.httpsEquivalent(of: url) else {
+                throw error
+            }
+            // Directories often list feeds over http even though the host serves
+            // the same feed over TLS. Retry the upgrade before surfacing the failure.
+            return try await fetchResponse(for: upgraded, validators: validators)
+        }
+    }
+
+    private func fetchResponse(for url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
         var request = URLRequest(
             url: url,
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
@@ -98,6 +112,14 @@ struct URLSessionFeedFetcher: ConditionalFeedFetching {
             throw PodsBackendError.upstream("feed returned HTTP \(http.statusCode)")
         }
         return .data(data, responseValidators)
+    }
+
+    private static func httpsEquivalent(of url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.scheme = "https"
+        return components.url
     }
 }
 
