@@ -1,0 +1,21 @@
+name: Forward issue webhook
+on:
+  issues:
+    types: [opened, reopened]
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Forward to Grok Bot
+        env:
+          WEBHOOK_URL: https://api2.cursor.sh/automations/webhook/12762516-8fd5-5645-962b-0f2dd653646e
+          WEBHOOK_KEY: ${{ secrets.GROK_WEBHOOK_KEY }}
+        run: |
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${WEBHOOK_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: issues" \
+            --data-binary @"$GITHUB_EVENT_PATH" \
+            "$WEBHOOK_URL")
+          echo "status=$code"
+          test "$code" = "200"
