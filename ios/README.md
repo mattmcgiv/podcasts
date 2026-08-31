@@ -8,6 +8,17 @@ Optional menu-bar companion so episode audio plays on your MacBook while you ful
 
 See [`mac/README.md`](../mac/README.md) for setup. Summary: run `mac/PodsSpeaker.xcodeproj`, then in the iPhone player choose **Play on → Mac**.
 
+## Car / Bluetooth playback
+
+The app controls the iPhone audio session directly. A Tesla Model 3 connects as a plain Bluetooth stereo (no CarPlay).
+
+- You enter the car and Bluetooth connects while an episode plays: iOS moves the audio to the car. Nothing to do.
+- You leave the car and Bluetooth drops: the app pauses, saves the position, and keeps the episode on the car stereo screen.
+- You come back later and Bluetooth connects: the app resumes from the saved position at your saved speed.
+- You press pause in the app: the app stays paused. It never resumes on its own after a manual pause.
+
+Limit: iOS only delivers the Bluetooth connect event to a running app. After you force-quit the app or restart the phone, open Pods once. Auto-resume works from then on.
+
 ## Xcode Setup
 
 The Mac must have full Xcode, not only Command Line Tools.

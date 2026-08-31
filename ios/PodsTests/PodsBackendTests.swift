@@ -2144,6 +2144,77 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: false))
     }
 
+    func testCarRouteLossPausesAndPendsResume() {
+        // Leaving the car drops the Bluetooth sink. Without this the episode keeps playing
+        // out of the phone speaker and no resume intent survives for the next trip.
+        XCTAssertTrue(AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: .oldDeviceUnavailable,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            isPlaying: true
+        ))
+        // Already paused, no episode, casting, or an unrelated route change: stay put.
+        XCTAssertFalse(AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: .oldDeviceUnavailable,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            isPlaying: false
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: .oldDeviceUnavailable,
+            preferredOutputIsMac: false,
+            hasEpisode: false,
+            isPlaying: true
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: .oldDeviceUnavailable,
+            preferredOutputIsMac: true,
+            hasEpisode: true,
+            isPlaying: true
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: .categoryChange,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            isPlaying: true
+        ))
+    }
+
+    func testCarReconnectResumesOnlyAfterAutoPause() {
+        // Entering the car reconnects Bluetooth. Resume only what we auto-paused; an
+        // explicit user pause leaves resumePending false and must stay silent.
+        XCTAssertTrue(AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: .newDeviceAvailable,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            resumePending: true
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: .newDeviceAvailable,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            resumePending: false
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: .newDeviceAvailable,
+            preferredOutputIsMac: false,
+            hasEpisode: false,
+            resumePending: true
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: .newDeviceAvailable,
+            preferredOutputIsMac: true,
+            hasEpisode: true,
+            resumePending: true
+        ))
+        XCTAssertFalse(AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: .oldDeviceUnavailable,
+            preferredOutputIsMac: false,
+            hasEpisode: true,
+            resumePending: true
+        ))
+    }
+
     func testMacSourceReplacementPreservesPlayIntent() {
         // While Mac is preferred and playback is active, replacing the episode must
         // autoplay on Mac when connected — not fall idle waiting for a second command

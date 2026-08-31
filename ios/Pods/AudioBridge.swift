@@ -111,6 +111,35 @@ enum RemoteForwardCommandBinding {
     }
 }
 
+/// Pure policy for car/Bluetooth route changes (`AVAudioSession.routeChangeNotification`).
+///
+/// A Tesla Model 3 is a plain Bluetooth A2DP sink (no CarPlay), so connecting or leaving
+/// the car arrives only as `.newDeviceAvailable` / `.oldDeviceUnavailable`. Nothing else in
+/// the app reacts to those reasons: leaving the car kept playing out of the phone speaker,
+/// and returning to the car never resumed.
+enum AudioRouteResumePolicy {
+    /// Auto-pause when the output we were playing through disappears.
+    static func shouldPauseOnRouteLoss(
+        reason: AVAudioSession.RouteChangeReason?,
+        preferredOutputIsMac: Bool,
+        hasEpisode: Bool,
+        isPlaying: Bool
+    ) -> Bool {
+        reason == .oldDeviceUnavailable && !preferredOutputIsMac && hasEpisode && isPlaying
+    }
+
+    /// Auto-resume only when we auto-paused ourselves. An explicit user pause is never
+    /// overridden, and Mac-cast output owns its own transport.
+    static func shouldResumeOnNewDevice(
+        reason: AVAudioSession.RouteChangeReason?,
+        preferredOutputIsMac: Bool,
+        hasEpisode: Bool,
+        resumePending: Bool
+    ) -> Bool {
+        reason == .newDeviceAvailable && !preferredOutputIsMac && hasEpisode && resumePending
+    }
+}
+
 final class AudioBridge: NSObject, WKScriptMessageHandler {
     static let shared = AudioBridge()
 
@@ -130,6 +159,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var requestedRate: Float = 1
     private var speedDiagnosticTracker = PlaybackSpeedDiagnosticTracker()
     private var shouldResumeAfterInterruption = false
+    /// Set when we auto-paused because the car/Bluetooth output went away. Cleared by an
+    /// explicit user pause, stop, new load, or the auto-resume itself.
+    private var autoResumeOnNewDevice = false
     private var nowPlayingMetadata: NowPlayingMetadata?
     private var nowPlayingArtwork: MPMediaItemArtwork?
     private var nowPlayingArtworkURL: URL?
@@ -615,6 +647,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private func load(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
         playbackSessionID = AdRemovalPlaybackSession.makeID()
         currentEpisodeID = episodeID
+        // Loading is a user action: drop any pending auto-resume for the previous episode.
+        autoResumeOnNewDevice = false
         publisherURL = url
         downloadedEpisode = nil
         macStreamURL = nil
@@ -771,6 +805,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func pause(id: Int) {
+        // An explicit pause cancels the pending car/Bluetooth auto-resume.
+        autoResumeOnNewDevice = false
+        updateCastKeepAlive()
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "pause"])
             recordCurrentProgress(force: true)
@@ -850,6 +887,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         preferredOutput = .local
         output = .local
         pendingPlayAfterCastConnect = false
+        autoResumeOnNewDevice = false
         updateCastKeepAlive()
         stopLocalPlayer(record: false)
         currentEpisodeID = nil
@@ -1338,6 +1376,41 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     @objc private func audioRouteChanged(_ notification: Notification) {
         guard output == .local else { return }
+        let reason = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+            .flatMap { AVAudioSession.RouteChangeReason(rawValue: $0) }
+        let episodeLabel = currentEpisodeID.map(String.init) ?? "none"
+
+        if AudioRouteResumePolicy.shouldPauseOnRouteLoss(
+            reason: reason,
+            preferredOutputIsMac: preferredOutput == .mac,
+            hasEpisode: currentEpisodeID != nil,
+            isPlaying: (player?.rate ?? 0) != 0
+        ) {
+            autoResumeOnNewDevice = true
+            player?.pause()
+            recordCurrentProgress(force: true)
+            updateNowPlaying(rate: 0, paused: true)
+            emitPlaybackState(type: "pause", id: currentId, paused: true)
+            // iOS suspends a silent app, and a suspended app never hears the next connect.
+            // ponytail: resident until the user pauses explicitly; bound by a timer if battery
+            // complaints appear.
+            startCastKeepAliveIfNeeded()
+            PodsLog("playback_route_paused reason=oldDeviceUnavailable episode_id=\(episodeLabel)")
+        } else if AudioRouteResumePolicy.shouldResumeOnNewDevice(
+            reason: reason,
+            preferredOutputIsMac: preferredOutput == .mac,
+            hasEpisode: currentEpisodeID != nil,
+            resumePending: autoResumeOnNewDevice
+        ) {
+            autoResumeOnNewDevice = false
+            stopCastKeepAlive()
+            configureSession()
+            player?.rate = requestedRate
+            updateNowPlaying(rate: requestedRate, paused: false)
+            emit(type: "play", id: currentId, playbackRate: requestedRate, paused: false)
+            PodsLog("playback_route_resumed reason=newDeviceAvailable episode_id=\(episodeLabel)")
+        }
+
         let itemDuration = player?.currentItem?.duration.seconds
         updateNowPlaying(
             position: player?.currentTime().seconds ?? 0,
@@ -1460,7 +1533,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         nowPlayingPosition = position
     }
 
-    // MARK: - Cast keep-alive (prevents iOS suspend while Mac plays)
+    // MARK: - Silent keep-alive (prevents iOS suspend while Mac plays or car resume is pending)
 
     private func updateCastKeepAlive() {
         if PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: preferredOutput == .mac) {
