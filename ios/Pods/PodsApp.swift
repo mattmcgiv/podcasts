@@ -126,25 +126,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let adCoordinator = AdRemovalCoordinator(
                 store: jobStore,
                 executor: pipeline,
-                diagnostics: adRemovalDiagnostics,
-                readyHandler: { episodeID in
-                    do {
-                        _ = try await episodeShowNotesService.generate(episodeID: episodeID)
-                    } catch is CancellationError {
-                        // Episode or feature cleanup owns cancellation; no retry is appropriate here.
-                    } catch {
-                        let nsError = error as NSError
-                        try? diagnostics?.record(
-                            eventName: "episode_show_notes_generation_failed",
-                            severity: .warning,
-                            context: .init(episodeID: episodeID),
-                            fields: [
-                                "error_domain": nsError.domain,
-                                "error_code": String(nsError.code)
-                            ]
-                        )
-                    }
-                }
+                diagnostics: adRemovalDiagnostics
             )
             adRemovalCoordinator = adCoordinator
             let availabilityReader = SystemLanguageModelAvailabilityReader()
@@ -163,6 +145,32 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 },
                 isOnDeviceModelAvailable: {
                     availabilityReader.currentAvailability().available
+                },
+                idleWork: {
+                    do {
+                        guard let episodeID = try await episodeShowNotesService.generateNextPending() else {
+                            return false
+                        }
+                        try? diagnostics?.record(
+                            eventName: "episode_show_notes_queue_completed",
+                            severity: .notice,
+                            context: .init(episodeID: episodeID)
+                        )
+                        return true
+                    } catch is CancellationError {
+                        return false
+                    } catch {
+                        let nsError = error as NSError
+                        try? diagnostics?.record(
+                            eventName: "episode_show_notes_generation_failed",
+                            severity: .warning,
+                            fields: [
+                                "error_domain": nsError.domain,
+                                "error_code": String(nsError.code)
+                            ]
+                        )
+                        return false
+                    }
                 },
                 diagnostics: adRemovalDiagnostics
             )

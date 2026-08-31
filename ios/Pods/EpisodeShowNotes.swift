@@ -248,6 +248,23 @@ final class EpisodeShowNotesStore {
         }.first == "true"
     }
 
+    func nextPendingEpisodeID() throws -> Int64? {
+        try database.query(
+            """
+            SELECT j.episode_id
+            FROM ad_removal_jobs j
+            WHERE j.stage = 'ready'
+              AND NOT EXISTS (
+                  SELECT 1 FROM episode_show_notes n WHERE n.episode_id = j.episode_id
+              )
+            ORDER BY COALESCE(j.classified_at, j.updated_at), j.enrolled_at, j.episode_id
+            LIMIT 1
+            """
+        ) { statement in
+            sqlite3_column_int64(statement, 0)
+        }.first
+    }
+
     func sourceRevision(episodeID: Int64) throws -> EpisodeShowNotesSourceRevision? {
         let jobStore = AdRemovalJobStore(database: database)
         guard let job = try jobStore.job(episodeID: episodeID), job.stage == .ready else {
@@ -388,6 +405,14 @@ actor EpisodeShowNotesService {
             }
         }
         return try await task.value
+    }
+
+    /// Generates one queued ready episode. The ad-removal scheduler invokes this
+    /// only after it has no runnable download, transcription, or classification work.
+    func generateNextPending() async throws -> Int64? {
+        guard let episodeID = try store.nextPendingEpisodeID() else { return nil }
+        _ = try await generate(episodeID: episodeID)
+        return episodeID
     }
 
     func cancel(episodeID: Int64) async {
