@@ -949,7 +949,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(callsAfterRelease, 2)
     }
 
-    func testShowNotesGenerationRejectsAnAdCorrectionMadeWhileDeepSeekIsRunning() async throws {
+    func testShowNotesGenerationRejectsAnAdCorrectionMadeWhileGenerationIsRunning() async throws {
         let harness = try makeHarness()
         try setAdRemovalEnabled(harness.database)
         let jobStore = AdRemovalJobStore(database: harness.database, now: { 1_000 })
@@ -1267,6 +1267,62 @@ final class AdRemovalPersistenceTests: XCTestCase {
 
         let maximumConcurrentCalls = await executor.maximumConcurrentCalls
         XCTAssertEqual(maximumConcurrentCalls, 1)
+    }
+
+    func testSchedulerClearsModelRequiredWhenOnDeviceModelIsAvailable() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.setBlockingReason(jobID: queued.id, reason: .modelRequired)
+        let executor = RecordingStageExecutor(store: store)
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) },
+            isOnDeviceModelAvailable: { true }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
+        XCTAssertNil(try store.job(id: queued.id)?.blockingReason)
+        XCTAssertEqual(executor.executedStages, [.downloading, .transcribing, .classifying])
+    }
+
+    func testSchedulerLeavesModelRequiredBlockedWhenOnDeviceModelIsUnavailable() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.setBlockingReason(jobID: queued.id, reason: .modelRequired)
+        let executor = RecordingStageExecutor(store: store)
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) },
+            isOnDeviceModelAvailable: { false }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .queued)
+        XCTAssertEqual(try store.job(id: queued.id)?.blockingReason, .modelRequired)
+        XCTAssertTrue(executor.executedStages.isEmpty)
+    }
+
+    func testTransientPolicyClearLeavesModelRequiredJobsBlocked() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.setBlockingReason(jobID: queued.id, reason: .modelRequired)
+
+        try store.clearTransientPolicyBlockingReasons()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.blockingReason, .modelRequired)
+        XCTAssertNil(try store.nextRunnableJob())
+
+        try store.clearBlockingReasons([.modelRequired])
+        XCTAssertNil(try store.job(id: queued.id)?.blockingReason)
+        XCTAssertEqual(try store.nextRunnableJob()?.id, queued.id)
     }
 
     func testCoordinatorRecordsPolicyPauseWithoutConsumingFailureRetry() async throws {

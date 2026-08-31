@@ -5,6 +5,7 @@ import { APP_NAME } from "../config";
 import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { useList } from "../hooks";
 import { usePlayer } from "../player";
+import { onDeviceClassifierCopy } from "../lib";
 import { refreshFeeds } from "../refreshFeeds";
 import type { AdRemovalSettings, AdRemovalStage, EpisodeItem, RefreshStatus } from "../types";
 import type { AdRemovalStatusItem } from "../types";
@@ -317,6 +318,11 @@ export function RecentView() {
     return adSettings;
   }, [adSettings]);
 
+  const classifierPause = useMemo(() => {
+    if (!adSettings || !adSettings.enabled || adSettings.classifier_available) return null;
+    return onDeviceClassifierCopy(adSettings);
+  }, [adSettings]);
+
   function markPlayed(item: EpisodeItem) {
     const now = Date.now();
     if (now < markPlayedGuardUntilRef.current) return;
@@ -379,6 +385,13 @@ export function RecentView() {
         <p className="low-storage-banner" role="alert">
           Ad removal paused · {formatGB(lowStorageBanner.device_available_bytes)} free ·{" "}
           {formatGB(lowStorageBanner.minimum_free_bytes)} required
+        </p>
+      )}
+
+      {classifierPause && (
+        <p className="low-storage-banner" role="status">
+          Ad finding paused · {classifierPause.status}
+          {classifierPause.recovery ? ` ${classifierPause.recovery}` : ""}
         </p>
       )}
 

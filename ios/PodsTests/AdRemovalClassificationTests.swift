@@ -1,23 +1,178 @@
 import CryptoKit
 import Darwin
+import FoundationModels
 import XCTest
 @testable import Pods
 
 final class AdRemovalClassificationTests: XCTestCase {
-    func testShowNotesPromptLimitSupportsLongEpisodes() {
-        XCTAssertEqual(DeepSeekEpisodeShowNotesGenerator.maximumPromptBytes, 600_000)
+    func testAvailabilitySnapshotMapsAppleSystemLanguageModelCases() {
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .available),
+            .available
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.deviceNotEligible)),
+            .unavailable(.deviceNotEligible)
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.appleIntelligenceNotEnabled)),
+            .unavailable(.appleIntelligenceNotEnabled)
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.modelNotReady)),
+            .unavailable(.modelNotReady)
+        )
+        XCTAssertEqual(AppleOnDeviceModelAvailability.available.downloadState, "ready")
+        XCTAssertEqual(AppleOnDeviceModelAvailability.unavailable(.modelNotReady).downloadState, "downloading")
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.unavailable(.appleIntelligenceNotEnabled).downloadState,
+            "apple_intelligence_disabled"
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.unavailable(.deviceNotEligible).downloadState,
+            "device_not_eligible"
+        )
+        XCTAssertTrue(
+            AppleOnDeviceModelAvailability.unavailable(.deviceNotEligible).enableError
+                .contains("not available on this iPhone")
+        )
     }
 
-    private final class StubDeepSeekCredentialStore: DeepSeekCredentialStoring {
-        private var apiKey: String?
+    func testShowNotesPromptLimitFitsOnDeviceContext() {
+        XCTAssertEqual(AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes, 8_000)
+        XCTAssertLessThanOrEqual(
+            AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes,
+            AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens * 4
+        )
+    }
 
-        init(apiKey: String? = "test-api-key") {
-            self.apiKey = apiKey
+    private final class StubOnDeviceResponder: AppleOnDevicePromptResponding {
+        var isAvailable: Bool
+        var prompt: String?
+        var result: Result<String, Error>
+
+        init(isAvailable: Bool = true, result: Result<String, Error>) {
+            self.isAvailable = isAvailable
+            self.result = result
         }
 
-        var hasAPIKey: Bool { !(apiKey ?? "").isEmpty }
-        func readAPIKey() throws -> String? { apiKey }
-        func saveAPIKey(_ value: String) throws { apiKey = value }
+        func respond(to prompt: String) async throws -> String {
+            self.prompt = prompt
+            return try result.get()
+        }
+    }
+
+    private final class MutableOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
+        var availability: AppleOnDeviceModelAvailability
+
+        init(_ availability: AppleOnDeviceModelAvailability) {
+            self.availability = availability
+        }
+
+        func currentAvailability() -> AppleOnDeviceModelAvailability {
+            availability
+        }
+    }
+
+    /// Shared availability + classifier seam for the mid-classification outage e2e.
+    private final class ControllableOnDeviceEnvironment:
+        AppleOnDeviceModelAvailabilityReading,
+        AppleOnDevicePromptResponding,
+        @unchecked Sendable
+    {
+        private let lock = NSLock()
+        private var availabilityValue: AppleOnDeviceModelAvailability
+        private var holdingFirstRespond: Bool
+        private var enteredRespond = false
+        private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+        private let successJSON: String
+        private var respondCount = 0
+
+        init(
+            availability: AppleOnDeviceModelAvailability = .available,
+            successJSON: String,
+            holdFirstRespond: Bool = true
+        ) {
+            self.availabilityValue = availability
+            self.successJSON = successJSON
+            self.holdingFirstRespond = holdFirstRespond
+        }
+
+        var isAvailable: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return availabilityValue.available
+        }
+
+        func currentAvailability() -> AppleOnDeviceModelAvailability {
+            lock.lock()
+            defer { lock.unlock() }
+            return availabilityValue
+        }
+
+        func setAvailability(_ availability: AppleOnDeviceModelAvailability) {
+            lock.lock()
+            availabilityValue = availability
+            lock.unlock()
+        }
+
+        func recordedRespondCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return respondCount
+        }
+
+        func waitUntilRespondEntered() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if enteredRespond {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    enteredWaiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+
+        func releaseFirstRespond() {
+            lock.lock()
+            holdingFirstRespond = false
+            let waiters = releaseWaiters
+            releaseWaiters.removeAll()
+            lock.unlock()
+            waiters.forEach { $0.resume() }
+        }
+
+        func respond(to prompt: String) async throws -> String {
+            lock.lock()
+            respondCount += 1
+            enteredRespond = true
+            let entered = enteredWaiters
+            enteredWaiters.removeAll()
+            let shouldHold = holdingFirstRespond
+            lock.unlock()
+            entered.forEach { $0.resume() }
+
+            if shouldHold {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    lock.lock()
+                    if !holdingFirstRespond {
+                        lock.unlock()
+                        continuation.resume()
+                    } else {
+                        releaseWaiters.append(continuation)
+                        lock.unlock()
+                    }
+                }
+            }
+
+            guard isAvailable else {
+                throw AppleFoundationModelError.unavailable
+            }
+            return successJSON
+        }
     }
 
     func testShowNotesPromptAndParserKeepTimestampsLocalToKnownSegments() throws {
@@ -103,30 +258,13 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
-    func testShowNotesGeneratorUsesSystemRoleAndAcceptsOnlyCompleteBoundedResponse() async throws {
-        var capturedRequest: URLRequest?
-        let responseContent = """
-        {"chapters":[{"segment_id":"s0","title":"Opening","summary":"The discussion begins."}]}
-        """
-        let responseData = try JSONSerialization.data(withJSONObject: [
-            "choices": [[
-                "finish_reason": "stop",
-                "message": ["content": responseContent]
-            ]]
-        ])
-        let transport = DeepSeekEpisodeShowNotesGenerator.Transport { request in
-            capturedRequest = request
-            return (responseData, HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["content-type": "application/json"]
-            )!)
-        }
-        let generator = DeepSeekEpisodeShowNotesGenerator(
-            credentialStore: StubDeepSeekCredentialStore(),
-            transport: transport
-        )
+    func testShowNotesGeneratorUsesOnDeviceResponderAndFitsPrompt() async throws {
+        let responder = StubOnDeviceResponder(result: .success(
+            """
+            {"chapters":[{"segment_id":"s0","title":"Opening","summary":"The discussion begins."}]}
+            """
+        ))
+        let generator = AppleFoundationEpisodeShowNotesGenerator(responder: responder)
         let segment = AdTranscriptSegment(
             id: "segment-opening",
             index: 0,
@@ -143,22 +281,41 @@ final class AdRemovalClassificationTests: XCTestCase {
             title: "Opening",
             summary: "The discussion begins."
         )])
-        let body = try XCTUnwrap(capturedRequest?.httpBody)
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
-        XCTAssertEqual(messages.count, 2)
-        XCTAssertEqual(messages[0]["role"] as? String, "system")
-        XCTAssertEqual(messages[0]["content"] as? String, EpisodeShowNotesPrompt.systemMessage)
-        XCTAssertEqual(messages[1]["role"] as? String, "user")
-        let userMessage = try XCTUnwrap(messages[1]["content"] as? String)
-        XCTAssertTrue(userMessage.hasPrefix("BEGIN_UNTRUSTED_TRANSCRIPT_DATA"))
+        let prompt = try XCTUnwrap(responder.prompt)
+        XCTAssertTrue(prompt.hasPrefix("BEGIN_UNTRUSTED_TRANSCRIPT_DATA"))
+        XCTAssertLessThanOrEqual(prompt.utf8.count, AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes)
+    }
+
+    func testShowNotesPromptFittingKeepsAPrefixInsideTheOnDeviceBudget() throws {
+        let segments = (0..<80).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: String(repeating: "word ", count: 40)
+            )
+        }
+
+        XCTAssertThrowsError(try EpisodeShowNotesPrompt.make(
+            segments: segments,
+            maximumBytes: AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
+        ))
+        let fitted = try EpisodeShowNotesPrompt.makeFitting(
+            segments: segments,
+            maximumBytes: AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
+        )
+        XCTAssertFalse(fitted.segments.isEmpty)
+        XCTAssertLessThan(fitted.segments.count, segments.count)
+        XCTAssertEqual(fitted.segments.first?.id, "segment-0")
         XCTAssertLessThanOrEqual(
-            EpisodeShowNotesPrompt.systemMessage.utf8.count + userMessage.utf8.count,
-            DeepSeekEpisodeShowNotesGenerator.maximumPromptBytes
+            fitted.prompt.utf8.count,
+            AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
         )
     }
 
-    func testShowNotesGeneratorRejectsIncompleteOrOversizedResponse() async throws {
+    func testShowNotesGeneratorRejectsInvalidStructuredResponse() async throws {
         let segment = AdTranscriptSegment(
             id: "segment-opening",
             index: 0,
@@ -167,46 +324,22 @@ final class AdRemovalClassificationTests: XCTestCase {
             endTime: 5,
             text: "Opening"
         )
-        let incompleteData = try JSONSerialization.data(withJSONObject: [
-            "choices": [[
-                "finish_reason": "length",
-                "message": [
-                    "content": "{\"chapters\":[{\"segment_id\":\"s0\",\"title\":\"Opening\",\"summary\":\"Summary.\"}]}"
-                ]
-            ]]
-        ])
-        let responses = [
-            incompleteData,
-            Data(repeating: 0x20, count: DeepSeekEpisodeShowNotesGenerator.maximumResponseBytes + 1)
-        ]
+        let generator = AppleFoundationEpisodeShowNotesGenerator(
+            responder: StubOnDeviceResponder(result: .success("{\"chapters\":[]}"))
+        )
 
-        for data in responses {
-            let generator = DeepSeekEpisodeShowNotesGenerator(
-                credentialStore: StubDeepSeekCredentialStore(),
-                transport: DeepSeekEpisodeShowNotesGenerator.Transport { request in
-                    (data, HTTPURLResponse(
-                        url: try XCTUnwrap(request.url),
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: ["content-type": "application/json"]
-                    )!)
-                }
-            )
-            do {
-                _ = try await generator.generate(segments: [segment])
-                XCTFail("Expected the incomplete or oversized response to be rejected")
-            } catch let error as DeepSeekClassifierError {
-                XCTAssertEqual(error, .invalidResponse)
-            }
+        do {
+            _ = try await generator.generate(segments: [segment])
+            XCTFail("Expected invalid structured output to be rejected")
+        } catch let error as EpisodeShowNotesError {
+            XCTAssertEqual(error, .invalidResponse)
         }
     }
 
-    func testDeepSeekClassifierPausesWhenAPIKeyIsMissing() async throws {
-        let transport = DeepSeekAdClassifier.Transport { _ in
-            XCTFail("Transport should not run without an API key")
-            throw DeepSeekClassifierError.invalidResponse
-        }
-        let classifier = DeepSeekAdClassifier(apiKey: "   ", transport: transport)
+    func testAppleClassifierPausesWhenOnDeviceModelIsUnavailable() async throws {
+        let classifier = AppleFoundationAdClassifier(
+            responder: StubOnDeviceResponder(isAvailable: false, result: .success(#"{"labels":[]}"#))
+        )
         let window = AdClassificationWindow(
             index: 0,
             segments: [],
@@ -214,7 +347,7 @@ final class AdRemovalClassificationTests: XCTestCase {
             prompt: "classify this",
             estimatedInputTokens: 3,
             estimatedCorrectionTokens: 0,
-            maximumInputTokens: 8_000
+            maximumInputTokens: 4_000
         )
 
         do {
@@ -225,19 +358,12 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
-    func testDeepSeekClassifierSendsNonThinkingJSONRequestAndReturnsMessageContent() async throws {
-        var captured: URLRequest?
-        let transport = DeepSeekAdClassifier.Transport { request in
-            captured = request
-            let body = #"{"choices":[{"message":{"content":"{\"labels\":[]}"}}]}"#
-            return (Data(body.utf8), HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["content-type": "application/json"]
-            )!)
-        }
-        let classifier = DeepSeekAdClassifier(apiKey: "secret-test-key", transport: transport)
+    func testAppleClassifierPausesWhenResponderBecomesUnavailableDuringRespond() async throws {
+        let responder = StubOnDeviceResponder(
+            isAvailable: true,
+            result: .failure(AppleFoundationModelError.unavailable)
+        )
+        let classifier = AppleFoundationAdClassifier(responder: responder)
         let window = AdClassificationWindow(
             index: 0,
             segments: [],
@@ -245,21 +371,228 @@ final class AdRemovalClassificationTests: XCTestCase {
             prompt: "classify this",
             estimatedInputTokens: 3,
             estimatedCorrectionTokens: 0,
-            maximumInputTokens: 8_000
+            maximumInputTokens: 4_000
+        )
+
+        do {
+            _ = try await classifier.classify(window: window)
+            XCTFail("Expected the classifier to pause")
+        } catch let pause as AdRemovalPipelinePause {
+            XCTAssertEqual(pause.reason, .modelRequired)
+        }
+    }
+
+    func testAvailabilityObserverRecoversOnlyOnTransitionBackToAvailable() {
+        let reader = MutableOnDeviceAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        var recoveries = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: reader) {
+            recoveries += 1
+        }
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+
+        reader.availability = .unavailable(.modelNotReady)
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+
+        reader.availability = .available
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+
+        reader.availability = .unavailable(.modelNotReady)
+        XCTAssertFalse(observer.poll())
+        reader.availability = .available
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveries, 2)
+    }
+
+    func testForegroundRecoveryClearsAfterUnobservedBackgroundAvailabilityFlap() {
+        let reader = MutableOnDeviceAvailability(.available)
+        var recoveries = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: reader) {
+            recoveries += 1
+        }
+
+        observer.startPolling()
+        observer.stopPolling()
+        reader.availability = .unavailable(.appleIntelligenceNotEnabled)
+        reader.availability = .available
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+        XCTAssertTrue(observer.handleForegroundActivation())
+        XCTAssertEqual(recoveries, 1)
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+    }
+
+    func testJobPausedDuringClassificationResumesWhenAppleIntelligenceReturns() async throws {
+        let harness = try makeClassifyingHarness()
+        let labelsJSON = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
+        let environment = ControllableOnDeviceEnvironment(successJSON: labelsJSON)
+        let executor = AdRemovalPipelineExecutor(
+            database: harness.database,
+            jobStore: harness.store,
+            artifactStore: harness.artifactStore,
+            audioDownloader: UnusedDownloader(),
+            classifier: AppleFoundationAdClassifier(responder: environment)
+        )
+        let scheduler = AdRemovalPipelineScheduler(
+            store: harness.store,
+            coordinator: AdRemovalCoordinator(store: harness.store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) }
+        )
+        var recoveredRuns = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: environment) {
+            recoveredRuns += 1
+            try? harness.store.clearBlockingReasons([.modelRequired])
+        }
+
+        async let firstRun = scheduler.runUntilIdle()
+        await environment.waitUntilRespondEntered()
+        XCTAssertEqual(try harness.store.job(id: harness.job.id)?.stage, .classifying)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+
+        environment.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        environment.releaseFirstRespond()
+        let firstResult = await firstRun
+
+        XCTAssertEqual(firstResult, .completed)
+        let paused = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(paused.stage, .classifying)
+        XCTAssertEqual(paused.blockingReason, .modelRequired)
+        XCTAssertEqual(paused.attemptCount, 0)
+        XCTAssertNil(paused.lastErrorCode)
+        XCTAssertNil(try harness.store.nextRunnableJob())
+        XCTAssertFalse(observer.poll())
+
+        environment.setAvailability(.available)
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveredRuns, 1)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+        XCTAssertEqual(try harness.store.nextRunnableJob()?.id, harness.job.id)
+
+        let secondResult = await scheduler.runUntilIdle()
+
+        XCTAssertEqual(secondResult, .completed)
+        let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(completed.id, harness.job.id)
+        XCTAssertEqual(completed.stage, .ready)
+        XCTAssertNil(completed.blockingReason)
+        XCTAssertEqual(environment.recordedRespondCount(), 2)
+        XCTAssertFalse(try harness.store.skipRanges(episodeID: harness.episodeID).isEmpty)
+    }
+
+    func testBackgroundAvailabilityFlapResumesPausedJobOnForegroundWithoutObservedTransition() async throws {
+        let harness = try makeClassifyingHarness()
+        let labelsJSON = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
+        let environment = ControllableOnDeviceEnvironment(successJSON: labelsJSON)
+        let executor = AdRemovalPipelineExecutor(
+            database: harness.database,
+            jobStore: harness.store,
+            artifactStore: harness.artifactStore,
+            audioDownloader: UnusedDownloader(),
+            classifier: AppleFoundationAdClassifier(responder: environment)
+        )
+        let scheduler = AdRemovalPipelineScheduler(
+            store: harness.store,
+            coordinator: AdRemovalCoordinator(store: harness.store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) }
+        )
+        var recoveredRuns = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: environment) {
+            recoveredRuns += 1
+            try? harness.store.clearBlockingReasons([.modelRequired])
+        }
+        observer.startPolling()
+
+        async let firstRun = scheduler.runUntilIdle()
+        await environment.waitUntilRespondEntered()
+        environment.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        environment.releaseFirstRespond()
+        let firstResult = await firstRun
+        XCTAssertEqual(firstResult, .completed)
+
+        let paused = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(paused.stage, .classifying)
+        XCTAssertEqual(paused.blockingReason, .modelRequired)
+        XCTAssertNil(paused.lastErrorCode)
+
+        observer.stopPolling()
+        environment.setAvailability(.unavailable(.modelNotReady))
+        environment.setAvailability(.available)
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveredRuns, 0)
+        XCTAssertEqual(try harness.store.job(id: harness.job.id)?.blockingReason, .modelRequired)
+        XCTAssertNil(try harness.store.nextRunnableJob())
+
+        XCTAssertTrue(observer.handleForegroundActivation())
+        XCTAssertEqual(recoveredRuns, 1)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+        XCTAssertEqual(try harness.store.nextRunnableJob()?.id, harness.job.id)
+
+        let secondResult = await scheduler.runUntilIdle()
+        XCTAssertEqual(secondResult, .completed)
+        let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(completed.id, harness.job.id)
+        XCTAssertEqual(completed.stage, .ready)
+        XCTAssertNil(completed.blockingReason)
+        XCTAssertEqual(environment.recordedRespondCount(), 2)
+        XCTAssertFalse(try harness.store.skipRanges(episodeID: harness.episodeID).isEmpty)
+    }
+
+    func testAppleClassificationJSONUsesParserSegmentKeys() throws {
+        let payload = AppleAdClassificationPayload(
+            labels: [
+                AppleAdClassificationLabel(
+                    segmentID: "s0",
+                    classification: .content,
+                    confidence: 0.91,
+                    reason: "editorial discussion"
+                ),
+                AppleAdClassificationLabel(
+                    segmentID: "s1",
+                    classification: .ad,
+                    confidence: 0.98,
+                    reason: "sponsor offer"
+                )
+            ]
+        )
+
+        let parsed = try AdClassifierOutputParser().parse(
+            try AppleAdClassificationJSON.encode(payload),
+            expectedSegmentIDs: ["s0", "s1"]
+        )
+
+        XCTAssertEqual(parsed.map(\.classification), [.content, .advertisement])
+        XCTAssertEqual(parsed.map(\.segmentID), ["s0", "s1"])
+    }
+
+    func testAppleClassifierReturnsOnDeviceOutputAndUsesSystemDescriptor() async throws {
+        let responder = StubOnDeviceResponder(result: .success(#"{"labels":[]}"#))
+        let classifier = AppleFoundationAdClassifier(responder: responder)
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: [],
+            corrections: [],
+            prompt: "classify this",
+            estimatedInputTokens: 3,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 4_000
         )
 
         let output = try await classifier.classify(window: window)
 
         XCTAssertEqual(output, #"{"labels":[]}"#)
-        XCTAssertEqual(captured?.url?.absoluteString, "https://api.deepseek.com/chat/completions")
-        XCTAssertEqual(captured?.value(forHTTPHeaderField: "Authorization"), "Bearer secret-test-key")
-        let json = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: try XCTUnwrap(captured?.httpBody)) as? [String: Any]
-        )
-        XCTAssertEqual(json["model"] as? String, "deepseek-v4-pro")
-        XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
-        XCTAssertEqual((json["response_format"] as? [String: String])?["type"], "json_object")
-        XCTAssertEqual(json["max_tokens"] as? Int, 8_192)
+        XCTAssertEqual(responder.prompt, "classify this")
+        XCTAssertEqual(classifier.descriptor, AdClassifierDescriptor.appleSystemLanguageModelV1)
+        XCTAssertEqual(classifier.descriptor.modelID, "apple/system-language-model")
+        XCTAssertEqual(classifier.descriptor.quantization, "system")
     }
 
     private final class UnusedDownloader: AdRemovalAudioDownloading {
@@ -337,8 +670,8 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertTrue(windows.allSatisfy { $0.estimatedInputTokens <= $0.maximumInputTokens })
     }
 
-    func testProductionWindowUsesCloudSizedBatchAndShortRequestIDs() throws {
-        let segments = (0..<70).map { index in
+    func testProductionWindowUsesOnDeviceSizedBatchAndShortRequestIDs() throws {
+        let segments = (0..<20).map { index in
             AdTranscriptSegment(
                 id: "segment-canonical-\(index)",
                 index: index,
@@ -352,12 +685,17 @@ final class AdRemovalClassificationTests: XCTestCase {
         let windows = try AdClassificationWindowBuilder(limits: .production)
             .makeWindows(segments: segments, corrections: [])
 
-        XCTAssertEqual(windows.first?.segments.count, 64)
+        XCTAssertEqual(AdClassificationLimits.production.maximumSegmentsPerWindow, 8)
+        XCTAssertEqual(AdClassificationLimits.production.overlapSegmentCount, 2)
+        XCTAssertEqual(windows.first?.segments.count, 8)
         XCTAssertEqual(windows.first?.requestSegmentIDs.first, "s0")
-        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s63")
+        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s7")
         XCTAssertTrue(windows.first?.prompt.contains("SEGMENT s0 ") == true)
         XCTAssertFalse(windows.first?.prompt.contains("SEGMENT segment-canonical-0 ") == true)
-        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-60")
+        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-6")
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 8), 1)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 9), 2)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 20), 3)
     }
 
     func testCorrectionSelectionIsRelevantNewestFirstAndBounded() throws {

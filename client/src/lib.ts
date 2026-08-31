@@ -47,3 +47,54 @@ export function progressFraction(item: {
   if (!item.duration_secs || item.duration_secs <= 0) return 0;
   return Math.min(1, Math.max(0, item.position_secs / item.duration_secs));
 }
+
+export function onDeviceClassifierCopy(settings: {
+  classifier_available: boolean;
+  classifier_unavailable_reason: string | null;
+}): {
+  status: string;
+  recovery: string | null;
+  canEnable: boolean;
+  shouldPoll: boolean;
+} {
+  if (settings.classifier_available) {
+    return {
+      status: "On-device classifier: Apple Intelligence is ready",
+      recovery: null,
+      canEnable: true,
+      shouldPoll: false,
+    };
+  }
+  switch (settings.classifier_unavailable_reason) {
+    case "device_not_eligible":
+      return {
+        status: "Apple Intelligence is not available on this iPhone.",
+        recovery: "Ad finding needs Apple Intelligence, which this device cannot run.",
+        canEnable: false,
+        shouldPoll: false,
+      };
+    case "apple_intelligence_not_enabled":
+      return {
+        status: "Apple Intelligence is turned off.",
+        recovery:
+          "Open the iPhone Settings app, go to Apple Intelligence & Siri, and turn Apple Intelligence on. Then return here to enable ad removal.",
+        canEnable: false,
+        shouldPoll: true,
+      };
+    case "model_not_ready":
+      return {
+        status: "Apple Intelligence is still downloading.",
+        recovery: "Keep this iPhone on Wi-Fi and wait. Enable ad removal once the download finishes.",
+        canEnable: false,
+        shouldPoll: true,
+      };
+    default:
+      return {
+        status: "Apple Intelligence is not ready.",
+        recovery:
+          "Check that this iPhone supports Apple Intelligence and that it is turned on, then try again.",
+        canEnable: false,
+        shouldPoll: true,
+      };
+  }
+}

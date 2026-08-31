@@ -259,6 +259,8 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                 )
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let pause as AdRemovalPipelinePause {
+                throw pause
             } catch let error as AdClassifierOutputError {
                 recordClassificationEvent(
                     "classifier_window_retry",

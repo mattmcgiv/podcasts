@@ -50,7 +50,7 @@ export interface EpisodeAdMarker {
 }
 
 export interface EpisodeShowNote {
-  /** Stable transcript segment identifier chosen by DeepSeek and validated by Swift. */
+  /** Stable transcript segment identifier chosen by the on-device classifier and validated by Swift. */
   id: string;
   /** Authoritative playback time in seconds, resolved locally from the transcript. */
   start_time: number;
@@ -131,6 +131,12 @@ export interface AdRemovalCorrectionCount {
   count: number;
 }
 
+export type ClassifierUnavailableReason =
+  | "device_not_eligible"
+  | "apple_intelligence_not_enabled"
+  | "model_not_ready"
+  | "unknown";
+
 export interface AdRemovalSettings {
   enabled: boolean;
   enrollment_cutoff: number | null;
@@ -140,6 +146,9 @@ export interface AdRemovalSettings {
   model_total_bytes: number;
   model_downloaded_bytes: number;
   model_download_state: string;
+  /** Live SystemLanguageModel availability. False until Apple Intelligence can run. */
+  classifier_available: boolean;
+  classifier_unavailable_reason: ClassifierUnavailableReason | null;
   episode_storage_bytes: number;
   episode_storage_limit_bytes: number;
   device_available_bytes: number;

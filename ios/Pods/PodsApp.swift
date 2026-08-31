@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var adRemovalDiagnostics: AdRemovalDiagnostics?
     private var adRemovalDownloader: AdRemovalBackgroundDownloader?
     private var adRemovalModelDownloader: AdModelBackgroundDownloader?
+    private var adRemovalAvailabilityObserver: AppleOnDeviceModelAvailabilityObserver?
     private var adRemovalCoordinator: AdRemovalCoordinator?
     private var adRemovalScheduler: AdRemovalPipelineScheduler?
     private var adRemovalRangeServer: AdRemovalRangeServer?
@@ -79,7 +80,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             startupDatabase = database
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let artifactStore = try AdRemovalArtifactStore.applicationDefault()
-            let deepSeekCredentialStore = DeepSeekKeychainStore()
             let modelStore = try AdModelAssetStore(artifactStore: artifactStore)
             let cleanup = AdRemovalFileCleanup(
                 database: database,
@@ -90,8 +90,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let jobStore = AdRemovalJobStore(database: database)
             let episodeShowNotesService = EpisodeShowNotesService(
                 database: database,
-                generator: DeepSeekEpisodeShowNotesGenerator(
-                    credentialStore: deepSeekCredentialStore,
+                generator: AppleFoundationEpisodeShowNotesGenerator(
                     diagnostics: adRemovalDiagnostics
                 )
             )
@@ -118,8 +117,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 artifactStore: artifactStore,
                 audioDownloader: downloader,
                 transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
-                classifier: DeepSeekAdClassifier(
-                    credentialStore: deepSeekCredentialStore,
+                classifier: AppleFoundationAdClassifier(
                     diagnostics: adRemovalDiagnostics
                 ),
                 diagnostics: adRemovalDiagnostics
@@ -149,6 +147,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 }
             )
             adRemovalCoordinator = adCoordinator
+            let availabilityReader = SystemLanguageModelAvailabilityReader()
             let scheduler = AdRemovalPipelineScheduler(
                 store: jobStore,
                 coordinator: adCoordinator,
@@ -162,19 +161,33 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                         seriousThermalPressure: thermalState == .serious || thermalState == .critical
                     )
                 },
+                isOnDeviceModelAvailable: {
+                    availabilityReader.currentAvailability().available
+                },
                 diagnostics: adRemovalDiagnostics
             )
             adRemovalScheduler = scheduler
             adRemovalEnabled = { Self.isAdRemovalEnabled(database: database) }
+            let availabilityObserver = AppleOnDeviceModelAvailabilityObserver(
+                reader: availabilityReader
+            ) { [weak self] in
+                try? jobStore.clearBlockingReasons([.modelRequired])
+                try? diagnostics?.record(
+                    eventName: "on_device_model_became_available",
+                    severity: .notice
+                )
+                self?.requestAdRemovalRun()
+            }
+            adRemovalAvailabilityObserver = availabilityObserver
+            if availabilityReader.currentAvailability().available {
+                try? jobStore.clearBlockingReasons([.modelRequired])
+            }
+            availabilityObserver.startPolling()
             let modelDownloader = AdModelBackgroundDownloader(
                 database: database,
                 assetStore: modelStore,
                 diagnostics: adRemovalDiagnostics
             )
-            modelDownloader.modelReadyHandler = { [weak self] in
-                try? jobStore.clearBlockingReasons([.modelRequired])
-                self?.requestAdRemovalRun()
-            }
             adRemovalModelDownloader = modelDownloader
             for (identifier, completion) in pendingAdRemovalBackgroundEvents {
                 if downloader.handleBackgroundEvents(
@@ -196,7 +209,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 database: database,
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
-                deepSeekCredentialStore: deepSeekCredentialStore,
+                onDeviceModelAvailability: availabilityReader,
                 episodeShowNotesService: episodeShowNotesService,
                 recoverInterruptedPlayedCleanup: true
             )
@@ -239,9 +252,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             installForegroundRefreshHandler(coordinator)
             scheduleBackgroundRefresh()
             Self.approveCrashRecoveryModelReplacement(database: database)
-            if Self.shouldResumeModelDownload(database: database) {
-                Task { await modelDownloader.start(requestedManifest: .qwen3OneSevenBFourBitV1) }
-            }
             requestAdRemovalRun()
             PodsDebugLog("Local backend start requested")
         } catch {
@@ -341,6 +351,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         foregroundRefreshLifecycle.applicationDidBecomeActive()
+        adRemovalAvailabilityObserver?.handleForegroundActivation()
     }
 
     private func installForegroundRefreshHandler(_ coordinator: FeedRefreshCoordinator) {
@@ -355,6 +366,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
+        adRemovalAvailabilityObserver?.stopPolling()
         scheduleBackgroundRefresh()
         scheduleAdRemovalProcessing()
     }
@@ -559,15 +571,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
             map: { sqliteString($0, 0) }
         ).first) == "true"
-    }
-
-    private static func shouldResumeModelDownload(database: PodsDatabase) -> Bool {
-        guard isAdRemovalEnabled(database: database) else { return false }
-        let state = try? database.query(
-            "SELECT value FROM settings WHERE key = 'ad_removal_model_download_state'",
-            map: { sqliteString($0, 0) }
-        ).first
-        return state == "consented" || state == "downloading" || state == "failed"
     }
 
     /// The previously approved Qwen3.5-4B model deterministically exceeded the

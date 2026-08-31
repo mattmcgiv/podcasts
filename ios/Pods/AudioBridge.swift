@@ -33,14 +33,22 @@ struct PlaybackSpeedDiagnosticTracker {
     }
 }
 
-/// Package-internal seam for forward-only MediaPlayer remote-command registration
-/// (Next Track / Skip Forward). Production uses `SystemRemoteForwardCommandRegistrar`;
-/// tests inject a fake that captures handlers. Play/Pause/Toggle stay on
-/// `MPRemoteCommandCenter` directly.
+/// Package-internal seam for car / lock-screen MediaPlayer remote-command
+/// registration (Next/Previous, Skip Forward/Back, scrubber). Production uses
+/// `SystemRemoteForwardCommandRegistrar`; tests inject a fake that captures
+/// handlers. Play/Pause/Toggle stay on `MPRemoteCommandCenter` directly.
 protocol RemoteForwardCommandRegistering: AnyObject {
     func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus)
+    func registerPreviousTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus)
     func registerSkipForwardCommand(
         preferredIntervals: [NSNumber],
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    )
+    func registerSkipBackwardCommand(
+        preferredIntervals: [NSNumber],
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    )
+    func registerChangePlaybackPositionCommand(
         handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
     )
 }
@@ -51,6 +59,11 @@ final class SystemRemoteForwardCommandRegistrar: RemoteForwardCommandRegistering
     func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
         center.nextTrackCommand.isEnabled = true
         center.nextTrackCommand.addTarget { _ in handler() }
+    }
+
+    func registerPreviousTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
+        center.previousTrackCommand.isEnabled = true
+        center.previousTrackCommand.addTarget { _ in handler() }
     }
 
     func registerSkipForwardCommand(
@@ -64,6 +77,32 @@ final class SystemRemoteForwardCommandRegistrar: RemoteForwardCommandRegistering
                 return .commandFailed
             }
             return handler(skipEvent.interval)
+        }
+    }
+
+    func registerSkipBackwardCommand(
+        preferredIntervals: [NSNumber],
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    ) {
+        center.skipBackwardCommand.isEnabled = true
+        center.skipBackwardCommand.preferredIntervals = preferredIntervals
+        center.skipBackwardCommand.addTarget { event in
+            guard let skipEvent = event as? MPSkipIntervalCommandEvent else {
+                return .commandFailed
+            }
+            return handler(skipEvent.interval)
+        }
+    }
+
+    func registerChangePlaybackPositionCommand(
+        handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    ) {
+        center.changePlaybackPositionCommand.isEnabled = true
+        center.changePlaybackPositionCommand.addTarget { event in
+            guard let seekEvent = event as? MPChangePlaybackPositionCommandEvent else {
+                return .commandFailed
+            }
+            return handler(seekEvent.positionTime)
         }
     }
 }
@@ -92,7 +131,7 @@ enum RemoteForwardSkipHandler {
     }
 }
 
-/// Installs forward-only handlers (Next Track / Skip Forward) onto a registrar.
+/// Installs Tesla / lock-screen skip handlers (Next/Previous, Skip ±30s).
 enum RemoteForwardCommandBinding {
     static let forwardSkipPreferredInterval: TimeInterval = 30
 
@@ -103,11 +142,27 @@ enum RemoteForwardCommandBinding {
         registrar.registerNextTrackCommand {
             forwardSkip(forwardSkipPreferredInterval)
         }
+        registrar.registerPreviousTrackCommand {
+            forwardSkip(-forwardSkipPreferredInterval)
+        }
         registrar.registerSkipForwardCommand(
             preferredIntervals: [NSNumber(value: forwardSkipPreferredInterval)]
         ) { interval in
             forwardSkip(interval)
         }
+        registrar.registerSkipBackwardCommand(
+            preferredIntervals: [NSNumber(value: forwardSkipPreferredInterval)]
+        ) { interval in
+            // Skip-back events are positive intervals; seek backward.
+            forwardSkip(-abs(interval))
+        }
+    }
+
+    static func installSeek(
+        on registrar: RemoteForwardCommandRegistering,
+        seekTo: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+    ) {
+        registrar.registerChangePlaybackPositionCommand(handler: seekTo)
     }
 }
 
@@ -130,6 +185,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var requestedRate: Float = 1
     private var speedDiagnosticTracker = PlaybackSpeedDiagnosticTracker()
     private var shouldResumeAfterInterruption = false
+    /// Armed car-device resume. Nil unless a classified car was lost while playing.
+    private var carBluetoothResumeIntent: CarBluetoothResumeIntent?
+    /// Bumped to supersede an in-flight 0.7s settle callback.
+    private var carBluetoothResumeGeneration: UInt64 = 0
+    private var carBluetoothResumeWorkItem: DispatchWorkItem?
+    private let carBluetoothSessionStore: CarBluetoothSessionStoring
     private var nowPlayingMetadata: NowPlayingMetadata?
     private var nowPlayingArtwork: MPMediaItemArtwork?
     private var nowPlayingArtworkURL: URL?
@@ -163,6 +224,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var castKeepAlivePlayer: AVAudioPlayer?
 
     private override init() {
+        carBluetoothSessionStore = UserDefaultsCarBluetoothSessionStore()
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -189,6 +251,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             object: nil
         )
         configureRemoteCommands()
+        restorePersistedCarBluetoothSession()
     }
 
     func attach(webView: WKWebView) {
@@ -201,10 +264,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     func configureSession() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio)
+            // Long-form spoken audio is Apple's podcast/car-Bluetooth policy:
+            // Tesla (no CarPlay) picks this session up over A2DP + AVRCP.
+            try session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio)
             try session.setActive(true)
         } catch {
-            PodsLog("Pods audio session setup failed: \(error)")
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .spokenAudio)
+                try session.setActive(true)
+            } catch {
+                PodsLog("Pods audio session setup failed: \(error)")
+            }
         }
     }
 
@@ -236,7 +307,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         case "play":
             play(id: id)
         case "pause":
-            pause(id: id)
+            pause(id: id, userInitiated: true)
         case "seek":
             let seconds = Self.doubleValue(body["seconds"]) ?? 0
             seek(id: id, seconds: seconds)
@@ -266,6 +337,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func setOutput(_ next: PlaybackOutput, id: Int, resume: Bool) {
         invalidateAutomaticSkip()
+        applyCarResumeLifecycle(.sinkChanged)
+        persistCarBluetoothSession()
         preferredOutput = next
         let position = nowPlayingPosition
         let wasPlaying = !nowPlayingPaused
@@ -586,6 +659,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             )
         case "ended":
             recordCurrentProgress(force: true)
+            applyCarResumeLifecycle(.ended)
+            persistCarBluetoothSession()
             emit(type: "ended", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: true)
         case "state":
             if let position {
@@ -612,7 +687,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     // MARK: - Transport
 
-    private func load(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
+    private func load(
+        id: Int,
+        url: URL,
+        episodeID: Int64?,
+        position: Double,
+        rate: Float,
+        clearsCarResume: Bool = true
+    ) {
+        applyCarResumeLifecycle(clearsCarResume ? .userLoad : .rebuildSameEpisode)
         playbackSessionID = AdRemovalPlaybackSession.makeID()
         currentEpisodeID = episodeID
         publisherURL = url
@@ -687,6 +770,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
                 pendingPlayAfterConnect: pendingPlayAfterCastConnect
             )
             updateNowPlaying(position: position, rate: rate, paused: paused)
+            persistCarBluetoothSession()
             emit(
                 type: "loadedmetadata",
                 id: id,
@@ -700,6 +784,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
         updateCastKeepAlive()
         loadLocal(id: id, url: selectedURL, episodeID: episodeID, position: position, rate: rate)
+        persistCarBluetoothSession()
     }
 
     private func loadLocal(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
@@ -758,6 +843,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             stopLocalPlayer(record: false)
             return
         }
+        ensureLocalPlayer(id: id)
         if let player {
             let position = player.currentTime().seconds
             if position.isFinite {
@@ -766,21 +852,48 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         configureSession()
         player?.rate = requestedRate
+        applyCarResumeLifecycle(.manualPlay)
         updateNowPlaying(rate: requestedRate, paused: false)
+        persistCarBluetoothSession()
         emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
     }
 
-    private func pause(id: Int) {
+    /// Rebuild AVPlayer from the last publisher URL when Tesla/AVRCP play
+    /// arrives after iOS tore the item down (or after a persisted restore).
+    private func ensureLocalPlayer(id: Int) {
+        if player?.currentItem != nil { return }
+        if let publisherURL {
+            load(
+                id: id,
+                url: publisherURL,
+                episodeID: currentEpisodeID,
+                position: nowPlayingPosition,
+                rate: requestedRate,
+                clearsCarResume: false
+            )
+            return
+        }
+        if let lastSrc, let url = URL(string: lastSrc) {
+            loadLocal(id: id, url: url, episodeID: currentEpisodeID, position: nowPlayingPosition, rate: requestedRate)
+        }
+    }
+
+    private func pause(id: Int, userInitiated: Bool = true) {
+        if userInitiated {
+            applyCarResumeLifecycle(.userPause)
+        }
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "pause"])
             recordCurrentProgress(force: true)
             updateNowPlaying(rate: 0, paused: true)
+            persistCarBluetoothSession()
             emitPlaybackState(type: "pause", id: id, paused: true)
             return
         }
         player?.pause()
         recordCurrentProgress(force: true)
         updateNowPlaying(rate: 0, paused: true)
+        persistCarBluetoothSession()
         emitPlaybackState(type: "pause", id: id, paused: true)
     }
 
@@ -864,6 +977,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         lastSrc = nil
+        applyCarResumeLifecycle(.stop)
+        carBluetoothSessionStore.clear()
         clearNowPlaying()
         emit(type: "pause", id: id, position: 0, duration: 0)
     }
@@ -1288,6 +1403,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         PodsLog("playback_native_ended_observed episode_id=\(episodeLabel) player_id=\(currentId)")
         recordCurrentProgress(force: true)
+        applyCarResumeLifecycle(.ended)
+        persistCarBluetoothSession()
         emit(type: "ended", id: currentId, paused: true)
     }
 
@@ -1316,19 +1433,23 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
         switch type {
         case .began:
-            shouldResumeAfterInterruption = player?.rate ?? 0 > 0
-            player?.pause()
-            recordCurrentProgress(force: true)
-            updateNowPlaying(rate: 0, paused: true)
-            emitPlaybackState(type: "pause", id: currentId, paused: true)
+            shouldResumeAfterInterruption = player?.rate ?? 0 > 0 || !nowPlayingPaused
+            pause(id: currentId, userInitiated: false)
         case .ended:
             let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
-            if shouldResumeAfterInterruption && options.contains(.shouldResume) {
-                configureSession()
-                player?.rate = requestedRate
-                updateNowPlaying(rate: requestedRate, paused: false)
-                emit(type: "play", id: currentId, playbackRate: requestedRate, paused: false)
+            let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+            if CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
+                shouldResumeOption: options.contains(.shouldResume),
+                wasPlayingBeforeInterruption: shouldResumeAfterInterruption,
+                currentCarMatchesArmedIntent: CarBluetoothPlaybackPolicy.currentCarMatchesIntent(
+                    routes: currentRoutes,
+                    intent: carBluetoothResumeIntent,
+                    now: Date().timeIntervalSince1970
+                ),
+                isLocalOutput: preferredOutput == .local
+            ) {
+                play(id: currentId)
             }
             shouldResumeAfterInterruption = false
         @unknown default:
@@ -1338,55 +1459,162 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     @objc private func audioRouteChanged(_ notification: Notification) {
         guard output == .local else { return }
+        let info = notification.userInfo
+        let rawReason = info?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason = rawReason.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) ?? .unknown
+        let previousRoute = info?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
+        let previousRoutes = Self.routeDescriptors(previousRoute)
+        let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        let hasContent = currentEpisodeID != nil || lastSrc != nil || publisherURL != nil
+        let isPlaying = !nowPlayingPaused || (player?.rate ?? 0) > 0
+        let now = Date().timeIntervalSince1970
+
+        let action = CarBluetoothPlaybackPolicy.action(
+            reason: reason,
+            previousRoutes: previousRoutes,
+            currentRoutes: currentRoutes,
+            hasActiveContent: hasContent,
+            isPlaying: isPlaying,
+            intent: carBluetoothResumeIntent,
+            currentEpisodeID: currentEpisodeID,
+            isLocalOutput: preferredOutput == .local,
+            now: now
+        )
+        switch action {
+        case .remember(let intent):
+            carBluetoothResumeIntent = intent
+            persistCarBluetoothSession()
+            if isPlaying {
+                pause(id: currentId, userInitiated: false)
+            }
+        case .schedule(let intent):
+            carBluetoothResumeIntent = intent
+            persistCarBluetoothSession()
+            scheduleCarBluetoothResume(intent)
+        case .clear:
+            applyCarResumeLifecycle(.expired)
+            persistCarBluetoothSession()
+        case .none:
+            break
+        }
+
         let itemDuration = player?.currentItem?.duration.seconds
         updateNowPlaying(
-            position: player?.currentTime().seconds ?? 0,
+            position: player?.currentTime().seconds ?? nowPlayingPosition,
             duration: itemDuration,
             rate: player?.rate ?? requestedRate,
-            paused: player?.rate == 0
+            paused: (player?.rate ?? 0) == 0 && nowPlayingPaused
         )
         let resolved = Self.positiveDuration(itemDuration) ?? Self.positiveDuration(nowPlayingDuration)
         emit(
             type: "state",
             id: currentId,
-            position: player?.currentTime().seconds ?? 0,
+            position: player?.currentTime().seconds ?? nowPlayingPosition,
             duration: resolved,
-            playbackRate: player?.rate ?? 1,
-            paused: player?.rate == 0
+            playbackRate: player?.rate ?? requestedRate,
+            paused: (player?.rate ?? 0) == 0 && nowPlayingPaused
         )
+    }
+
+    private func scheduleCarBluetoothResume(_ intent: CarBluetoothResumeIntent) {
+        carBluetoothResumeWorkItem?.cancel()
+        carBluetoothResumeGeneration += 1
+        let generation = carBluetoothResumeGeneration
+        let work = DispatchWorkItem { [weak self] in
+            self?.commitScheduledCarBluetoothResume(generation: generation, scheduled: intent)
+        }
+        carBluetoothResumeWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + CarBluetoothPlaybackPolicy.resumeSettleDelay,
+            execute: work
+        )
+    }
+
+    private func applyCarResumeLifecycle(_ event: CarBluetoothPlaybackPolicy.LifecycleEvent) {
+        let decision = CarBluetoothPlaybackPolicy.lifecycleDecision(for: event)
+        if decision.cancelPending {
+            cancelScheduledCarBluetoothResume()
+        }
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.applying(
+            decision,
+            to: carBluetoothResumeIntent
+        )
+    }
+
+    private func cancelScheduledCarBluetoothResume() {
+        carBluetoothResumeGeneration += 1
+        carBluetoothResumeWorkItem?.cancel()
+        carBluetoothResumeWorkItem = nil
+    }
+
+    private func commitScheduledCarBluetoothResume(
+        generation: UInt64,
+        scheduled: CarBluetoothResumeIntent
+    ) {
+        guard generation == carBluetoothResumeGeneration else { return }
+        carBluetoothResumeWorkItem = nil
+        guard preferredOutput == .local else { return }
+        let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        guard CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+            scheduled: scheduled,
+            currentRoutes: currentRoutes,
+            currentEpisodeID: currentEpisodeID,
+            isLocalOutput: true,
+            now: Date().timeIntervalSince1970
+        ) else {
+            return
+        }
+        play(id: currentId)
+    }
+
+    private static func routeDescriptors(_ route: AVAudioSessionRouteDescription?) -> [CarBluetoothRouteDescriptor] {
+        route?.outputs.map { CarBluetoothRouteDescriptor($0) } ?? []
     }
 
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in
             guard let self else { return .noSuchContent }
+            guard self.hasPlayableContent else { return .noActionableNowPlayingItem }
             self.play(id: self.currentId)
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
             guard let self else { return .noSuchContent }
-            self.pause(id: self.currentId)
+            self.pause(id: self.currentId, userInitiated: true)
             return .success
         }
         center.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self else { return .noSuchContent }
+            guard self.hasPlayableContent else { return .noActionableNowPlayingItem }
             if self.nowPlayingPaused {
                 self.play(id: self.currentId)
             } else {
-                self.pause(id: self.currentId)
+                self.pause(id: self.currentId, userInitiated: true)
             }
             return .success
         }
         configureForwardRemoteCommands(using: SystemRemoteForwardCommandRegistrar())
     }
 
-    /// Install Next Track / Skip Forward through the forward-only registrar seam.
+    private var hasPlayableContent: Bool {
+        currentEpisodeID != nil || lastSrc != nil || publisherURL != nil
+    }
+
+    /// Install Next/Previous, skip, and Tesla scrubber through the registrar seam.
     private func configureForwardRemoteCommands(using registrar: RemoteForwardCommandRegistering) {
         RemoteForwardCommandBinding.install(
             on: registrar,
             forwardSkip: { [weak self] interval in
                 guard let self else { return .noSuchContent }
                 return self.handleRemoteForwardSkip(interval: interval)
+            }
+        )
+        RemoteForwardCommandBinding.installSeek(
+            on: registrar,
+            seekTo: { [weak self] position in
+                guard let self else { return .noSuchContent }
+                return self.handleRemotePlaybackPosition(position)
             }
         )
     }
@@ -1413,6 +1641,21 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             currentPosition: currentPosition,
             knownDuration: knownDuration,
             interval: interval,
+            absoluteSeek: { [weak self] target in
+                guard let self else { return }
+                self.seek(id: self.currentId, seconds: target)
+            }
+        )
+    }
+
+    @discardableResult
+    private func handleRemotePlaybackPosition(_ position: TimeInterval) -> MPRemoteCommandHandlerStatus {
+        let knownDuration = Self.positiveDuration(nowPlayingDuration)
+            ?? Self.positiveDuration(player?.currentItem?.duration.seconds)
+        return RemotePlaybackPositionHandler.handle(
+            hasActiveContent: currentEpisodeID != nil || lastSrc != nil || publisherURL != nil,
+            position: position,
+            knownDuration: knownDuration,
             absoluteSeek: { [weak self] target in
                 guard let self else { return }
                 self.seek(id: self.currentId, seconds: target)
@@ -1458,6 +1701,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         lastRecordedEpisodeID = currentEpisodeID
         lastRecordedPosition = position
         nowPlayingPosition = position
+        persistCarBluetoothSession()
     }
 
     // MARK: - Cast keep-alive (prevents iOS suspend while Mac plays)
@@ -1519,6 +1763,74 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             loadNowPlayingArtwork(from: metadata?.artworkURL)
         }
         updateNowPlaying()
+        persistCarBluetoothSession()
+    }
+
+    private func persistCarBluetoothSession() {
+        guard let episodeID = currentEpisodeID, let publisherURL else { return }
+        let now = Date().timeIntervalSince1970
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now)
+        let snapshot = CarBluetoothSessionSnapshot(
+            episodeID: episodeID,
+            publisherURL: publisherURL.absoluteString,
+            position: nowPlayingPosition,
+            rate: requestedRate,
+            title: nowPlayingMetadata?.title,
+            artist: nowPlayingMetadata?.artist,
+            artworkURL: nowPlayingMetadata?.artworkURL?.absoluteString,
+            duration: Self.positiveDuration(nowPlayingDuration) ?? nowPlayingMetadata?.duration,
+            resumeIntent: CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now)
+        )
+        carBluetoothSessionStore.save(snapshot)
+    }
+
+    private func restorePersistedCarBluetoothSession() {
+        guard let snapshot = carBluetoothSessionStore.load(),
+              let url = URL(string: snapshot.publisherURL) else {
+            return
+        }
+        let now = Date().timeIntervalSince1970
+        currentEpisodeID = snapshot.episodeID
+        publisherURL = url
+        lastSrc = snapshot.publisherURL
+        requestedRate = Self.normalizedRate(snapshot.rate)
+        nowPlayingPosition = max(0, snapshot.position)
+        nowPlayingDuration = snapshot.duration ?? 0
+        nowPlayingRate = requestedRate
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(snapshot.resumeIntent, now: now)
+        let title = snapshot.title ?? ""
+        if !title.isEmpty {
+            nowPlayingMetadata = NowPlayingMetadata(
+                title: title,
+                artist: snapshot.artist ?? "",
+                artworkURL: snapshot.artworkURL.flatMap { URL(string: $0) },
+                duration: snapshot.duration
+            )
+            if let artwork = snapshot.artworkURL, let artworkURL = URL(string: artwork) {
+                loadNowPlayingArtwork(from: artworkURL)
+            }
+        }
+        updateNowPlaying(
+            position: snapshot.position,
+            duration: snapshot.duration,
+            rate: requestedRate,
+            paused: true
+        )
+        let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        if let intent = carBluetoothResumeIntent,
+           CarBluetoothPlaybackPolicy.currentCarMatchesIntent(
+               routes: currentRoutes,
+               intent: intent,
+               now: now
+           ) {
+            scheduleCarBluetoothResume(intent)
+        } else if snapshot.resumeIntent != nil, carBluetoothResumeIntent == nil {
+            persistCarBluetoothSession()
+        }
+        PodsLog(
+            "Pods restored car-bluetooth session episode_id=\(snapshot.episodeID) " +
+            "position=\(snapshot.position) resume=\(carBluetoothResumeIntent != nil)"
+        )
     }
 
     private func updateNowPlaying(
@@ -1742,6 +2054,9 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         let safeRate = normalizedRate(playbackRate)
         info[MPNowPlayingInfoPropertyPlaybackRate] = paused ? 0.0 : Double(safeRate)
+        info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = Double(safeRate)
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+        info[MPNowPlayingInfoPropertyIsLiveStream] = false
         if let artwork {
             info[MPMediaItemPropertyArtwork] = artwork
         }
