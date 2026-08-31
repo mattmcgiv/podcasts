@@ -62,6 +62,119 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
+    private final class MutableOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
+        var availability: AppleOnDeviceModelAvailability
+
+        init(_ availability: AppleOnDeviceModelAvailability) {
+            self.availability = availability
+        }
+
+        func currentAvailability() -> AppleOnDeviceModelAvailability {
+            availability
+        }
+    }
+
+    /// Shared availability + classifier seam for the mid-classification outage e2e.
+    private final class ControllableOnDeviceEnvironment:
+        AppleOnDeviceModelAvailabilityReading,
+        AppleOnDevicePromptResponding,
+        @unchecked Sendable
+    {
+        private let lock = NSLock()
+        private var availabilityValue: AppleOnDeviceModelAvailability
+        private var holdingFirstRespond: Bool
+        private var enteredRespond = false
+        private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+        private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+        private let successJSON: String
+        private var respondCount = 0
+
+        init(
+            availability: AppleOnDeviceModelAvailability = .available,
+            successJSON: String,
+            holdFirstRespond: Bool = true
+        ) {
+            self.availabilityValue = availability
+            self.successJSON = successJSON
+            self.holdingFirstRespond = holdFirstRespond
+        }
+
+        var isAvailable: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return availabilityValue.available
+        }
+
+        func currentAvailability() -> AppleOnDeviceModelAvailability {
+            lock.lock()
+            defer { lock.unlock() }
+            return availabilityValue
+        }
+
+        func setAvailability(_ availability: AppleOnDeviceModelAvailability) {
+            lock.lock()
+            availabilityValue = availability
+            lock.unlock()
+        }
+
+        func recordedRespondCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return respondCount
+        }
+
+        func waitUntilRespondEntered() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if enteredRespond {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    enteredWaiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
+
+        func releaseFirstRespond() {
+            lock.lock()
+            holdingFirstRespond = false
+            let waiters = releaseWaiters
+            releaseWaiters.removeAll()
+            lock.unlock()
+            waiters.forEach { $0.resume() }
+        }
+
+        func respond(to prompt: String) async throws -> String {
+            lock.lock()
+            respondCount += 1
+            enteredRespond = true
+            let entered = enteredWaiters
+            enteredWaiters.removeAll()
+            let shouldHold = holdingFirstRespond
+            lock.unlock()
+            entered.forEach { $0.resume() }
+
+            if shouldHold {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    lock.lock()
+                    if !holdingFirstRespond {
+                        lock.unlock()
+                        continuation.resume()
+                    } else {
+                        releaseWaiters.append(continuation)
+                        lock.unlock()
+                    }
+                }
+            }
+
+            guard isAvailable else {
+                throw AppleFoundationModelError.unavailable
+            }
+            return successJSON
+        }
+    }
+
     func testShowNotesPromptAndParserKeepTimestampsLocalToKnownSegments() throws {
         let segments = [
             AdTranscriptSegment(
@@ -243,6 +356,115 @@ final class AdRemovalClassificationTests: XCTestCase {
         } catch let pause as AdRemovalPipelinePause {
             XCTAssertEqual(pause.reason, .modelRequired)
         }
+    }
+
+    func testAppleClassifierPausesWhenResponderBecomesUnavailableDuringRespond() async throws {
+        let responder = StubOnDeviceResponder(
+            isAvailable: true,
+            result: .failure(AppleFoundationModelError.unavailable)
+        )
+        let classifier = AppleFoundationAdClassifier(responder: responder)
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: [],
+            corrections: [],
+            prompt: "classify this",
+            estimatedInputTokens: 3,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 4_000
+        )
+
+        do {
+            _ = try await classifier.classify(window: window)
+            XCTFail("Expected the classifier to pause")
+        } catch let pause as AdRemovalPipelinePause {
+            XCTAssertEqual(pause.reason, .modelRequired)
+        }
+    }
+
+    func testAvailabilityObserverRecoversOnlyOnTransitionBackToAvailable() {
+        let reader = MutableOnDeviceAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        var recoveries = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: reader) {
+            recoveries += 1
+        }
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+
+        reader.availability = .unavailable(.modelNotReady)
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+
+        reader.availability = .available
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+
+        reader.availability = .unavailable(.modelNotReady)
+        XCTAssertFalse(observer.poll())
+        reader.availability = .available
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveries, 2)
+    }
+
+    func testJobPausedDuringClassificationResumesWhenAppleIntelligenceReturns() async throws {
+        let harness = try makeClassifyingHarness()
+        let labelsJSON = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
+        let environment = ControllableOnDeviceEnvironment(successJSON: labelsJSON)
+        let executor = AdRemovalPipelineExecutor(
+            database: harness.database,
+            jobStore: harness.store,
+            artifactStore: harness.artifactStore,
+            audioDownloader: UnusedDownloader(),
+            classifier: AppleFoundationAdClassifier(responder: environment)
+        )
+        let scheduler = AdRemovalPipelineScheduler(
+            store: harness.store,
+            coordinator: AdRemovalCoordinator(store: harness.store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) }
+        )
+        var recoveredRuns = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: environment) {
+            recoveredRuns += 1
+            try? harness.store.clearBlockingReasons([.modelRequired])
+        }
+
+        async let firstRun = scheduler.runUntilIdle()
+        await environment.waitUntilRespondEntered()
+        XCTAssertEqual(try harness.store.job(id: harness.job.id)?.stage, .classifying)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+
+        environment.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        environment.releaseFirstRespond()
+        let firstResult = await firstRun
+
+        XCTAssertEqual(firstResult, .completed)
+        let paused = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(paused.stage, .classifying)
+        XCTAssertEqual(paused.blockingReason, .modelRequired)
+        XCTAssertEqual(paused.attemptCount, 0)
+        XCTAssertNil(paused.lastErrorCode)
+        XCTAssertNil(try harness.store.nextRunnableJob())
+        XCTAssertFalse(observer.poll())
+
+        environment.setAvailability(.available)
+        XCTAssertTrue(observer.poll())
+        XCTAssertEqual(recoveredRuns, 1)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+        XCTAssertEqual(try harness.store.nextRunnableJob()?.id, harness.job.id)
+
+        let secondResult = await scheduler.runUntilIdle()
+
+        XCTAssertEqual(secondResult, .completed)
+        let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(completed.id, harness.job.id)
+        XCTAssertEqual(completed.stage, .ready)
+        XCTAssertNil(completed.blockingReason)
+        XCTAssertEqual(environment.recordedRespondCount(), 2)
+        XCTAssertFalse(try harness.store.skipRanges(episodeID: harness.episodeID).isEmpty)
     }
 
     func testAppleClassificationJSONUsesParserSegmentKeys() throws {

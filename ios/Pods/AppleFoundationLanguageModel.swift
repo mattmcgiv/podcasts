@@ -78,6 +78,62 @@ final class SystemLanguageModelAvailabilityReader: AppleOnDeviceModelAvailabilit
     }
 }
 
+/// Watches on-device model availability and fires only when it transitions
+/// back to `.available`, so jobs paused as `model_required` can resume.
+final class AppleOnDeviceModelAvailabilityObserver: @unchecked Sendable {
+    static let pollingInterval: TimeInterval = 5
+
+    private let reader: AppleOnDeviceModelAvailabilityReading
+    private let becameAvailable: () -> Void
+    private let lock = NSLock()
+    private var lastAvailability: AppleOnDeviceModelAvailability
+    private var timer: Timer?
+
+    init(
+        reader: AppleOnDeviceModelAvailabilityReading,
+        becameAvailable: @escaping () -> Void
+    ) {
+        self.reader = reader
+        self.becameAvailable = becameAvailable
+        self.lastAvailability = reader.currentAvailability()
+    }
+
+    deinit {
+        timer?.invalidate()
+    }
+
+    /// Returns `true` when availability just transitioned back to available.
+    @discardableResult
+    func poll() -> Bool {
+        lock.lock()
+        let previous = lastAvailability
+        let current = reader.currentAvailability()
+        lastAvailability = current
+        lock.unlock()
+        let transitioned = !previous.available && current.available
+        if transitioned {
+            becameAvailable()
+        }
+        return transitioned
+    }
+
+    func startPolling(
+        interval: TimeInterval = AppleOnDeviceModelAvailabilityObserver.pollingInterval
+    ) {
+        stopPolling()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            _ = self?.poll()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stopPolling() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
 protocol AppleOnDevicePromptResponding: AnyObject {
     var isAvailable: Bool { get }
     func respond(to prompt: String) async throws -> String
@@ -257,7 +313,12 @@ final class AppleFoundationAdClassifier: AdClassifier {
             throw AdRemovalPipelinePause(reason: .modelRequired)
         }
         let started = Date()
-        let output = try await responder.respond(to: window.prompt)
+        let output: String
+        do {
+            output = try await responder.respond(to: window.prompt)
+        } catch AppleFoundationModelError.unavailable {
+            throw AdRemovalPipelinePause(reason: .modelRequired)
+        }
         try? diagnostics?.record(
             eventName: "classifier_window_generated",
             severity: .info,

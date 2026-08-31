@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     private var adRemovalDiagnostics: AdRemovalDiagnostics?
     private var adRemovalDownloader: AdRemovalBackgroundDownloader?
     private var adRemovalModelDownloader: AdModelBackgroundDownloader?
+    private var adRemovalAvailabilityObserver: AppleOnDeviceModelAvailabilityObserver?
     private var adRemovalCoordinator: AdRemovalCoordinator?
     private var adRemovalScheduler: AdRemovalPipelineScheduler?
     private var adRemovalRangeServer: AdRemovalRangeServer?
@@ -163,15 +164,27 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             adRemovalScheduler = scheduler
             adRemovalEnabled = { Self.isAdRemovalEnabled(database: database) }
+            let availabilityReader = SystemLanguageModelAvailabilityReader()
+            let availabilityObserver = AppleOnDeviceModelAvailabilityObserver(
+                reader: availabilityReader
+            ) { [weak self] in
+                try? jobStore.clearBlockingReasons([.modelRequired])
+                try? diagnostics?.record(
+                    eventName: "on_device_model_became_available",
+                    severity: .notice
+                )
+                self?.requestAdRemovalRun()
+            }
+            adRemovalAvailabilityObserver = availabilityObserver
+            if availabilityReader.currentAvailability().available {
+                try? jobStore.clearBlockingReasons([.modelRequired])
+            }
+            availabilityObserver.startPolling()
             let modelDownloader = AdModelBackgroundDownloader(
                 database: database,
                 assetStore: modelStore,
                 diagnostics: adRemovalDiagnostics
             )
-            modelDownloader.modelReadyHandler = { [weak self] in
-                try? jobStore.clearBlockingReasons([.modelRequired])
-                self?.requestAdRemovalRun()
-            }
             adRemovalModelDownloader = modelDownloader
             for (identifier, completion) in pendingAdRemovalBackgroundEvents {
                 if downloader.handleBackgroundEvents(
@@ -193,6 +206,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 database: database,
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
+                onDeviceModelAvailability: availabilityReader,
                 episodeShowNotesService: episodeShowNotesService
             )
             let coordinator = FeedRefreshCoordinator(backend: backend)
@@ -333,6 +347,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         foregroundRefreshLifecycle.applicationDidBecomeActive()
+        adRemovalAvailabilityObserver?.startPolling()
+        adRemovalAvailabilityObserver?.poll()
     }
 
     private func installForegroundRefreshHandler(_ coordinator: FeedRefreshCoordinator) {
@@ -347,6 +363,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
+        adRemovalAvailabilityObserver?.stopPolling()
         scheduleBackgroundRefresh()
         scheduleAdRemovalProcessing()
     }

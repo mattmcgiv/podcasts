@@ -1269,6 +1269,22 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(maximumConcurrentCalls, 1)
     }
 
+    func testTransientPolicyClearLeavesModelRequiredJobsBlocked() throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        _ = try store.setBlockingReason(jobID: queued.id, reason: .modelRequired)
+
+        try store.clearTransientPolicyBlockingReasons()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.blockingReason, .modelRequired)
+        XCTAssertNil(try store.nextRunnableJob())
+
+        try store.clearBlockingReasons([.modelRequired])
+        XCTAssertNil(try store.job(id: queued.id)?.blockingReason)
+        XCTAssertEqual(try store.nextRunnableJob()?.id, queued.id)
+    }
+
     func testCoordinatorRecordsPolicyPauseWithoutConsumingFailureRetry() async throws {
         let harness = try makeHarness()
         let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
