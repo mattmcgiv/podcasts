@@ -2329,6 +2329,12 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(playing[MPMediaItemPropertyPlaybackDuration] as? Double, 1234)
         XCTAssertEqual(playing[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 42)
         XCTAssertEqual(playing[MPNowPlayingInfoPropertyPlaybackRate] as? Double, 1.5)
+        XCTAssertEqual(playing[MPNowPlayingInfoPropertyDefaultPlaybackRate] as? Double, 1.5)
+        XCTAssertEqual(
+            playing[MPNowPlayingInfoPropertyMediaType] as? NSNumber,
+            NSNumber(value: MPNowPlayingInfoMediaType.audio.rawValue)
+        )
+        XCTAssertEqual(playing[MPNowPlayingInfoPropertyIsLiveStream] as? Bool, false)
 
         let paused = AudioBridge.nowPlayingInfo(
             metadata: metadata,
@@ -2342,14 +2348,22 @@ final class PodsBackendTests: XCTestCase {
 
     // MARK: - Remote command forward skip (car Next Track / Skip Forward)
 
-    /// Fakes only the forward MediaPlayer command-registration boundary.
+    /// Fakes the MediaPlayer command-registration boundary (skip + Tesla scrubber).
     private final class FakeRemoteForwardCommandRegistrar: RemoteForwardCommandRegistering {
         private(set) var nextTrackHandler: (() -> MPRemoteCommandHandlerStatus)?
+        private(set) var previousTrackHandler: (() -> MPRemoteCommandHandlerStatus)?
         private(set) var skipForwardHandler: ((TimeInterval) -> MPRemoteCommandHandlerStatus)?
+        private(set) var skipBackwardHandler: ((TimeInterval) -> MPRemoteCommandHandlerStatus)?
         private(set) var skipForwardPreferredIntervals: [NSNumber]?
+        private(set) var skipBackwardPreferredIntervals: [NSNumber]?
+        private(set) var seekHandler: ((TimeInterval) -> MPRemoteCommandHandlerStatus)?
 
         func registerNextTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
             nextTrackHandler = handler
+        }
+
+        func registerPreviousTrackCommand(handler: @escaping () -> MPRemoteCommandHandlerStatus) {
+            previousTrackHandler = handler
         }
 
         func registerSkipForwardCommand(
@@ -2358,6 +2372,20 @@ final class PodsBackendTests: XCTestCase {
         ) {
             skipForwardPreferredIntervals = preferredIntervals
             skipForwardHandler = handler
+        }
+
+        func registerSkipBackwardCommand(
+            preferredIntervals: [NSNumber],
+            handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+        ) {
+            skipBackwardPreferredIntervals = preferredIntervals
+            skipBackwardHandler = handler
+        }
+
+        func registerChangePlaybackPositionCommand(
+            handler: @escaping (TimeInterval) -> MPRemoteCommandHandlerStatus
+        ) {
+            seekHandler = handler
         }
     }
 
@@ -2445,6 +2473,109 @@ final class PodsBackendTests: XCTestCase {
 
         XCTAssertEqual(status, .success)
         XCTAssertEqual(capturedIntervals, [45])
+    }
+
+    func testRemoteCommandBindingPreviousTrackPassesNegativeThirtySecondInterval() throws {
+        let registrar = FakeRemoteForwardCommandRegistrar()
+        var capturedIntervals: [TimeInterval] = []
+
+        RemoteForwardCommandBinding.install(
+            on: registrar,
+            forwardSkip: { interval in
+                capturedIntervals.append(interval)
+                return .success
+            }
+        )
+
+        let status = try XCTUnwrap(registrar.previousTrackHandler)()
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(capturedIntervals, [-30])
+    }
+
+    func testRemoteCommandBindingSkipBackwardNegatesEventInterval() throws {
+        let registrar = FakeRemoteForwardCommandRegistrar()
+        var capturedIntervals: [TimeInterval] = []
+
+        RemoteForwardCommandBinding.install(
+            on: registrar,
+            forwardSkip: { interval in
+                capturedIntervals.append(interval)
+                return .success
+            }
+        )
+
+        XCTAssertEqual(registrar.skipBackwardPreferredIntervals, [NSNumber(value: 30)])
+        let status = try XCTUnwrap(registrar.skipBackwardHandler)(30)
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(capturedIntervals, [-30])
+    }
+
+    func testRemoteSeekBindingPassesScrubberPosition() throws {
+        let registrar = FakeRemoteForwardCommandRegistrar()
+        var capturedPositions: [TimeInterval] = []
+
+        RemoteForwardCommandBinding.installSeek(
+            on: registrar,
+            seekTo: { position in
+                capturedPositions.append(position)
+                return .success
+            }
+        )
+
+        let status = try XCTUnwrap(registrar.seekHandler)(123.5)
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(capturedPositions, [123.5])
+    }
+
+    func testRemotePlaybackPositionHandlerSeeksAndClamps() {
+        var seekTargets: [Double] = []
+
+        let ok = RemotePlaybackPositionHandler.handle(
+            hasActiveContent: true,
+            position: 90,
+            knownDuration: 1_000,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+        XCTAssertEqual(ok, .success)
+        XCTAssertEqual(seekTargets, [90])
+
+        seekTargets = []
+        let clamped = RemotePlaybackPositionHandler.handle(
+            hasActiveContent: true,
+            position: 2_000,
+            knownDuration: 600,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+        XCTAssertEqual(clamped, .success)
+        XCTAssertEqual(seekTargets, [600])
+
+        seekTargets = []
+        let empty = RemotePlaybackPositionHandler.handle(
+            hasActiveContent: false,
+            position: 90,
+            knownDuration: 1_000,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+        XCTAssertEqual(empty, .noActionableNowPlayingItem)
+        XCTAssertEqual(seekTargets, [])
+    }
+
+    func testRemoteForwardSkipSeeksBackwardForNegativeInterval() {
+        var seekTargets: [Double] = []
+
+        let status = RemoteForwardSkipHandler.handle(
+            hasActiveContent: true,
+            currentPosition: 40,
+            knownDuration: 1_000,
+            interval: -30,
+            absoluteSeek: { seekTargets.append($0) }
+        )
+
+        XCTAssertEqual(status, .success)
+        XCTAssertEqual(seekTargets, [10])
     }
 
     private static let d1 = "Mon, 06 Jan 2025 00:00:00 GMT"
