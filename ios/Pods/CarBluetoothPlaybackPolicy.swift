@@ -314,6 +314,40 @@ enum CarBluetoothPlaybackPolicy {
         return routes.contains { $0.kind == .car && $0.matches(intent.device) }
     }
 
+    /// User/system events that must not leave a pending 0.7s callback or a
+    /// persisted latch pointing at a different episode or sink.
+    enum LifecycleEvent: Equatable {
+        case userLoad
+        case rebuildSameEpisode
+        case sinkChanged
+        case manualPlay
+        case userPause
+        case stop
+        case ended
+        case expired
+    }
+
+    struct LifecycleDecision: Equatable {
+        var clearIntent: Bool
+        var cancelPending: Bool
+    }
+
+    static func lifecycleDecision(for event: LifecycleEvent) -> LifecycleDecision {
+        switch event {
+        case .userLoad, .sinkChanged, .userPause, .stop, .ended, .expired:
+            return LifecycleDecision(clearIntent: true, cancelPending: true)
+        case .rebuildSameEpisode, .manualPlay:
+            return LifecycleDecision(clearIntent: false, cancelPending: true)
+        }
+    }
+
+    static func applying(
+        _ decision: LifecycleDecision,
+        to intent: CarBluetoothResumeIntent?
+    ) -> CarBluetoothResumeIntent? {
+        decision.clearIntent ? nil : intent
+    }
+
     private static func nameContainsToken(_ name: String, tokens: [String]) -> Bool {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !n.isEmpty else { return false }

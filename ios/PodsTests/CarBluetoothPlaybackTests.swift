@@ -374,6 +374,68 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         )
     }
 
+    func testAirPodsA2DPReconnectAfterListeningDoesNotAutostart() {
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [airPods],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [airPods],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+    }
+
+    func testLifecycleClearsStaleIntentOnLoadSinkPauseAndExpiry() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now)
+        let clearing: [CarBluetoothPlaybackPolicy.LifecycleEvent] = [
+            .userLoad, .sinkChanged, .userPause, .stop, .ended, .expired
+        ]
+        for event in clearing {
+            let decision = CarBluetoothPlaybackPolicy.lifecycleDecision(for: event)
+            XCTAssertEqual(decision, .init(clearIntent: true, cancelPending: true), "\(event)")
+            XCTAssertNil(CarBluetoothPlaybackPolicy.applying(decision, to: armed), "\(event)")
+        }
+    }
+
+    func testLifecycleManualPlayAndRebuildOnlyCancelPendingCallback() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now)
+        for event: CarBluetoothPlaybackPolicy.LifecycleEvent in [.manualPlay, .rebuildSameEpisode] {
+            let decision = CarBluetoothPlaybackPolicy.lifecycleDecision(for: event)
+            XCTAssertEqual(decision, .init(clearIntent: false, cancelPending: true), "\(event)")
+            XCTAssertEqual(CarBluetoothPlaybackPolicy.applying(decision, to: armed), armed, "\(event)")
+        }
+    }
+
+    func testLegacyResumeWhenCarConnectsSnapshotDoesNotArmWithoutIdentity() throws {
+        let json = """
+        {"episodeID":1,"publisherURL":"https://example.test/a.mp3","position":10,"rate":1,\
+        "resumeWhenCarConnects":true}
+        """.data(using: .utf8)!
+        let snapshot = try JSONDecoder().decode(CarBluetoothSessionSnapshot.self, from: json)
+        XCTAssertNil(snapshot.resumeIntent)
+        XCTAssertNil(CarBluetoothPlaybackPolicy.validatedIntent(snapshot.resumeIntent, now: now))
+    }
+
     func testSessionStoreRoundTripsIntentSnapshot() {
         let suite = "pods.carBluetooth.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

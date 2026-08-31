@@ -337,7 +337,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func setOutput(_ next: PlaybackOutput, id: Int, resume: Bool) {
         invalidateAutomaticSkip()
-        clearCarBluetoothResumeIntent()
+        applyCarResumeLifecycle(.sinkChanged)
         persistCarBluetoothSession()
         preferredOutput = next
         let position = nowPlayingPosition
@@ -659,7 +659,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             )
         case "ended":
             recordCurrentProgress(force: true)
-            clearCarBluetoothResumeIntent()
+            applyCarResumeLifecycle(.ended)
             persistCarBluetoothSession()
             emit(type: "ended", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: true)
         case "state":
@@ -695,11 +695,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         rate: Float,
         clearsCarResume: Bool = true
     ) {
-        if clearsCarResume {
-            clearCarBluetoothResumeIntent()
-        } else {
-            cancelScheduledCarBluetoothResume()
-        }
+        applyCarResumeLifecycle(clearsCarResume ? .userLoad : .rebuildSameEpisode)
         playbackSessionID = AdRemovalPlaybackSession.makeID()
         currentEpisodeID = episodeID
         publisherURL = url
@@ -856,8 +852,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         configureSession()
         player?.rate = requestedRate
-        // Manual / AVRCP play supersedes a pending settle callback.
-        cancelScheduledCarBluetoothResume()
+        applyCarResumeLifecycle(.manualPlay)
         updateNowPlaying(rate: requestedRate, paused: false)
         persistCarBluetoothSession()
         emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
@@ -885,7 +880,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
 
     private func pause(id: Int, userInitiated: Bool = true) {
         if userInitiated {
-            clearCarBluetoothResumeIntent()
+            applyCarResumeLifecycle(.userPause)
         }
         if preferredOutput == .mac || output == .mac {
             CastSession.shared.sendCommand(["cmd": "pause"])
@@ -982,7 +977,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         lastRecordedEpisodeID = nil
         lastRecordedPosition = nil
         lastSrc = nil
-        clearCarBluetoothResumeIntent()
+        applyCarResumeLifecycle(.stop)
         carBluetoothSessionStore.clear()
         clearNowPlaying()
         emit(type: "pause", id: id, position: 0, duration: 0)
@@ -1408,7 +1403,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         }
         PodsLog("playback_native_ended_observed episode_id=\(episodeLabel) player_id=\(currentId)")
         recordCurrentProgress(force: true)
-        clearCarBluetoothResumeIntent()
+        applyCarResumeLifecycle(.ended)
         persistCarBluetoothSession()
         emit(type: "ended", id: currentId, paused: true)
     }
@@ -1497,7 +1492,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             persistCarBluetoothSession()
             scheduleCarBluetoothResume(intent)
         case .clear:
-            clearCarBluetoothResumeIntent()
+            applyCarResumeLifecycle(.expired)
             persistCarBluetoothSession()
         case .none:
             break
@@ -1535,15 +1530,21 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         )
     }
 
+    private func applyCarResumeLifecycle(_ event: CarBluetoothPlaybackPolicy.LifecycleEvent) {
+        let decision = CarBluetoothPlaybackPolicy.lifecycleDecision(for: event)
+        if decision.cancelPending {
+            cancelScheduledCarBluetoothResume()
+        }
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.applying(
+            decision,
+            to: carBluetoothResumeIntent
+        )
+    }
+
     private func cancelScheduledCarBluetoothResume() {
         carBluetoothResumeGeneration += 1
         carBluetoothResumeWorkItem?.cancel()
         carBluetoothResumeWorkItem = nil
-    }
-
-    private func clearCarBluetoothResumeIntent() {
-        cancelScheduledCarBluetoothResume()
-        carBluetoothResumeIntent = nil
     }
 
     private func commitScheduledCarBluetoothResume(
