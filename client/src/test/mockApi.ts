@@ -88,7 +88,7 @@ export function adRemovalSettings(
     enabled: false,
     enrollment_cutoff: null,
     cloud_classifier_configured: true,
-    model_repository: "deepseek-v4-flash",
+    model_repository: "deepseek-v4-pro",
     model_revision: "api",
     model_total_bytes: 0,
     model_downloaded_bytes: 0,

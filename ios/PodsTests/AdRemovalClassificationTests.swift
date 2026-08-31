@@ -33,7 +33,7 @@ final class AdRemovalClassificationTests: XCTestCase {
         let json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: try XCTUnwrap(captured?.httpBody)) as? [String: Any]
         )
-        XCTAssertEqual(json["model"] as? String, "deepseek-v4-flash")
+        XCTAssertEqual(json["model"] as? String, "deepseek-v4-pro")
         XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
         XCTAssertEqual((json["response_format"] as? [String: String])?["type"], "json_object")
     }

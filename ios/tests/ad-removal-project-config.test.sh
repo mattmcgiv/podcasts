@@ -23,6 +23,6 @@ grep -q '"identity" : "mlx-swift-lm"' "$resolved"
 grep -q '"revision" : "25b00d4e22e61ec9c41efda47990cd2084ec87ff"' "$resolved"
 grep -q '"version" : "2.31.3"' "$resolved"
 grep -q 'classifier: DeepSeekAdClassifier' "$repo_root/ios/Pods/PodsApp.swift"
-grep -q 'static let modelID = "deepseek-v4-flash"' "$repo_root/ios/Pods/DeepSeekAdClassifier.swift"
+grep -q 'static let modelID = "deepseek-v4-pro"' "$repo_root/ios/Pods/DeepSeekAdClassifier.swift"
 
 echo "ad-removal project configuration tests passed"

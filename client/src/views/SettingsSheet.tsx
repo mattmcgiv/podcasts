@@ -222,7 +222,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
-              Transcript text is sent to DeepSeek V4 Flash for ad classification and generated show notes.
+              Transcript text is sent to DeepSeek V4 Pro for ad classification and generated show notes.
               Audio stays on this iPhone.
             </p>
             <input
@@ -257,7 +257,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
               </button>
             )}
             <p className="settings-detail" role="status">
-              Cloud classifier: {adRemoval.cloud_classifier_configured ? "DeepSeek V4 Flash ready" : "API key required"}
+              Cloud classifier: {adRemoval.cloud_classifier_configured ? "DeepSeek V4 Pro ready" : "API key required"}
             </p>
             <p className="settings-detail settings-revision">
               Revision {adRemoval.model_revision}

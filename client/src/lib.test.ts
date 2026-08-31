@@ -56,7 +56,7 @@ describe("cloudClassifierCopy", () => {
       classifier_available: true,
       classifier_unavailable_reason: null,
     })).toEqual({
-      status: "Cloud classifier: DeepSeek V4 Flash ready",
+      status: "Cloud classifier: DeepSeek V4 Pro ready",
       recovery: null,
       canEnable: true,
       shouldPoll: false,

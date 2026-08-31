@@ -10,7 +10,7 @@ const adRemovalSettings = {
   enrollment_cutoff: null,
   cloud_classifier_configured: true,
   model_repository: "deepseek/api",
-  model_revision: "deepseek-v4-flash",
+  model_revision: "deepseek-v4-pro",
   model_total_bytes: 0,
   model_downloaded_bytes: 0,
   model_download_state: "ready",
@@ -127,7 +127,7 @@ describe("SettingsSheet", () => {
     expect(screen.queryByRole("button", { name: "Close settings" })).not.toBeInTheDocument();
   });
 
-  it("enables DeepSeek Flash ad removal when an API key is configured", async () => {
+  it("enables DeepSeek Pro ad removal when an API key is configured", async () => {
     const { calls } = installApi({
       "GET /api/ad-removal/settings": adRemovalSettings,
       "POST /api/ad-removal/enable": {
@@ -145,11 +145,11 @@ describe("SettingsSheet", () => {
     expect(enable).toBeEnabled();
     await user.click(enable);
 
-    await screen.findByText(/Cloud classifier: DeepSeek V4 Flash ready/);
+    await screen.findByText(/Cloud classifier: DeepSeek V4 Pro ready/);
     const call = calls.find((item) => item.key === "POST /api/ad-removal/enable");
     expect(JSON.parse(String(call?.init.body))).toEqual({ confirmed_bytes: 0 });
     expect(
-      screen.getByText(/Transcript text is sent to DeepSeek V4 Flash/),
+      screen.getByText(/Transcript text is sent to DeepSeek V4 Pro/),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("DeepSeek API key")).toHaveAttribute("placeholder", "DeepSeek API key saved");
   });

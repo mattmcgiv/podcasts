@@ -1306,7 +1306,7 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertFalse(settings.enabled)
         XCTAssertNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_repository, "deepseek-v4-flash")
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-pro")
         XCTAssertEqual(settings.model_revision, "api")
         XCTAssertEqual(settings.model_total_bytes, 0)
         XCTAssertEqual(settings.model_download_state, "ready")
@@ -1529,7 +1529,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(settings.enabled)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertEqual(settings.model_downloaded_bytes, 0)
-        XCTAssertEqual(settings.model_repository, "deepseek-v4-flash")
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-pro")
     }
 
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {

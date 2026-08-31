@@ -59,7 +59,7 @@ export function cloudClassifierCopy(settings: {
 } {
   if (settings.classifier_available) {
     return {
-      status: "Cloud classifier: DeepSeek V4 Flash ready",
+      status: "Cloud classifier: DeepSeek V4 Pro ready",
       recovery: null,
       canEnable: true,
       shouldPoll: false,

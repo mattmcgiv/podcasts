@@ -64,7 +64,7 @@ enum DeepSeekClassifierError: Error, Equatable {
 }
 
 final class DeepSeekAdClassifier: AdClassifier {
-    static let modelID = "deepseek-v4-flash"
+    static let modelID = "deepseek-v4-pro"
 
     struct Transport {
         let send: (URLRequest) async throws -> (Data, HTTPURLResponse)

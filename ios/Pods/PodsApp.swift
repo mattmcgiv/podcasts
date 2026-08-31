@@ -87,10 +87,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 diagnostics: adRemovalDiagnostics
             )
             let jobStore = AdRemovalJobStore(database: database)
-            try Self.resetBondBuybacksForDeepSeekFlashEvaluation(
-                database: database,
-                jobStore: jobStore
-            )
             _ = try cleanup.drain()
             let episodeShowNotesService = EpisodeShowNotesService(
                 database: database,
@@ -342,30 +338,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
         }
         PodsDebugLog("Applied ad-removal state repair \(marker)")
-    }
-
-    private static func resetBondBuybacksForDeepSeekFlashEvaluation(
-        database: PodsDatabase,
-        jobStore: AdRemovalJobStore
-    ) throws {
-        let marker = "bond_buybacks_deepseek_flash_reset_v1"
-        guard try database.scalarInt64(
-            "SELECT COUNT(*) FROM settings WHERE key = ?",
-            [.text(marker)]
-        ) == 0 else { return }
-        let episodeID: Int64 = 20_695
-        guard try database.scalarInt64(
-            "SELECT id FROM episodes WHERE id = ?",
-            [.int(episodeID)]
-        ) != nil else { return }
-        try jobStore.cleanupEpisode(episodeID: episodeID)
-        try database.execute("DELETE FROM episode_show_notes WHERE episode_id = ?", [.int(episodeID)])
-        try database.execute(
-            "INSERT INTO settings (key, value) VALUES (?, 'done')",
-            [.text(marker)]
-        )
-        _ = try jobStore.enqueue(episodeID: episodeID)
-        PodsDebugLog("Reset Bond Buybacks ad-removal metadata for DeepSeek V4 Flash evaluation")
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
