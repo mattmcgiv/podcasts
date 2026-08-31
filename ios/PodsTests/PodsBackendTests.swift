@@ -376,21 +376,21 @@ final class PodsBackendTests: XCTestCase {
         let adRemovalArtifactStore: AdRemovalArtifactStore
     }
 
-    private final class StubOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
-        var availability: AppleOnDeviceModelAvailability
+    private final class StubDeepSeekCredentialStore: DeepSeekCredentialStoring {
+        private var apiKey: String?
 
-        init(_ availability: AppleOnDeviceModelAvailability = .available) {
-            self.availability = availability
+        init(apiKey: String? = "test-api-key") {
+            self.apiKey = apiKey
         }
 
-        func currentAvailability() -> AppleOnDeviceModelAvailability {
-            availability
-        }
+        var hasAPIKey: Bool { !(apiKey ?? "").isEmpty }
+        func readAPIKey() throws -> String? { apiKey }
+        func saveAPIKey(_ value: String) throws { apiKey = value }
     }
 
     private func makeHarness(
         directorySearcher: PodcastDirectorySearching? = nil,
-        modelAvailability: AppleOnDeviceModelAvailability = .available
+        deepSeekAPIKey: String? = "test-api-key"
     ) throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
@@ -405,7 +405,7 @@ final class PodsBackendTests: XCTestCase {
             feedFetcher: fetcher,
             directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher(),
             adRemovalArtifactStore: adRemovalArtifactStore,
-            onDeviceModelAvailability: StubOnDeviceAvailability(modelAvailability)
+            deepSeekCredentialStore: StubDeepSeekCredentialStore(apiKey: deepSeekAPIKey)
         )
         return Harness(
             backend: backend,
@@ -1097,7 +1097,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(detail.ad_removal_stage, "downloading", "downloading stage is exposed exactly")
         XCTAssertEqual(detail.ad_removal_blocking_reason, "storage_limit", "storage_limit blocking reason is exposed")
         _ = try store.setBlockingReason(jobID: job.id, reason: nil)
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             _ = try store.recordFailure(jobID: job.id, errorCode: "test", message: "failed")
         }
         detail = try decode(EpisodeDetail.self, from: try await call(
@@ -1306,8 +1306,8 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertFalse(settings.enabled)
         XCTAssertNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_repository, AdClassifierDescriptor.appleSystemLanguageModelV1.modelID)
-        XCTAssertEqual(settings.model_revision, AdClassifierDescriptor.appleSystemLanguageModelV1.modelRevision)
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-flash")
+        XCTAssertEqual(settings.model_revision, "api")
         XCTAssertEqual(settings.model_total_bytes, 0)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertTrue(settings.cloud_classifier_configured)
@@ -1326,7 +1326,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertTrue(settings.enabled)
         XCTAssertNotNil(settings.enrollment_cutoff)
         XCTAssertEqual(settings.model_download_state, "ready")
-        XCTAssertEqual(settings.model_revision, "on-device")
+        XCTAssertEqual(settings.model_revision, "api")
         XCTAssertTrue(settings.classifier_available)
 
         let existingID = try XCTUnwrap(harness.database.scalarInt64(
@@ -1355,48 +1355,29 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
     }
 
-    func testAdRemovalSettingsAndEnableReflectSystemLanguageModelAvailability() async throws {
-        let cases: [(AppleOnDeviceModelAvailability, String, String)] = [
-            (.unavailable(.deviceNotEligible), "device_not_eligible", "device_not_eligible"),
-            (.unavailable(.appleIntelligenceNotEnabled), "apple_intelligence_disabled", "apple_intelligence_not_enabled"),
-            (.unavailable(.modelNotReady), "downloading", "model_not_ready"),
-            (.unavailable(.unknown), "unavailable", "unknown")
-        ]
-        for (availability, downloadState, reason) in cases {
-            let harness = try makeHarness(modelAvailability: availability)
-            let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
-                harness.backend,
-                "GET",
-                "/api/ad-removal/settings"
-            ))
-            XCTAssertFalse(settings.classifier_available)
-            XCTAssertFalse(settings.cloud_classifier_configured)
-            XCTAssertEqual(settings.model_download_state, downloadState)
-            XCTAssertEqual(settings.classifier_unavailable_reason, reason)
-            XCTAssertFalse(settings.enabled)
+    func testAdRemovalSettingsAndEnableRequireDeepSeekAPIKey() async throws {
+        let harness = try makeHarness(deepSeekAPIKey: nil)
+        let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertFalse(settings.classifier_available)
+        XCTAssertFalse(settings.cloud_classifier_configured)
+        XCTAssertEqual(settings.model_download_state, "api_key_required")
+        XCTAssertEqual(settings.classifier_unavailable_reason, "api_key_required")
 
-            let enabled = try await call(
-                harness.backend,
-                "POST",
-                "/api/ad-removal/enable",
-                json: ["confirmed_bytes": 0]
-            )
-            XCTAssertEqual(enabled.statusCode, 422, downloadState)
-            let body = try JSONSerialization.jsonObject(with: enabled.body) as? [String: String]
-            XCTAssertEqual(body?["error"], availability.enableError)
-            XCTAssertNotEqual(
-                try harness.database.query(
-                    "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
-                    map: { sqliteString($0, 0) }
-                ).first,
-                "true",
-                downloadState
-            )
-        }
+        let enabled = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": 0]
+        )
+        XCTAssertEqual(enabled.statusCode, 422)
     }
 
-    func testAdRemovalPrepareRejectsWhenSystemLanguageModelIsUnavailable() async throws {
-        let harness = try makeHarness(modelAvailability: .unavailable(.appleIntelligenceNotEnabled))
+    func testAdRemovalPrepareRejectsWhenDeepSeekAPIKeyIsMissing() async throws {
+        let harness = try makeHarness(deepSeekAPIKey: nil)
         let feedURL = "https://feeds.example/unavailable-prepare.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
             show: "Unavailable",
@@ -1474,7 +1455,7 @@ final class PodsBackendTests: XCTestCase {
             directorySearcher: DisabledPodcastDirectorySearcher(),
             adRemovalArtifactStore: harness.adRemovalArtifactStore,
             adRemovalDiagnostics: diagnostics,
-            onDeviceModelAvailability: StubOnDeviceAvailability(.available)
+            deepSeekCredentialStore: StubDeepSeekCredentialStore()
         )
         let feedURL = "https://feeds.example/data-controls.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
@@ -1548,7 +1529,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(settings.enabled)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertEqual(settings.model_downloaded_bytes, 0)
-        XCTAssertEqual(settings.model_repository, "apple/system-language-model")
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-flash")
     }
 
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
@@ -1613,7 +1594,11 @@ final class PodsBackendTests: XCTestCase {
         let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
         XCTAssertEqual(played.statusCode, 204)
         for _ in 0..<200 {
-            if try store.job(episodeID: episode.id) == nil { break }
+            let jobRemoved = try store.job(episodeID: episode.id) == nil
+            let cleanupDrained = try harness.database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_artifact_cleanup"
+            ) == 0
+            if jobRemoved && cleanupDrained { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertFalse(FileManager.default.fileExists(
@@ -2273,10 +2258,10 @@ final class PodsBackendTests: XCTestCase {
 
     func testTemporaryDebugLogExpiresAfterThreeDays() throws {
         let formatter = ISO8601DateFormatter()
-        let beforeExpiry = try XCTUnwrap(formatter.date(from: "2026-07-04T23:59:58Z"))
-        let afterExpiry = try XCTUnwrap(formatter.date(from: "2026-07-05T00:00:00Z"))
+        let beforeExpiry = try XCTUnwrap(formatter.date(from: "2026-08-17T23:59:58Z"))
+        let afterExpiry = try XCTUnwrap(formatter.date(from: "2026-08-18T00:00:00Z"))
 
-        XCTAssertEqual(PodsTemporaryDebugLog.expiryISO8601, "2026-07-04T23:59:59Z")
+        XCTAssertEqual(PodsTemporaryDebugLog.expiryISO8601, "2026-08-17T23:59:59Z")
         XCTAssertTrue(PodsTemporaryDebugLog.isEnabled(now: beforeExpiry))
         XCTAssertFalse(PodsTemporaryDebugLog.isEnabled(now: afterExpiry))
     }

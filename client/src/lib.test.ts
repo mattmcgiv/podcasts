@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmtDate, fmtDuration, fmtRemaining, fmtTime, onDeviceClassifierCopy, progressFraction } from "./lib";
+import { cloudClassifierCopy, fmtDate, fmtDuration, fmtRemaining, fmtTime, progressFraction } from "./lib";
 
 describe("fmtTime", () => {
   it("formats minutes and hours", () => {
@@ -50,43 +50,28 @@ describe("fmtRemaining / progressFraction", () => {
   });
 });
 
-describe("onDeviceClassifierCopy", () => {
-  it("allows enable only when Apple Intelligence is available", () => {
-    expect(onDeviceClassifierCopy({
+describe("cloudClassifierCopy", () => {
+  it("allows enable when DeepSeek is configured", () => {
+    expect(cloudClassifierCopy({
       classifier_available: true,
       classifier_unavailable_reason: null,
     })).toEqual({
-      status: "On-device classifier: Apple Intelligence is ready",
+      status: "Cloud classifier: DeepSeek V4 Flash ready",
       recovery: null,
       canEnable: true,
       shouldPoll: false,
     });
   });
 
-  it("explains each Apple unavailable reason and the recovery path", () => {
-    expect(onDeviceClassifierCopy({
+  it("asks for an API key without polling", () => {
+    expect(cloudClassifierCopy({
       classifier_available: false,
-      classifier_unavailable_reason: "device_not_eligible",
+      classifier_unavailable_reason: "api_key_required",
     })).toMatchObject({
       canEnable: false,
       shouldPoll: false,
-      status: "Apple Intelligence is not available on this iPhone.",
-    });
-    expect(onDeviceClassifierCopy({
-      classifier_available: false,
-      classifier_unavailable_reason: "apple_intelligence_not_enabled",
-    })).toMatchObject({
-      canEnable: false,
-      shouldPoll: true,
-      recovery: expect.stringContaining("Apple Intelligence & Siri"),
-    });
-    expect(onDeviceClassifierCopy({
-      classifier_available: false,
-      classifier_unavailable_reason: "model_not_ready",
-    })).toMatchObject({
-      canEnable: false,
-      shouldPoll: true,
-      status: "Apple Intelligence is still downloading.",
+      status: "DeepSeek API key required.",
+      recovery: expect.stringContaining("Save a DeepSeek API key"),
     });
   });
 });

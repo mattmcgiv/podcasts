@@ -216,6 +216,98 @@ protocol EpisodeShowNotesGenerating: AnyObject {
     func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft]
 }
 
+final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
+    static let maximumPromptBytes = 600_000
+    static let maximumResponseBytes = 128_000
+
+    struct Transport {
+        let send: (URLRequest) async throws -> (Data, HTTPURLResponse)
+
+        static let live = Transport { request in
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw DeepSeekClassifierError.invalidResponse
+            }
+            return (data, http)
+        }
+    }
+
+    let modelID = DeepSeekAdClassifier.modelID
+    let promptVersion = "episode-show-notes-v1"
+    private let credentialStore: DeepSeekCredentialStoring
+    private let transport: Transport
+    private let parser = EpisodeShowNotesResponseParser()
+    private let diagnostics: AdRemovalDiagnostics?
+
+    init(
+        credentialStore: DeepSeekCredentialStoring,
+        transport: Transport = .live,
+        diagnostics: AdRemovalDiagnostics? = nil
+    ) {
+        self.credentialStore = credentialStore
+        self.transport = transport
+        self.diagnostics = diagnostics
+    }
+
+    func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft] {
+        guard !segments.isEmpty else { throw EpisodeShowNotesError.noContent }
+        guard let key = try credentialStore.readAPIKey()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else {
+            throw DeepSeekClassifierError.missingAPIKey
+        }
+        let systemMessage = EpisodeShowNotesPrompt.systemMessage
+        guard systemMessage.utf8.count < Self.maximumPromptBytes else {
+            throw EpisodeShowNotesError.transcriptTooLarge
+        }
+        let prompt = try EpisodeShowNotesPrompt.make(
+            segments: segments,
+            maximumBytes: Self.maximumPromptBytes - systemMessage.utf8.count
+        )
+        var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": modelID,
+            "messages": [
+                ["role": "system", "content": systemMessage],
+                ["role": "user", "content": prompt]
+            ],
+            "thinking": ["type": "disabled"],
+            "response_format": ["type": "json_object"],
+            "max_tokens": 8_192,
+            "stream": false
+        ])
+        let started = Date()
+        let (data, response) = try await transport.send(request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw DeepSeekClassifierError.httpStatus(response.statusCode)
+        }
+        guard data.count <= Self.maximumResponseBytes,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              firstChoice["finish_reason"] as? String == "stop",
+              let message = firstChoice["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw DeepSeekClassifierError.invalidResponse
+        }
+        let notes = try parser.parse(content, segments: segments)
+        try? diagnostics?.record(
+            eventName: "episode_show_notes_generated",
+            severity: .notice,
+            fields: [
+                "chapter_count": String(notes.count),
+                "segment_count": String(segments.count),
+                "latency_ms": String(Int(Date().timeIntervalSince(started) * 1_000)),
+                "provider": "deepseek"
+            ]
+        )
+        return notes
+    }
+}
+
 final class EpisodeShowNotesStore {
     private let database: PodsDatabase
 

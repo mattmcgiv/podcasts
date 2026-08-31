@@ -5,6 +5,39 @@ import XCTest
 @testable import Pods
 
 final class AdRemovalClassificationTests: XCTestCase {
+    func testDeepSeekFlashClassifierSendsNonThinkingJSONRequest() async throws {
+        var captured: URLRequest?
+        let transport = DeepSeekAdClassifier.Transport { request in
+            captured = request
+            let body = #"{"choices":[{"message":{"content":"{\"labels\":[]}"}}]}"#
+            return (Data(body.utf8), HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["content-type": "application/json"]
+            )!)
+        }
+        let classifier = DeepSeekAdClassifier(apiKey: "secret-test-key", transport: transport)
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: [],
+            corrections: [],
+            prompt: "classify this",
+            estimatedInputTokens: 3,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 8_000
+        )
+
+        let output = try await classifier.classify(window: window)
+        XCTAssertEqual(output, #"{"labels":[]}"#)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(captured?.httpBody)) as? [String: Any]
+        )
+        XCTAssertEqual(json["model"] as? String, "deepseek-v4-flash")
+        XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
+        XCTAssertEqual((json["response_format"] as? [String: String])?["type"], "json_object")
+    }
+
     func testAvailabilitySnapshotMapsAppleSystemLanguageModelCases() {
         XCTAssertEqual(
             AppleOnDeviceModelAvailability.from(systemAvailability: .available),
@@ -771,8 +804,8 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertTrue(windows.allSatisfy { $0.estimatedInputTokens <= $0.maximumInputTokens })
     }
 
-    func testProductionWindowUsesOnDeviceSizedBatchAndShortRequestIDs() throws {
-        let segments = (0..<20).map { index in
+    func testProductionWindowUsesCloudSizedBatchAndShortRequestIDs() throws {
+        let segments = (0..<70).map { index in
             AdTranscriptSegment(
                 id: "segment-canonical-\(index)",
                 index: index,
@@ -786,17 +819,17 @@ final class AdRemovalClassificationTests: XCTestCase {
         let windows = try AdClassificationWindowBuilder(limits: .production)
             .makeWindows(segments: segments, corrections: [])
 
-        XCTAssertEqual(AdClassificationLimits.production.maximumSegmentsPerWindow, 8)
-        XCTAssertEqual(AdClassificationLimits.production.overlapSegmentCount, 2)
-        XCTAssertEqual(windows.first?.segments.count, 8)
+        XCTAssertEqual(AdClassificationLimits.production.maximumSegmentsPerWindow, 64)
+        XCTAssertEqual(AdClassificationLimits.production.overlapSegmentCount, 4)
+        XCTAssertEqual(windows.first?.segments.count, 64)
         XCTAssertEqual(windows.first?.requestSegmentIDs.first, "s0")
-        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s7")
+        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s63")
         XCTAssertTrue(windows.first?.prompt.contains("SEGMENT s0 ") == true)
         XCTAssertFalse(windows.first?.prompt.contains("SEGMENT segment-canonical-0 ") == true)
-        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-6")
-        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 8), 1)
-        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 9), 2)
-        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 20), 3)
+        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-60")
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 64), 1)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 65), 2)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 125), 3)
     }
 
     func testCorrectionSelectionIsRelevantNewestFirstAndBounded() throws {

@@ -129,6 +129,11 @@ export const Api = {
       `/ad-removal/statuses?episode_ids=${episodeIds.join(",")}`,
     ),
   adRemovalSettings: () => request<AdRemovalSettings>("/ad-removal/settings"),
+  saveDeepSeekApiKey: (apiKey: string) =>
+    request<AdRemovalSettings>("/ad-removal/deepseek-key", {
+      method: "PUT",
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
   enableAdRemoval: (confirmedBytes: number) =>
     request<AdRemovalSettings>("/ad-removal/enable", {
       method: "POST",

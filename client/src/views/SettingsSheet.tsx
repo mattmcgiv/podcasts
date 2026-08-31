@@ -3,7 +3,6 @@ import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
-import { onDeviceClassifierCopy } from "../lib";
 import type { AdRemovalSettings, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
@@ -35,6 +34,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
+  const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>(currentThemePreference);
   const [refreshing, setRefreshing] = useState(false);
@@ -60,16 +60,6 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       active = false;
     };
   }, []);
-
-  const classifierCopy = adRemoval ? onDeviceClassifierCopy(adRemoval) : null;
-
-  useEffect(() => {
-    if (!classifierCopy?.shouldPoll) return;
-    const timer = window.setInterval(() => {
-      void Api.adRemovalSettings().then(setAdRemoval).catch(() => {});
-    }, 5_000);
-    return () => window.clearInterval(timer);
-  }, [classifierCopy?.shouldPoll]);
 
   async function run(label: string, fn: () => Promise<string>) {
     setStatus(`${label}…`);
@@ -144,6 +134,16 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       setAdRemoval(await Api.enableAdRemoval(adRemoval.model_total_bytes));
       emitEpisodesChanged();
       return "Ad removal enabled";
+    });
+  }
+
+  async function saveDeepSeekApiKey() {
+    const apiKey = deepSeekApiKey.trim();
+    if (!apiKey) return;
+    await run("Saving DeepSeek API key", async () => {
+      setAdRemoval(await Api.saveDeepSeekApiKey(apiKey));
+      setDeepSeekApiKey("");
+      return "DeepSeek API key saved in iPhone Keychain";
     });
   }
 
@@ -222,35 +222,43 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
-              Ad classification and generated show notes run on this iPhone with Apple Intelligence.
-              Audio and transcript text stay on device.
+              Transcript text is sent to DeepSeek V4 Flash for ad classification and generated show notes.
+              Audio stays on this iPhone.
             </p>
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="DeepSeek API key"
+              placeholder={adRemoval.cloud_classifier_configured ? "DeepSeek API key saved" : "DeepSeek API key"}
+              value={deepSeekApiKey}
+              onChange={(event) => setDeepSeekApiKey(event.target.value)}
+            />
+            <button className="ghost-btn" disabled={!deepSeekApiKey.trim()} onClick={() => void saveDeepSeekApiKey()}>
+              Save DeepSeek API key
+            </button>
             {adRemoval.enabled ? (
               <>
                 <button className="ghost-btn" onClick={() => void disableAdRemoval()}>
                   Disable ad removal
                 </button>
-                {!classifierCopy?.canEnable && (
+                {!adRemoval.cloud_classifier_configured && (
                   <p className="settings-detail" role="status">
-                    Ad removal is on, but classification is paused until Apple Intelligence is available.
+                    Ad removal is on, but classification is paused until a DeepSeek API key is saved.
                   </p>
                 )}
               </>
             ) : (
               <button
                 className="ghost-btn"
-                disabled={!classifierCopy?.canEnable}
+                disabled={!adRemoval.cloud_classifier_configured}
                 onClick={() => void enableAdRemoval()}
               >
                 Enable ad removal
               </button>
             )}
             <p className="settings-detail" role="status">
-              {classifierCopy?.status}
+              Cloud classifier: {adRemoval.cloud_classifier_configured ? "DeepSeek V4 Flash ready" : "API key required"}
             </p>
-            {classifierCopy?.recovery && (
-              <p className="settings-detail">{classifierCopy.recovery}</p>
-            )}
             <p className="settings-detail settings-revision">
               Revision {adRemoval.model_revision}
             </p>
