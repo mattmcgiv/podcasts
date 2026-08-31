@@ -514,7 +514,8 @@ final class AdRemovalClassificationTests: XCTestCase {
         await environment.waitUntilRespondEntered()
         environment.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
         environment.releaseFirstRespond()
-        XCTAssertEqual(await firstRun, .completed)
+        let firstResult = await firstRun
+        XCTAssertEqual(firstResult, .completed)
 
         let paused = try XCTUnwrap(harness.store.job(id: harness.job.id))
         XCTAssertEqual(paused.stage, .classifying)
@@ -535,7 +536,8 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
         XCTAssertEqual(try harness.store.nextRunnableJob()?.id, harness.job.id)
 
-        XCTAssertEqual(await scheduler.runUntilIdle(), .completed)
+        let secondResult = await scheduler.runUntilIdle()
+        XCTAssertEqual(secondResult, .completed)
         let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
         XCTAssertEqual(completed.id, harness.job.id)
         XCTAssertEqual(completed.stage, .ready)
