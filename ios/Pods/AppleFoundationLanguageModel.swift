@@ -78,8 +78,11 @@ final class SystemLanguageModelAvailabilityReader: AppleOnDeviceModelAvailabilit
     }
 }
 
-/// Watches on-device model availability and fires only when it transitions
-/// back to `.available`, so jobs paused as `model_required` can resume.
+/// Watches on-device model availability so jobs paused as `model_required` can resume.
+///
+/// A live transition back to `.available` is enough while the app is foregrounded.
+/// After backgrounding, availability can flap without a poll, so foreground
+/// activation also recovers whenever the model is available *now*.
 final class AppleOnDeviceModelAvailabilityObserver: @unchecked Sendable {
     static let pollingInterval: TimeInterval = 5
 
@@ -115,6 +118,26 @@ final class AppleOnDeviceModelAvailabilityObserver: @unchecked Sendable {
             becameAvailable()
         }
         return transitioned
+    }
+
+    /// Recovers leftover `model_required` jobs when the model is available now,
+    /// even if no unavailable → available transition was observed.
+    @discardableResult
+    func recoverIfCurrentlyAvailable() -> Bool {
+        lock.lock()
+        let current = reader.currentAvailability()
+        lastAvailability = current
+        lock.unlock()
+        guard current.available else { return false }
+        becameAvailable()
+        return true
+    }
+
+    /// Foreground path: resume polling, then recover if the model is available now.
+    @discardableResult
+    func handleForegroundActivation() -> Bool {
+        startPolling()
+        return recoverIfCurrentlyAvailable()
     }
 
     func startPolling(

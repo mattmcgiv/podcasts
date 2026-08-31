@@ -410,6 +410,26 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertEqual(recoveries, 2)
     }
 
+    func testForegroundRecoveryClearsAfterUnobservedBackgroundAvailabilityFlap() {
+        let reader = MutableOnDeviceAvailability(.available)
+        var recoveries = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: reader) {
+            recoveries += 1
+        }
+
+        observer.startPolling()
+        observer.stopPolling()
+        reader.availability = .unavailable(.appleIntelligenceNotEnabled)
+        reader.availability = .available
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 0)
+        XCTAssertTrue(observer.handleForegroundActivation())
+        XCTAssertEqual(recoveries, 1)
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveries, 1)
+    }
+
     func testJobPausedDuringClassificationResumesWhenAppleIntelligenceReturns() async throws {
         let harness = try makeClassifyingHarness()
         let labelsJSON = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
@@ -459,6 +479,63 @@ final class AdRemovalClassificationTests: XCTestCase {
         let secondResult = await scheduler.runUntilIdle()
 
         XCTAssertEqual(secondResult, .completed)
+        let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(completed.id, harness.job.id)
+        XCTAssertEqual(completed.stage, .ready)
+        XCTAssertNil(completed.blockingReason)
+        XCTAssertEqual(environment.recordedRespondCount(), 2)
+        XCTAssertFalse(try harness.store.skipRanges(episodeID: harness.episodeID).isEmpty)
+    }
+
+    func testBackgroundAvailabilityFlapResumesPausedJobOnForegroundWithoutObservedTransition() async throws {
+        let harness = try makeClassifyingHarness()
+        let labelsJSON = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.99,"reason":"show introduction"},{"segment_id":"s1","classification":"ad","confidence":0.93,"reason":"sponsor offer"},{"segment_id":"s2","classification":"ad","confidence":0.88,"reason":"promo call to action"},{"segment_id":"s3","classification":"content","confidence":0.96,"reason":"editorial interview"}]}"#
+        let environment = ControllableOnDeviceEnvironment(successJSON: labelsJSON)
+        let executor = AdRemovalPipelineExecutor(
+            database: harness.database,
+            jobStore: harness.store,
+            artifactStore: harness.artifactStore,
+            audioDownloader: UnusedDownloader(),
+            classifier: AppleFoundationAdClassifier(responder: environment)
+        )
+        let scheduler = AdRemovalPipelineScheduler(
+            store: harness.store,
+            coordinator: AdRemovalCoordinator(store: harness.store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) }
+        )
+        var recoveredRuns = 0
+        let observer = AppleOnDeviceModelAvailabilityObserver(reader: environment) {
+            recoveredRuns += 1
+            try? harness.store.clearBlockingReasons([.modelRequired])
+        }
+        observer.startPolling()
+
+        async let firstRun = scheduler.runUntilIdle()
+        await environment.waitUntilRespondEntered()
+        environment.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
+        environment.releaseFirstRespond()
+        XCTAssertEqual(await firstRun, .completed)
+
+        let paused = try XCTUnwrap(harness.store.job(id: harness.job.id))
+        XCTAssertEqual(paused.stage, .classifying)
+        XCTAssertEqual(paused.blockingReason, .modelRequired)
+        XCTAssertNil(paused.lastErrorCode)
+
+        observer.stopPolling()
+        environment.setAvailability(.unavailable(.modelNotReady))
+        environment.setAvailability(.available)
+
+        XCTAssertFalse(observer.poll())
+        XCTAssertEqual(recoveredRuns, 0)
+        XCTAssertEqual(try harness.store.job(id: harness.job.id)?.blockingReason, .modelRequired)
+        XCTAssertNil(try harness.store.nextRunnableJob())
+
+        XCTAssertTrue(observer.handleForegroundActivation())
+        XCTAssertEqual(recoveredRuns, 1)
+        XCTAssertNil(try harness.store.job(id: harness.job.id)?.blockingReason)
+        XCTAssertEqual(try harness.store.nextRunnableJob()?.id, harness.job.id)
+
+        XCTAssertEqual(await scheduler.runUntilIdle(), .completed)
         let completed = try XCTUnwrap(harness.store.job(id: harness.job.id))
         XCTAssertEqual(completed.id, harness.job.id)
         XCTAssertEqual(completed.stage, .ready)

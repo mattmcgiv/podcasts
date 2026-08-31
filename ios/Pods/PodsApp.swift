@@ -147,6 +147,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 }
             )
             adRemovalCoordinator = adCoordinator
+            let availabilityReader = SystemLanguageModelAvailabilityReader()
             let scheduler = AdRemovalPipelineScheduler(
                 store: jobStore,
                 coordinator: adCoordinator,
@@ -160,11 +161,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                         seriousThermalPressure: thermalState == .serious || thermalState == .critical
                     )
                 },
+                isOnDeviceModelAvailable: {
+                    availabilityReader.currentAvailability().available
+                },
                 diagnostics: adRemovalDiagnostics
             )
             adRemovalScheduler = scheduler
             adRemovalEnabled = { Self.isAdRemovalEnabled(database: database) }
-            let availabilityReader = SystemLanguageModelAvailabilityReader()
             let availabilityObserver = AppleOnDeviceModelAvailabilityObserver(
                 reader: availabilityReader
             ) { [weak self] in
@@ -347,8 +350,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         foregroundRefreshLifecycle.applicationDidBecomeActive()
-        adRemovalAvailabilityObserver?.startPolling()
-        adRemovalAvailabilityObserver?.poll()
+        adRemovalAvailabilityObserver?.handleForegroundActivation()
     }
 
     private func installForegroundRefreshHandler(_ coordinator: FeedRefreshCoordinator) {
