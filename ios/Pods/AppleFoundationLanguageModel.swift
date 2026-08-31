@@ -1,6 +1,83 @@
 import Foundation
 import FoundationModels
 
+/// Snapshot of `SystemLanguageModel.default.availability` for Settings, enable, and tests.
+struct AppleOnDeviceModelAvailability: Equatable, Sendable {
+    enum Reason: String, Equatable, Sendable {
+        case deviceNotEligible = "device_not_eligible"
+        case appleIntelligenceNotEnabled = "apple_intelligence_not_enabled"
+        case modelNotReady = "model_not_ready"
+        case unknown
+    }
+
+    let available: Bool
+    let reason: Reason?
+
+    static let available = AppleOnDeviceModelAvailability(available: true, reason: nil)
+
+    static func unavailable(_ reason: Reason) -> AppleOnDeviceModelAvailability {
+        AppleOnDeviceModelAvailability(available: false, reason: reason)
+    }
+
+    /// Values consumed by Settings as `model_download_state`.
+    var downloadState: String {
+        guard !available else { return "ready" }
+        switch reason {
+        case .modelNotReady:
+            return "downloading"
+        case .appleIntelligenceNotEnabled:
+            return "apple_intelligence_disabled"
+        case .deviceNotEligible:
+            return "device_not_eligible"
+        case .unknown, nil:
+            return "unavailable"
+        }
+    }
+
+    var enableError: String {
+        switch reason {
+        case .deviceNotEligible:
+            return "Apple Intelligence is not available on this iPhone, so ad finding cannot be enabled."
+        case .appleIntelligenceNotEnabled:
+            return "Turn on Apple Intelligence in iPhone Settings to enable on-device ad finding."
+        case .modelNotReady:
+            return "Apple Intelligence is still downloading. Wait until it is ready, then enable ad finding."
+        case .unknown, nil:
+            return "Apple Intelligence is not ready, so ad finding cannot be enabled."
+        }
+    }
+
+    static func from(systemAvailability: SystemLanguageModel.Availability) -> AppleOnDeviceModelAvailability {
+        switch systemAvailability {
+        case .available:
+            return .available
+        case .unavailable(let reason):
+            switch reason {
+            case .deviceNotEligible:
+                return .unavailable(.deviceNotEligible)
+            case .appleIntelligenceNotEnabled:
+                return .unavailable(.appleIntelligenceNotEnabled)
+            case .modelNotReady:
+                return .unavailable(.modelNotReady)
+            @unknown default:
+                return .unavailable(.unknown)
+            }
+        @unknown default:
+            return .unavailable(.unknown)
+        }
+    }
+}
+
+protocol AppleOnDeviceModelAvailabilityReading: AnyObject {
+    func currentAvailability() -> AppleOnDeviceModelAvailability
+}
+
+final class SystemLanguageModelAvailabilityReader: AppleOnDeviceModelAvailabilityReading {
+    func currentAvailability() -> AppleOnDeviceModelAvailability {
+        AppleOnDeviceModelAvailability.from(systemAvailability: SystemLanguageModel.default.availability)
+    }
+}
+
 protocol AppleOnDevicePromptResponding: AnyObject {
     var isAvailable: Bool { get }
     func respond(to prompt: String) async throws -> String
@@ -103,12 +180,15 @@ final class AppleSystemLanguageModelResponder: AppleOnDevicePromptResponding {
     }
 
     var isAvailable: Bool {
-        SystemLanguageModel.default.isAvailable
+        AppleOnDeviceModelAvailability.from(
+            systemAvailability: SystemLanguageModel.default.availability
+        ).available
     }
 
     func respond(to prompt: String) async throws -> String {
         let model = SystemLanguageModel.default
-        guard model.isAvailable else {
+        let availability = AppleOnDeviceModelAvailability.from(systemAvailability: model.availability)
+        guard availability.available else {
             throw AppleFoundationModelError.unavailable
         }
         let session = LanguageModelSession(model: model, instructions: instructions)

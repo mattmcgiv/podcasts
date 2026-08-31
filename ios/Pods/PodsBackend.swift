@@ -75,6 +75,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private let adRemovalFileCleanup: AdRemovalFileCleanup?
     private let adRemovalArtifactStore: AdRemovalArtifactStore?
     private let adRemovalDiagnostics: AdRemovalDiagnostics?
+    private let onDeviceModelAvailability: AppleOnDeviceModelAvailabilityReading
     private let episodeShowNotesStore: EpisodeShowNotesStore
     private let episodeShowNotesService: EpisodeShowNotesService?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
@@ -89,6 +90,7 @@ final class PodsBackend: PlaybackProgressRecording {
         directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
+        onDeviceModelAvailability: AppleOnDeviceModelAvailabilityReading = SystemLanguageModelAvailabilityReader(),
         episodeShowNotesService: EpisodeShowNotesService? = nil
     ) {
         self.database = database
@@ -96,6 +98,7 @@ final class PodsBackend: PlaybackProgressRecording {
         self.directorySearcher = directorySearcher
         self.adRemovalArtifactStore = adRemovalArtifactStore
         self.adRemovalDiagnostics = adRemovalDiagnostics
+        self.onDeviceModelAvailability = onDeviceModelAvailability
         self.episodeShowNotesStore = EpisodeShowNotesStore(database: database)
         self.episodeShowNotesService = episodeShowNotesService
         self.adRemovalFileCleanup = adRemovalArtifactStore.map {
@@ -780,7 +783,15 @@ final class PodsBackend: PlaybackProgressRecording {
         }
     }
 
+    private func requireOnDeviceClassifierAvailable() throws {
+        let availability = onDeviceModelAvailability.currentAvailability()
+        guard availability.available else {
+            throw PodsBackendError.invalid(availability.enableError)
+        }
+    }
+
     private func prepareAdRemoval(id: Int64) throws -> AdRemovalJob {
+        try requireOnDeviceClassifierAvailable()
         try episodeExists(id: id)
         let store = AdRemovalJobStore(database: database)
         if let existing = try store.job(episodeID: id) {
@@ -793,6 +804,7 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     private func retryAdRemoval(id: Int64) throws -> AdRemovalJob {
+        try requireOnDeviceClassifierAvailable()
         try episodeExists(id: id)
         let store = AdRemovalJobStore(database: database)
         guard let existing = try store.job(episodeID: id) else {
@@ -822,15 +834,18 @@ final class PodsBackend: PlaybackProgressRecording {
             )
         }
         let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1
+        let availability = onDeviceModelAvailability.currentAvailability()
         return AdRemovalSettingsPayload(
             enabled: values["ad_removal_enabled"] == "true",
             enrollment_cutoff: values["ad_removal_enrollment_cutoff"].flatMap(Int64.init),
-            cloud_classifier_configured: true,
+            cloud_classifier_configured: availability.available,
             model_repository: descriptor.modelID,
             model_revision: descriptor.modelRevision,
             model_total_bytes: 0,
             model_downloaded_bytes: 0,
-            model_download_state: "ready",
+            model_download_state: availability.downloadState,
+            classifier_available: availability.available,
+            classifier_unavailable_reason: availability.reason?.rawValue,
             episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
@@ -934,6 +949,10 @@ final class PodsBackend: PlaybackProgressRecording {
         // confirmed_bytes remains in the API for older clients. The on-device
         // Apple Intelligence model is OS-managed, so no download consent is required.
         _ = confirmedBytes
+        let availability = onDeviceModelAvailability.currentAvailability()
+        guard availability.available else {
+            throw PodsBackendError.invalid(availability.enableError)
+        }
         let values = try settingValues()
         let cutoff = values["ad_removal_enrollment_cutoff"] ?? String(nowUnix())
         let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1

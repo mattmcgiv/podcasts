@@ -93,6 +93,8 @@ export function adRemovalSettings(
     model_total_bytes: 0,
     model_downloaded_bytes: 0,
     model_download_state: "ready",
+    classifier_available: true,
+    classifier_unavailable_reason: null,
     episode_storage_bytes: 0,
     episode_storage_limit_bytes: 10_000_000_000,
     device_available_bytes: 20_000_000_000,

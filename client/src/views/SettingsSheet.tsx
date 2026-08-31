@@ -3,6 +3,7 @@ import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
+import { onDeviceClassifierCopy } from "../lib";
 import type { AdRemovalSettings, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
@@ -60,13 +61,15 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
+  const classifierCopy = adRemoval ? onDeviceClassifierCopy(adRemoval) : null;
+
   useEffect(() => {
-    if (adRemoval?.model_download_state !== "downloading") return;
+    if (!classifierCopy?.shouldPoll) return;
     const timer = window.setInterval(() => {
       void Api.adRemovalSettings().then(setAdRemoval).catch(() => {});
     }, 5_000);
     return () => window.clearInterval(timer);
-  }, [adRemoval?.model_download_state]);
+  }, [classifierCopy?.shouldPoll]);
 
   async function run(label: string, fn: () => Promise<string>) {
     setStatus(`${label}…`);
@@ -227,15 +230,27 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                 <button className="ghost-btn" onClick={() => void disableAdRemoval()}>
                   Disable ad removal
                 </button>
+                {!classifierCopy?.canEnable && (
+                  <p className="settings-detail" role="status">
+                    Ad removal is on, but classification is paused until Apple Intelligence is available.
+                  </p>
+                )}
               </>
             ) : (
-              <button className="ghost-btn" onClick={() => void enableAdRemoval()}>
+              <button
+                className="ghost-btn"
+                disabled={!classifierCopy?.canEnable}
+                onClick={() => void enableAdRemoval()}
+              >
                 Enable ad removal
               </button>
             )}
-            <p className="settings-detail">
-              On-device classifier: Apple Intelligence
+            <p className="settings-detail" role="status">
+              {classifierCopy?.status}
             </p>
+            {classifierCopy?.recovery && (
+              <p className="settings-detail">{classifierCopy.recovery}</p>
+            )}
             <p className="settings-detail settings-revision">
               Revision {adRemoval.model_revision}
             </p>

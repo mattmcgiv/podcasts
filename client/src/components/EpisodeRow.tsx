@@ -202,7 +202,7 @@ function adStageLabel(
       case "storage_limit":
         return "Paused · low storage";
       case "model_required":
-        return "Waiting for model";
+        return "Waiting for Apple Intelligence";
       case "low_power":
         return "Paused · low power";
       case "thermal_pressure":

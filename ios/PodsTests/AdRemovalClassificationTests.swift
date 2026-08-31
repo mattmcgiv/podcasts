@@ -1,9 +1,43 @@
 import CryptoKit
 import Darwin
+import FoundationModels
 import XCTest
 @testable import Pods
 
 final class AdRemovalClassificationTests: XCTestCase {
+    func testAvailabilitySnapshotMapsAppleSystemLanguageModelCases() {
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .available),
+            .available
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.deviceNotEligible)),
+            .unavailable(.deviceNotEligible)
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.appleIntelligenceNotEnabled)),
+            .unavailable(.appleIntelligenceNotEnabled)
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.from(systemAvailability: .unavailable(.modelNotReady)),
+            .unavailable(.modelNotReady)
+        )
+        XCTAssertEqual(AppleOnDeviceModelAvailability.available.downloadState, "ready")
+        XCTAssertEqual(AppleOnDeviceModelAvailability.unavailable(.modelNotReady).downloadState, "downloading")
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.unavailable(.appleIntelligenceNotEnabled).downloadState,
+            "apple_intelligence_disabled"
+        )
+        XCTAssertEqual(
+            AppleOnDeviceModelAvailability.unavailable(.deviceNotEligible).downloadState,
+            "device_not_eligible"
+        )
+        XCTAssertTrue(
+            AppleOnDeviceModelAvailability.unavailable(.deviceNotEligible).enableError
+                .contains("not available on this iPhone")
+        )
+    }
+
     func testShowNotesPromptLimitFitsOnDeviceContext() {
         XCTAssertEqual(AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes, 8_000)
         XCTAssertLessThanOrEqual(

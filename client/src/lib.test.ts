@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmtDate, fmtDuration, fmtRemaining, fmtTime, progressFraction } from "./lib";
+import { fmtDate, fmtDuration, fmtRemaining, fmtTime, onDeviceClassifierCopy, progressFraction } from "./lib";
 
 describe("fmtTime", () => {
   it("formats minutes and hours", () => {
@@ -47,5 +47,46 @@ describe("fmtRemaining / progressFraction", () => {
     expect(progressFraction({ duration_secs: 1800, position_secs: 900 })).toBe(0.5);
     expect(progressFraction({ duration_secs: 1800, position_secs: 9999 })).toBe(1);
     expect(progressFraction({ duration_secs: null, position_secs: 10 })).toBe(0);
+  });
+});
+
+describe("onDeviceClassifierCopy", () => {
+  it("allows enable only when Apple Intelligence is available", () => {
+    expect(onDeviceClassifierCopy({
+      classifier_available: true,
+      classifier_unavailable_reason: null,
+    })).toEqual({
+      status: "On-device classifier: Apple Intelligence is ready",
+      recovery: null,
+      canEnable: true,
+      shouldPoll: false,
+    });
+  });
+
+  it("explains each Apple unavailable reason and the recovery path", () => {
+    expect(onDeviceClassifierCopy({
+      classifier_available: false,
+      classifier_unavailable_reason: "device_not_eligible",
+    })).toMatchObject({
+      canEnable: false,
+      shouldPoll: false,
+      status: "Apple Intelligence is not available on this iPhone.",
+    });
+    expect(onDeviceClassifierCopy({
+      classifier_available: false,
+      classifier_unavailable_reason: "apple_intelligence_not_enabled",
+    })).toMatchObject({
+      canEnable: false,
+      shouldPoll: true,
+      recovery: expect.stringContaining("Apple Intelligence & Siri"),
+    });
+    expect(onDeviceClassifierCopy({
+      classifier_available: false,
+      classifier_unavailable_reason: "model_not_ready",
+    })).toMatchObject({
+      canEnable: false,
+      shouldPoll: true,
+      status: "Apple Intelligence is still downloading.",
+    });
   });
 });

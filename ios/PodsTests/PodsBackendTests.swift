@@ -319,7 +319,22 @@ final class PodsBackendTests: XCTestCase {
         let adRemovalArtifactStore: AdRemovalArtifactStore
     }
 
-    private func makeHarness(directorySearcher: PodcastDirectorySearching? = nil) throws -> Harness {
+    private final class StubOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
+        var availability: AppleOnDeviceModelAvailability
+
+        init(_ availability: AppleOnDeviceModelAvailability = .available) {
+            self.availability = availability
+        }
+
+        func currentAvailability() -> AppleOnDeviceModelAvailability {
+            availability
+        }
+    }
+
+    private func makeHarness(
+        directorySearcher: PodcastDirectorySearching? = nil,
+        modelAvailability: AppleOnDeviceModelAvailability = .available
+    ) throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -332,7 +347,8 @@ final class PodsBackendTests: XCTestCase {
             database: database,
             feedFetcher: fetcher,
             directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher(),
-            adRemovalArtifactStore: adRemovalArtifactStore
+            adRemovalArtifactStore: adRemovalArtifactStore,
+            onDeviceModelAvailability: StubOnDeviceAvailability(modelAvailability)
         )
         return Harness(
             backend: backend,
@@ -1170,6 +1186,8 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(settings.model_total_bytes, 0)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertTrue(settings.cloud_classifier_configured)
+        XCTAssertTrue(settings.classifier_available)
+        XCTAssertNil(settings.classifier_unavailable_reason)
         XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
 
         let enabled = try await call(
@@ -1184,6 +1202,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertNotNil(settings.enrollment_cutoff)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertEqual(settings.model_revision, "on-device")
+        XCTAssertTrue(settings.classifier_available)
 
         let existingID = try XCTUnwrap(harness.database.scalarInt64(
             "SELECT id FROM episodes WHERE guid = 'existing'"
@@ -1209,6 +1228,67 @@ final class PodsBackendTests: XCTestCase {
         let disabled = try await call(harness.backend, "POST", "/api/ad-removal/disable")
         XCTAssertEqual(disabled.statusCode, 200)
         XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
+    }
+
+    func testAdRemovalSettingsAndEnableReflectSystemLanguageModelAvailability() async throws {
+        let cases: [(AppleOnDeviceModelAvailability, String, String)] = [
+            (.unavailable(.deviceNotEligible), "device_not_eligible", "device_not_eligible"),
+            (.unavailable(.appleIntelligenceNotEnabled), "apple_intelligence_disabled", "apple_intelligence_not_enabled"),
+            (.unavailable(.modelNotReady), "downloading", "model_not_ready"),
+            (.unavailable(.unknown), "unavailable", "unknown")
+        ]
+        for (availability, downloadState, reason) in cases {
+            let harness = try makeHarness(modelAvailability: availability)
+            let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+                harness.backend,
+                "GET",
+                "/api/ad-removal/settings"
+            ))
+            XCTAssertFalse(settings.classifier_available)
+            XCTAssertFalse(settings.cloud_classifier_configured)
+            XCTAssertEqual(settings.model_download_state, downloadState)
+            XCTAssertEqual(settings.classifier_unavailable_reason, reason)
+            XCTAssertFalse(settings.enabled)
+
+            let enabled = try await call(
+                harness.backend,
+                "POST",
+                "/api/ad-removal/enable",
+                json: ["confirmed_bytes": 0]
+            )
+            XCTAssertEqual(enabled.statusCode, 422, downloadState)
+            let body = try JSONSerialization.jsonObject(with: enabled.body) as? [String: String]
+            XCTAssertEqual(body?["error"], availability.enableError)
+            XCTAssertNotEqual(
+                try harness.database.query(
+                    "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
+                    map: { sqliteString($0, 0) }
+                ).first,
+                "true",
+                downloadState
+            )
+        }
+    }
+
+    func testAdRemovalPrepareRejectsWhenSystemLanguageModelIsUnavailable() async throws {
+        let harness = try makeHarness(modelAvailability: .unavailable(.appleIntelligenceNotEnabled))
+        let feedURL = "https://feeds.example/unavailable-prepare.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "Unavailable",
+            items: [("Episode", "prep-1", "https://h.example/prep.mp3", Self.d1)]
+        ).utf8)
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": feedURL])
+        let episodeID = try XCTUnwrap(harness.database.scalarInt64(
+            "SELECT id FROM episodes WHERE guid = 'prep-1'"
+        ))
+
+        let prepared = try await call(
+            harness.backend,
+            "POST",
+            "/api/episodes/\(episodeID)/ad-removal/prepare"
+        )
+        XCTAssertEqual(prepared.statusCode, 422)
+        XCTAssertNil(try AdRemovalJobStore(database: harness.database).job(episodeID: episodeID))
     }
 
     func testAdRemovalLifecycleHandlersWakeAndStopRuntimeWork() async throws {
@@ -1268,7 +1348,8 @@ final class PodsBackendTests: XCTestCase {
             feedFetcher: harness.fetcher,
             directorySearcher: DisabledPodcastDirectorySearcher(),
             adRemovalArtifactStore: harness.adRemovalArtifactStore,
-            adRemovalDiagnostics: diagnostics
+            adRemovalDiagnostics: diagnostics,
+            onDeviceModelAvailability: StubOnDeviceAvailability(.available)
         )
         let feedURL = "https://feeds.example/data-controls.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
