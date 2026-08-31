@@ -165,6 +165,8 @@ protocol AppleOnDevicePromptResponding: AnyObject {
 enum AppleFoundationModelError: Error, Equatable {
     case unavailable
     case emptyResponse
+    case refused
+    case invalidStructuredOutput
 }
 
 enum AppleOnDeviceTask: Equatable {
@@ -285,12 +287,20 @@ final class AppleSystemLanguageModelResponder: AppleOnDevicePromptResponding {
         )
         switch task {
         case .classifyAds:
-            let response = try await session.respond(
-                to: prompt,
-                generating: AppleAdClassificationPayload.self,
-                options: options
-            )
-            return try AppleAdClassificationJSON.encode(response.content)
+            do {
+                let response = try await session.respond(
+                    to: prompt,
+                    generating: AppleAdClassificationPayload.self,
+                    options: options
+                )
+                return try AppleAdClassificationJSON.encode(response.content)
+            } catch LanguageModelSession.GenerationError.refusal(_, _) {
+                throw AppleFoundationModelError.refused
+            } catch LanguageModelSession.GenerationError.guardrailViolation(_) {
+                throw AppleFoundationModelError.refused
+            } catch LanguageModelSession.GenerationError.decodingFailure(_) {
+                throw AppleFoundationModelError.invalidStructuredOutput
+            }
         case .generateShowNotes:
             let response = try await session.respond(
                 to: prompt,
@@ -325,6 +335,7 @@ final class AppleFoundationAdClassifier: AdClassifier {
 
     private let responder: AppleOnDevicePromptResponding
     private let diagnostics: AdRemovalDiagnostics?
+    private let outputParser = AdClassifierOutputParser()
 
     init(
         responder: AppleOnDevicePromptResponding = AppleSystemLanguageModelResponder(task: .classifyAds),
@@ -339,11 +350,18 @@ final class AppleFoundationAdClassifier: AdClassifier {
             throw AdRemovalPipelinePause(reason: .modelRequired)
         }
         let started = Date()
-        let output: String
+        var output: String
         do {
             output = try await responder.respond(to: window.prompt)
+            _ = try outputParser.parse(output, expectedSegmentIDs: window.requestSegmentIDs)
         } catch AppleFoundationModelError.unavailable {
             throw AdRemovalPipelinePause(reason: .modelRequired)
+        } catch AppleFoundationModelError.refused {
+            output = try await classifySegmentsIndividually(window)
+        } catch AppleFoundationModelError.invalidStructuredOutput {
+            output = try await classifySegmentsIndividually(window)
+        } catch is AdClassifierOutputError {
+            output = try await classifySegmentsIndividually(window)
         }
         try? diagnostics?.record(
             eventName: "classifier_window_generated",
@@ -359,6 +377,59 @@ final class AppleFoundationAdClassifier: AdClassifier {
             ]
         )
         return output
+    }
+
+    /// Foundation Models can refuse a multi-segment prompt because of one small passage,
+    /// and structured generation can occasionally omit a label. Isolate each segment so
+    /// one refusal or malformed response cannot fail and restart the entire episode.
+    private func classifySegmentsIndividually(_ window: AdClassificationWindow) async throws -> String {
+        var labels: [[String: Any]] = []
+        labels.reserveCapacity(window.segments.count)
+
+        for (offset, segment) in window.segments.enumerated() {
+            try Task.checkCancellation()
+            let singletonPrompt = AdClassificationWindowBuilder.makePrompt(
+                segments: [segment],
+                corrections: window.corrections
+            )
+            let label: AdClassifierLabel
+            do {
+                let singletonOutput = try await responder.respond(to: singletonPrompt)
+                label = try outputParser.parse(
+                    singletonOutput,
+                    expectedSegmentIDs: ["s0"]
+                )[0]
+            } catch AppleFoundationModelError.unavailable {
+                throw AdRemovalPipelinePause(reason: .modelRequired)
+            } catch AppleFoundationModelError.refused {
+                label = conservativeContentLabel()
+            } catch AppleFoundationModelError.invalidStructuredOutput {
+                label = conservativeContentLabel()
+            } catch is AdClassifierOutputError {
+                label = conservativeContentLabel()
+            }
+            labels.append([
+                "segment_id": "s\(offset)",
+                "classification": label.classification.rawValue,
+                "confidence": label.confidence,
+                "reason": label.reason
+            ])
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: ["labels": labels])
+        guard let output = String(data: data, encoding: .utf8) else {
+            throw AppleFoundationModelError.emptyResponse
+        }
+        return output
+    }
+
+    private func conservativeContentLabel() -> AdClassifierLabel {
+        AdClassifierLabel(
+            segmentID: "s0",
+            classification: .content,
+            confidence: 0,
+            reason: "Apple Intelligence could not classify this segment; retained as content."
+        )
     }
 }
 

@@ -62,6 +62,22 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
+    private final class SequencedOnDeviceResponder: AppleOnDevicePromptResponding {
+        var isAvailable = true
+        private var results: [Result<String, Error>]
+        private(set) var prompts: [String] = []
+
+        init(results: [Result<String, Error>]) {
+            self.results = results
+        }
+
+        func respond(to prompt: String) async throws -> String {
+            prompts.append(prompt)
+            guard !results.isEmpty else { throw AppleFoundationModelError.emptyResponse }
+            return try results.removeFirst().get()
+        }
+    }
+
     private final class MutableOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
         var availability: AppleOnDeviceModelAvailability
 
@@ -595,6 +611,91 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertEqual(classifier.descriptor.quantization, "system")
     }
 
+    func testAppleClassifierIsolatesRefusedWindowAndRetainsRefusedSegmentAsContent() async throws {
+        let responder = SequencedOnDeviceResponder(results: [
+            .failure(AppleFoundationModelError.refused),
+            .success(#"{"labels":[{"segment_id":"s0","classification":"ad","confidence":0.96,"reason":"sponsor offer"}]}"#),
+            .failure(AppleFoundationModelError.refused)
+        ])
+        let segments = [
+            AdTranscriptSegment(id: "segment-0", index: 0, language: "en-US", startTime: 0, endTime: 10, text: "Buy now"),
+            AdTranscriptSegment(id: "segment-1", index: 1, language: "en-US", startTime: 10, endTime: 20, text: "Sensitive editorial passage")
+        ]
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: segments,
+            corrections: [],
+            prompt: AdClassificationWindowBuilder.makePrompt(segments: segments, corrections: []),
+            estimatedInputTokens: 100,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 4_000
+        )
+
+        let output = try await AppleFoundationAdClassifier(responder: responder).classify(window: window)
+        let labels = try AdClassifierOutputParser().parse(output, expectedSegmentIDs: ["s0", "s1"])
+
+        XCTAssertEqual(labels.map(\.classification), [.advertisement, .content])
+        XCTAssertEqual(labels.map(\.confidence), [0.96, 0])
+        XCTAssertEqual(responder.prompts.count, 3)
+    }
+
+    func testAppleClassifierRepairsIncompleteWindowWithPerSegmentResponses() async throws {
+        let singleton = #"{"labels":[{"segment_id":"s0","classification":"content","confidence":0.9,"reason":"editorial"}]}"#
+        let responder = SequencedOnDeviceResponder(results: [
+            .success(#"{"labels":[]}"#),
+            .success(singleton),
+            .success(singleton)
+        ])
+        let segments = [
+            AdTranscriptSegment(id: "segment-0", index: 0, language: "en-US", startTime: 0, endTime: 10, text: "One"),
+            AdTranscriptSegment(id: "segment-1", index: 1, language: "en-US", startTime: 10, endTime: 20, text: "Two")
+        ]
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: segments,
+            corrections: [],
+            prompt: AdClassificationWindowBuilder.makePrompt(segments: segments, corrections: []),
+            estimatedInputTokens: 100,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 4_000
+        )
+
+        let output = try await AppleFoundationAdClassifier(responder: responder).classify(window: window)
+        let labels = try AdClassifierOutputParser().parse(output, expectedSegmentIDs: ["s0", "s1"])
+
+        XCTAssertEqual(labels.map(\.classification), [.content, .content])
+        XCTAssertEqual(responder.prompts.count, 3)
+    }
+
+    func testAppleClassifierRepairsFoundationModelsDecodingFailurePerSegment() async throws {
+        let singleton = #"{"labels":[{"segment_id":"s0","classification":"ad","confidence":0.8,"reason":"promotion"}]}"#
+        let responder = SequencedOnDeviceResponder(results: [
+            .failure(AppleFoundationModelError.invalidStructuredOutput),
+            .success(singleton),
+            .failure(AppleFoundationModelError.invalidStructuredOutput)
+        ])
+        let segments = [
+            AdTranscriptSegment(id: "segment-0", index: 0, language: "en-US", startTime: 0, endTime: 10, text: "One"),
+            AdTranscriptSegment(id: "segment-1", index: 1, language: "en-US", startTime: 10, endTime: 20, text: "Two")
+        ]
+        let window = AdClassificationWindow(
+            index: 0,
+            segments: segments,
+            corrections: [],
+            prompt: AdClassificationWindowBuilder.makePrompt(segments: segments, corrections: []),
+            estimatedInputTokens: 100,
+            estimatedCorrectionTokens: 0,
+            maximumInputTokens: 4_000
+        )
+
+        let output = try await AppleFoundationAdClassifier(responder: responder).classify(window: window)
+        let labels = try AdClassifierOutputParser().parse(output, expectedSegmentIDs: ["s0", "s1"])
+
+        XCTAssertEqual(labels.map(\.classification), [.advertisement, .content])
+        XCTAssertEqual(labels.map(\.confidence), [0.8, 0])
+        XCTAssertEqual(responder.prompts.count, 3)
+    }
+
     private final class UnusedDownloader: AdRemovalAudioDownloading {
         func download(job: AdRemovalJob, sourceURL: URL) async throws -> AdRemovalAudioArtifact {
             throw AdRemovalPipelineError.unsupportedStage(.downloading)
@@ -882,6 +983,72 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertEqual(snapshot.rawClassifierOutput, response)
         XCTAssertTrue(snapshot.schemaValidationResult.contains("valid"))
         XCTAssertTrue(snapshot.skipManifest.contains("segment-1"))
+    }
+
+    func testClassificationPipelineResumesLargestCompatibleCheckpointedRun() async throws {
+        let harness = try makeClassifyingHarness()
+        let builder = AdClassificationWindowBuilder(limits: .init(
+            maximumContextTokens: 8_192,
+            reservedOutputTokens: 1_024,
+            correctionTokenBudget: 0,
+            maximumSegmentsPerWindow: 2,
+            overlapSegmentCount: 0
+        ))
+        let windows = try builder.makeWindows(
+            segments: harness.store.transcriptSegments(episodeID: harness.episodeID),
+            corrections: []
+        )
+        XCTAssertEqual(windows.count, 2)
+        let descriptor = FakeClassifier(responses: []).descriptor
+        let firstLabels = windows[0].segments.map {
+            AdClassifierLabel(
+                segmentID: $0.id,
+                classification: .content,
+                confidence: 0.9,
+                reason: "editorial"
+            )
+        }
+        try harness.store.recordClassificationEvidence(
+            AdClassificationEvidence(
+                runID: "checkpointed-run",
+                episodeID: harness.episodeID,
+                windowIndex: windows[0].index,
+                segmentIDs: windows[0].segmentIDs,
+                correctionIDs: [],
+                prompt: windows[0].prompt,
+                rawOutput: #"{"labels":[]}"#,
+                schemaValid: true,
+                validationError: nil,
+                labels: firstLabels,
+                descriptor: descriptor,
+                createdAt: 900
+            ),
+            jobID: harness.job.id
+        )
+        let response = #"{"labels":[{"segment_id":"s0","classification":"ad","confidence":0.9,"reason":"sponsor"},{"segment_id":"s1","classification":"content","confidence":0.9,"reason":"editorial"}]}"#
+        let classifier = FakeClassifier(responses: [.success(response)])
+        let executor = AdRemovalPipelineExecutor(
+            database: harness.database,
+            jobStore: harness.store,
+            artifactStore: harness.artifactStore,
+            audioDownloader: UnusedDownloader(),
+            classifier: classifier,
+            classificationWindowBuilder: builder
+        )
+
+        try await executor.execute(stage: .classifying, job: harness.job)
+
+        XCTAssertEqual(classifier.prompts.count, 1)
+        XCTAssertEqual(classifier.prompts.first, windows[1].prompt)
+        XCTAssertEqual(
+            try harness.store.job(id: harness.job.id)?.classificationRunID,
+            "checkpointed-run"
+        )
+        XCTAssertEqual(
+            try harness.store.classificationEvidence(episodeID: harness.episodeID)
+                .filter { $0.runID == "checkpointed-run" }.count,
+            2
+        )
     }
 
     func testMalformedClassificationPersistsInvalidEvidenceButNeverManifest() async throws {

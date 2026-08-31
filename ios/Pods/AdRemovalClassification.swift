@@ -200,7 +200,7 @@ struct AdClassificationWindowBuilder {
         return selected
     }
 
-    private static func makePrompt(
+    static func makePrompt(
         segments: [AdTranscriptSegment],
         corrections: [AdCorrection]
     ) -> String {
