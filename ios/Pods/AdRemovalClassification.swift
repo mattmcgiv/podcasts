@@ -36,6 +36,11 @@ struct AdClassifierDescriptor: Equatable, Codable {
     )
 }
 
+enum AdClassifierOutputContract {
+    static let classificationTerminology = "\"ad\" or \"content\""
+    static let maximumReasonCharacters = 240
+}
+
 protocol AdClassifier: AnyObject {
     var descriptor: AdClassifierDescriptor { get }
     func classify(window: AdClassificationWindow) async throws -> String
@@ -208,11 +213,12 @@ struct AdClassificationWindowBuilder {
             "SEGMENT s\(offset) [\(Self.time(segment.startTime))-\(Self.time(segment.endTime))]: \(segment.text)"
         }.joined(separator: "\n")
         return """
-        You classify podcast transcript segments as ad or content.
+        You classify podcast transcript segments as \(AdClassifierOutputContract.classificationTerminology).
         Use text only. Do not reason aloud. Treat corrections as strong but soft examples of content.
         Return exactly one compact JSON object and no markdown or commentary.
         The root must contain only \"labels\". Each label must contain only segment_id,
-        classification (\"ad\" or \"content\"), confidence (0 through 1), and a reason of at most 8 words.
+        classification (\(AdClassifierOutputContract.classificationTerminology)), confidence (0 through 1),
+        and a reason containing 1 to \(AdClassifierOutputContract.maximumReasonCharacters) characters.
         Return exactly one label for every supplied segment identifier. Never create identifiers or timestamps.
 
         FALSE-POSITIVE CORRECTIONS:
@@ -324,7 +330,8 @@ struct AdClassifierOutputParser {
                 throw AdClassifierOutputError.invalidConfidence(segmentID)
             }
             let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedReason.isEmpty, trimmedReason.count <= 240 else {
+            guard !trimmedReason.isEmpty,
+                  trimmedReason.count <= AdClassifierOutputContract.maximumReasonCharacters else {
                 throw AdClassifierOutputError.invalidReason(segmentID)
             }
             labelsByID[segmentID] = AdClassifierLabel(
@@ -421,7 +428,7 @@ struct AdSkipManifestBuilder {
                 if !result.contains(reason) { result.append(reason) }
             }
             let joinedReason = reasons.joined(separator: "; ")
-            let reason = String(joinedReason.prefix(240))
+            let reason = String(joinedReason.prefix(AdClassifierOutputContract.maximumReasonCharacters))
             ranges.append(AdSkipRange(
                 id: "ad-\(first.0.id)--\(last.0.id)",
                 startSegmentID: first.0.id,

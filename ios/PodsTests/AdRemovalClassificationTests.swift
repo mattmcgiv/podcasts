@@ -730,7 +730,18 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertLessThanOrEqual(window.estimatedCorrectionTokens, 90)
         XCTAssertTrue(window.prompt.contains("new-relevant"))
         XCTAssertFalse(window.prompt.contains("irrelevant"))
-        XCTAssertTrue(window.prompt.contains("at most 8 words"))
+        XCTAssertTrue(window.prompt.contains("as \"ad\" or \"content\""))
+        XCTAssertTrue(window.prompt.contains("reason containing 1 to 240 characters"))
+        XCTAssertFalse(window.prompt.contains("8 words"))
+    }
+
+    func testAppleClassifierInstructionsMatchOutputContract() {
+        let instructions = AppleSystemLanguageModelResponder.adClassificationInstructions
+
+        XCTAssertTrue(instructions.contains("as \"ad\" or \"content\""))
+        XCTAssertTrue(instructions.contains("reason must contain 1 to 240 characters"))
+        XCTAssertFalse(instructions.contains("advertising or editorial"))
+        XCTAssertFalse(instructions.contains("8 words"))
     }
 
     func testStructuredOutputParserAcceptsOnlyCompleteKnownSegmentLabels() throws {
@@ -754,6 +765,28 @@ final class AdRemovalClassificationTests: XCTestCase {
                 reason: "promo code and sponsor call to action"
             )
         ])
+    }
+
+    func testStructuredOutputParserEnforcesDocumentedReasonCharacterLimit() throws {
+        let parser = AdClassifierOutputParser()
+        let acceptedReason = String(
+            repeating: "a",
+            count: AdClassifierOutputContract.maximumReasonCharacters
+        )
+        let rejectedReason = acceptedReason + "a"
+
+        let accepted = try parser.parse(
+            #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":1,"reason":"\#(acceptedReason)"}]}"#,
+            expectedSegmentIDs: ["segment-0"]
+        )
+        XCTAssertEqual(accepted.first?.reason.count, 240)
+
+        XCTAssertThrowsError(try parser.parse(
+            #"{"labels":[{"segment_id":"segment-0","classification":"content","confidence":1,"reason":"\#(rejectedReason)"}]}"#,
+            expectedSegmentIDs: ["segment-0"]
+        )) { error in
+            XCTAssertEqual(error as? AdClassifierOutputError, .invalidReason("segment-0"))
+        }
     }
 
     func testStructuredOutputParserAcceptsOneOuterJSONFenceOrJSONStringWrapper() throws {

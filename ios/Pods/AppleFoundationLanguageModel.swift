@@ -252,6 +252,14 @@ enum AppleShowNotesJSON {
 /// Live adapter for Apple's on-device SystemLanguageModel (Foundation Models).
 /// Each call uses a fresh session so classification windows do not share context.
 final class AppleSystemLanguageModelResponder: AppleOnDevicePromptResponding {
+    static let adClassificationInstructions = """
+    You classify podcast transcript segments as \(AdClassifierOutputContract.classificationTerminology).
+    Use text only. Treat corrections as strong but soft examples of content.
+    Each reason must contain 1 to \(AdClassifierOutputContract.maximumReasonCharacters) characters.
+    Return exactly one label for every supplied segment identifier.
+    Never invent identifiers or timestamps.
+    """
+
     let task: AppleOnDeviceTask
 
     init(task: AppleOnDeviceTask) {
@@ -296,12 +304,7 @@ final class AppleSystemLanguageModelResponder: AppleOnDevicePromptResponding {
     private var instructions: String {
         switch task {
         case .classifyAds:
-            return """
-            You classify podcast transcript segments as advertising or editorial content.
-            Use text only. Treat corrections as strong but soft examples of content.
-            Return exactly one label for every supplied segment identifier.
-            Never invent identifiers or timestamps.
-            """
+            return Self.adClassificationInstructions
         case .generateShowNotes:
             return EpisodeShowNotesPrompt.systemMessage
         }
