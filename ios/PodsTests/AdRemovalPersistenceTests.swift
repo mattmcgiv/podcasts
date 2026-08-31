@@ -949,7 +949,7 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(callsAfterRelease, 2)
     }
 
-    func testShowNotesGenerationRejectsAnAdCorrectionMadeWhileDeepSeekIsRunning() async throws {
+    func testShowNotesGenerationRejectsAnAdCorrectionMadeWhileGenerationIsRunning() async throws {
         let harness = try makeHarness()
         try setAdRemovalEnabled(harness.database)
         let jobStore = AdRemovalJobStore(database: harness.database, now: { 1_000 })

@@ -1047,7 +1047,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(raw.contains("notes_html"), "batch statuses must not serialize notes_html")
     }
 
-    func testEpisodeDetailExposesOnlyEnabledDeepSeekAdMarkers() async throws {
+    func testEpisodeDetailExposesOnlyEnabledAdMarkers() async throws {
         let harness = try makeHarness()
         let prepared = try await prepareClassifyingEpisode(harness, guid: "chapter-ad-markers")
         try prepared.store.replaceTranscriptSegments(episodeID: prepared.episodeID, segments: [
@@ -1065,7 +1065,7 @@ final class PodsBackendTests: XCTestCase {
                 endTime: 68,
                 confidence: 0.98,
                 reason: "sponsor read",
-                classifierVersion: "deepseek-test",
+                classifierVersion: "apple-foundation-test",
                 promptVersion: "prompt-v1",
                 createdAt: 1_000,
                 disabled: false
@@ -1078,7 +1078,7 @@ final class PodsBackendTests: XCTestCase {
                 endTime: 110,
                 confidence: 0.95,
                 reason: "corrected sponsor read",
-                classifierVersion: "deepseek-test",
+                classifierVersion: "apple-foundation-test",
                 promptVersion: "prompt-v1",
                 createdAt: 1_000,
                 disabled: true
@@ -1165,46 +1165,25 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertFalse(settings.enabled)
         XCTAssertNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_revision, AdModelManifest.qwen3OneSevenBFourBitV1.revision)
-        XCTAssertEqual(settings.model_total_bytes, AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount)
+        XCTAssertEqual(settings.model_repository, AdClassifierDescriptor.appleSystemLanguageModelV1.modelID)
+        XCTAssertEqual(settings.model_revision, AdClassifierDescriptor.appleSystemLanguageModelV1.modelRevision)
+        XCTAssertEqual(settings.model_total_bytes, 0)
+        XCTAssertEqual(settings.model_download_state, "ready")
+        XCTAssertTrue(settings.cloud_classifier_configured)
         XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
-
-        try harness.database.execute(
-            "INSERT INTO settings (key, value) VALUES ('ad_removal_model_download_state', 'ready'), ('ad_removal_model_downloaded_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [.text(String(AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount))]
-        )
-        settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
-            harness.backend,
-            "GET",
-            "/api/ad-removal/settings"
-        ))
-        XCTAssertEqual(settings.model_downloaded_bytes, 0, "ready state must reflect files actually present")
-        try harness.database.execute(
-            "UPDATE settings SET value = 'not_downloaded' WHERE key = 'ad_removal_model_download_state'"
-        )
-        try harness.database.execute(
-            "UPDATE settings SET value = '0' WHERE key = 'ad_removal_model_downloaded_bytes'"
-        )
-
-        let wrongConsent = try await call(
-            harness.backend,
-            "POST",
-            "/api/ad-removal/enable",
-            json: ["confirmed_bytes": 1]
-        )
-        XCTAssertEqual(wrongConsent.statusCode, 422)
 
         let enabled = try await call(
             harness.backend,
             "POST",
             "/api/ad-removal/enable",
-            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
+            json: ["confirmed_bytes": 0]
         )
         XCTAssertEqual(enabled.statusCode, 202)
         settings = try decode(AdRemovalSettingsPayload.self, from: enabled)
         XCTAssertTrue(settings.enabled)
         XCTAssertNotNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_download_state, "consented")
+        XCTAssertEqual(settings.model_download_state, "ready")
+        XCTAssertEqual(settings.model_revision, "on-device")
 
         let existingID = try XCTUnwrap(harness.database.scalarInt64(
             "SELECT id FROM episodes WHERE guid = 'existing'"
@@ -1243,14 +1222,9 @@ final class PodsBackendTests: XCTestCase {
         let episodeID = try XCTUnwrap(harness.database.scalarInt64(
             "SELECT id FROM episodes WHERE guid = 'runtime-1'"
         ))
-        let modelRequested = expectation(description: "pinned model requested")
         let pipelineRequested = expectation(description: "pipeline requested")
-        pipelineRequested.expectedFulfillmentCount = 2
+        pipelineRequested.expectedFulfillmentCount = 3
         let runtimeStopped = expectation(description: "runtime stopped")
-        harness.backend.setAdRemovalModelDownloadRequestHandler { manifest in
-            XCTAssertEqual(manifest, .qwen3OneSevenBFourBitV1)
-            modelRequested.fulfill()
-        }
         harness.backend.setAdRemovalRunRequestHandler {
             pipelineRequested.fulfill()
         }
@@ -1262,7 +1236,7 @@ final class PodsBackendTests: XCTestCase {
             harness.backend,
             "POST",
             "/api/ad-removal/enable",
-            json: ["confirmed_bytes": AdModelManifest.qwen3OneSevenBFourBitV1.totalByteCount]
+            json: ["confirmed_bytes": 0]
         )
         _ = try await call(
             harness.backend,
@@ -1279,7 +1253,7 @@ final class PodsBackendTests: XCTestCase {
         _ = try await call(harness.backend, "POST", "/api/refresh")
         _ = try await call(harness.backend, "POST", "/api/ad-removal/disable")
 
-        await fulfillment(of: [modelRequested, pipelineRequested, runtimeStopped], timeout: 1)
+        await fulfillment(of: [pipelineRequested, runtimeStopped], timeout: 1)
     }
 
     func testAdRemovalSettingsCanResetCorrectionsExportDiagnosticsAndDeleteFeatureData() async throws {
@@ -1366,8 +1340,9 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: modelMarker.path))
         let settings = try decode(AdRemovalSettingsPayload.self, from: cleaned)
         XCTAssertFalse(settings.enabled)
-        XCTAssertEqual(settings.model_download_state, "not_downloaded")
+        XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertEqual(settings.model_downloaded_bytes, 0)
+        XCTAssertEqual(settings.model_repository, "apple/system-language-model")
     }
 
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {

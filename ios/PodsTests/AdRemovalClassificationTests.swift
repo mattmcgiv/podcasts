@@ -4,20 +4,28 @@ import XCTest
 @testable import Pods
 
 final class AdRemovalClassificationTests: XCTestCase {
-    func testShowNotesPromptLimitSupportsLongEpisodes() {
-        XCTAssertEqual(DeepSeekEpisodeShowNotesGenerator.maximumPromptBytes, 600_000)
+    func testShowNotesPromptLimitFitsOnDeviceContext() {
+        XCTAssertEqual(AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes, 8_000)
+        XCTAssertLessThanOrEqual(
+            AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes,
+            AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens * 4
+        )
     }
 
-    private final class StubDeepSeekCredentialStore: DeepSeekCredentialStoring {
-        private var apiKey: String?
+    private final class StubOnDeviceResponder: AppleOnDevicePromptResponding {
+        var isAvailable: Bool
+        var prompt: String?
+        var result: Result<String, Error>
 
-        init(apiKey: String? = "test-api-key") {
-            self.apiKey = apiKey
+        init(isAvailable: Bool = true, result: Result<String, Error>) {
+            self.isAvailable = isAvailable
+            self.result = result
         }
 
-        var hasAPIKey: Bool { !(apiKey ?? "").isEmpty }
-        func readAPIKey() throws -> String? { apiKey }
-        func saveAPIKey(_ value: String) throws { apiKey = value }
+        func respond(to prompt: String) async throws -> String {
+            self.prompt = prompt
+            return try result.get()
+        }
     }
 
     func testShowNotesPromptAndParserKeepTimestampsLocalToKnownSegments() throws {
@@ -103,30 +111,13 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
-    func testShowNotesGeneratorUsesSystemRoleAndAcceptsOnlyCompleteBoundedResponse() async throws {
-        var capturedRequest: URLRequest?
-        let responseContent = """
-        {"chapters":[{"segment_id":"s0","title":"Opening","summary":"The discussion begins."}]}
-        """
-        let responseData = try JSONSerialization.data(withJSONObject: [
-            "choices": [[
-                "finish_reason": "stop",
-                "message": ["content": responseContent]
-            ]]
-        ])
-        let transport = DeepSeekEpisodeShowNotesGenerator.Transport { request in
-            capturedRequest = request
-            return (responseData, HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["content-type": "application/json"]
-            )!)
-        }
-        let generator = DeepSeekEpisodeShowNotesGenerator(
-            credentialStore: StubDeepSeekCredentialStore(),
-            transport: transport
-        )
+    func testShowNotesGeneratorUsesOnDeviceResponderAndFitsPrompt() async throws {
+        let responder = StubOnDeviceResponder(result: .success(
+            """
+            {"chapters":[{"segment_id":"s0","title":"Opening","summary":"The discussion begins."}]}
+            """
+        ))
+        let generator = AppleFoundationEpisodeShowNotesGenerator(responder: responder)
         let segment = AdTranscriptSegment(
             id: "segment-opening",
             index: 0,
@@ -143,22 +134,41 @@ final class AdRemovalClassificationTests: XCTestCase {
             title: "Opening",
             summary: "The discussion begins."
         )])
-        let body = try XCTUnwrap(capturedRequest?.httpBody)
-        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
-        XCTAssertEqual(messages.count, 2)
-        XCTAssertEqual(messages[0]["role"] as? String, "system")
-        XCTAssertEqual(messages[0]["content"] as? String, EpisodeShowNotesPrompt.systemMessage)
-        XCTAssertEqual(messages[1]["role"] as? String, "user")
-        let userMessage = try XCTUnwrap(messages[1]["content"] as? String)
-        XCTAssertTrue(userMessage.hasPrefix("BEGIN_UNTRUSTED_TRANSCRIPT_DATA"))
+        let prompt = try XCTUnwrap(responder.prompt)
+        XCTAssertTrue(prompt.hasPrefix("BEGIN_UNTRUSTED_TRANSCRIPT_DATA"))
+        XCTAssertLessThanOrEqual(prompt.utf8.count, AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes)
+    }
+
+    func testShowNotesPromptFittingKeepsAPrefixInsideTheOnDeviceBudget() throws {
+        let segments = (0..<80).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: String(repeating: "word ", count: 40)
+            )
+        }
+
+        XCTAssertThrowsError(try EpisodeShowNotesPrompt.make(
+            segments: segments,
+            maximumBytes: AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
+        ))
+        let fitted = try EpisodeShowNotesPrompt.makeFitting(
+            segments: segments,
+            maximumBytes: AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
+        )
+        XCTAssertFalse(fitted.segments.isEmpty)
+        XCTAssertLessThan(fitted.segments.count, segments.count)
+        XCTAssertEqual(fitted.segments.first?.id, "segment-0")
         XCTAssertLessThanOrEqual(
-            EpisodeShowNotesPrompt.systemMessage.utf8.count + userMessage.utf8.count,
-            DeepSeekEpisodeShowNotesGenerator.maximumPromptBytes
+            fitted.prompt.utf8.count,
+            AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes
         )
     }
 
-    func testShowNotesGeneratorRejectsIncompleteOrOversizedResponse() async throws {
+    func testShowNotesGeneratorRejectsInvalidStructuredResponse() async throws {
         let segment = AdTranscriptSegment(
             id: "segment-opening",
             index: 0,
@@ -167,46 +177,22 @@ final class AdRemovalClassificationTests: XCTestCase {
             endTime: 5,
             text: "Opening"
         )
-        let incompleteData = try JSONSerialization.data(withJSONObject: [
-            "choices": [[
-                "finish_reason": "length",
-                "message": [
-                    "content": "{\"chapters\":[{\"segment_id\":\"s0\",\"title\":\"Opening\",\"summary\":\"Summary.\"}]}"
-                ]
-            ]]
-        ])
-        let responses = [
-            incompleteData,
-            Data(repeating: 0x20, count: DeepSeekEpisodeShowNotesGenerator.maximumResponseBytes + 1)
-        ]
+        let generator = AppleFoundationEpisodeShowNotesGenerator(
+            responder: StubOnDeviceResponder(result: .success("{\"chapters\":[]}"))
+        )
 
-        for data in responses {
-            let generator = DeepSeekEpisodeShowNotesGenerator(
-                credentialStore: StubDeepSeekCredentialStore(),
-                transport: DeepSeekEpisodeShowNotesGenerator.Transport { request in
-                    (data, HTTPURLResponse(
-                        url: try XCTUnwrap(request.url),
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: ["content-type": "application/json"]
-                    )!)
-                }
-            )
-            do {
-                _ = try await generator.generate(segments: [segment])
-                XCTFail("Expected the incomplete or oversized response to be rejected")
-            } catch let error as DeepSeekClassifierError {
-                XCTAssertEqual(error, .invalidResponse)
-            }
+        do {
+            _ = try await generator.generate(segments: [segment])
+            XCTFail("Expected invalid structured output to be rejected")
+        } catch let error as EpisodeShowNotesError {
+            XCTAssertEqual(error, .invalidResponse)
         }
     }
 
-    func testDeepSeekClassifierPausesWhenAPIKeyIsMissing() async throws {
-        let transport = DeepSeekAdClassifier.Transport { _ in
-            XCTFail("Transport should not run without an API key")
-            throw DeepSeekClassifierError.invalidResponse
-        }
-        let classifier = DeepSeekAdClassifier(apiKey: "   ", transport: transport)
+    func testAppleClassifierPausesWhenOnDeviceModelIsUnavailable() async throws {
+        let classifier = AppleFoundationAdClassifier(
+            responder: StubOnDeviceResponder(isAvailable: false, result: .success(#"{"labels":[]}"#))
+        )
         let window = AdClassificationWindow(
             index: 0,
             segments: [],
@@ -214,7 +200,7 @@ final class AdRemovalClassificationTests: XCTestCase {
             prompt: "classify this",
             estimatedInputTokens: 3,
             estimatedCorrectionTokens: 0,
-            maximumInputTokens: 8_000
+            maximumInputTokens: 4_000
         )
 
         do {
@@ -225,19 +211,36 @@ final class AdRemovalClassificationTests: XCTestCase {
         }
     }
 
-    func testDeepSeekClassifierSendsNonThinkingJSONRequestAndReturnsMessageContent() async throws {
-        var captured: URLRequest?
-        let transport = DeepSeekAdClassifier.Transport { request in
-            captured = request
-            let body = #"{"choices":[{"message":{"content":"{\"labels\":[]}"}}]}"#
-            return (Data(body.utf8), HTTPURLResponse(
-                url: try XCTUnwrap(request.url),
-                statusCode: 200,
-                httpVersion: nil,
-                headerFields: ["content-type": "application/json"]
-            )!)
-        }
-        let classifier = DeepSeekAdClassifier(apiKey: "secret-test-key", transport: transport)
+    func testAppleClassificationJSONUsesParserSegmentKeys() throws {
+        let payload = AppleAdClassificationPayload(
+            labels: [
+                AppleAdClassificationLabel(
+                    segmentID: "s0",
+                    classification: .content,
+                    confidence: 0.91,
+                    reason: "editorial discussion"
+                ),
+                AppleAdClassificationLabel(
+                    segmentID: "s1",
+                    classification: .ad,
+                    confidence: 0.98,
+                    reason: "sponsor offer"
+                )
+            ]
+        )
+
+        let parsed = try AdClassifierOutputParser().parse(
+            try AppleAdClassificationJSON.encode(payload),
+            expectedSegmentIDs: ["s0", "s1"]
+        )
+
+        XCTAssertEqual(parsed.map(\.classification), [.content, .advertisement])
+        XCTAssertEqual(parsed.map(\.segmentID), ["s0", "s1"])
+    }
+
+    func testAppleClassifierReturnsOnDeviceOutputAndUsesSystemDescriptor() async throws {
+        let responder = StubOnDeviceResponder(result: .success(#"{"labels":[]}"#))
+        let classifier = AppleFoundationAdClassifier(responder: responder)
         let window = AdClassificationWindow(
             index: 0,
             segments: [],
@@ -245,21 +248,16 @@ final class AdRemovalClassificationTests: XCTestCase {
             prompt: "classify this",
             estimatedInputTokens: 3,
             estimatedCorrectionTokens: 0,
-            maximumInputTokens: 8_000
+            maximumInputTokens: 4_000
         )
 
         let output = try await classifier.classify(window: window)
 
         XCTAssertEqual(output, #"{"labels":[]}"#)
-        XCTAssertEqual(captured?.url?.absoluteString, "https://api.deepseek.com/chat/completions")
-        XCTAssertEqual(captured?.value(forHTTPHeaderField: "Authorization"), "Bearer secret-test-key")
-        let json = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: try XCTUnwrap(captured?.httpBody)) as? [String: Any]
-        )
-        XCTAssertEqual(json["model"] as? String, "deepseek-v4-pro")
-        XCTAssertEqual((json["thinking"] as? [String: String])?["type"], "disabled")
-        XCTAssertEqual((json["response_format"] as? [String: String])?["type"], "json_object")
-        XCTAssertEqual(json["max_tokens"] as? Int, 8_192)
+        XCTAssertEqual(responder.prompt, "classify this")
+        XCTAssertEqual(classifier.descriptor, AdClassifierDescriptor.appleSystemLanguageModelV1)
+        XCTAssertEqual(classifier.descriptor.modelID, "apple/system-language-model")
+        XCTAssertEqual(classifier.descriptor.quantization, "system")
     }
 
     private final class UnusedDownloader: AdRemovalAudioDownloading {
@@ -337,8 +335,8 @@ final class AdRemovalClassificationTests: XCTestCase {
         XCTAssertTrue(windows.allSatisfy { $0.estimatedInputTokens <= $0.maximumInputTokens })
     }
 
-    func testProductionWindowUsesCloudSizedBatchAndShortRequestIDs() throws {
-        let segments = (0..<70).map { index in
+    func testProductionWindowUsesOnDeviceSizedBatchAndShortRequestIDs() throws {
+        let segments = (0..<20).map { index in
             AdTranscriptSegment(
                 id: "segment-canonical-\(index)",
                 index: index,
@@ -352,12 +350,17 @@ final class AdRemovalClassificationTests: XCTestCase {
         let windows = try AdClassificationWindowBuilder(limits: .production)
             .makeWindows(segments: segments, corrections: [])
 
-        XCTAssertEqual(windows.first?.segments.count, 64)
+        XCTAssertEqual(AdClassificationLimits.production.maximumSegmentsPerWindow, 8)
+        XCTAssertEqual(AdClassificationLimits.production.overlapSegmentCount, 2)
+        XCTAssertEqual(windows.first?.segments.count, 8)
         XCTAssertEqual(windows.first?.requestSegmentIDs.first, "s0")
-        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s63")
+        XCTAssertEqual(windows.first?.requestSegmentIDs.last, "s7")
         XCTAssertTrue(windows.first?.prompt.contains("SEGMENT s0 ") == true)
         XCTAssertFalse(windows.first?.prompt.contains("SEGMENT segment-canonical-0 ") == true)
-        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-60")
+        XCTAssertEqual(windows[1].segments.first?.id, "segment-canonical-6")
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 8), 1)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 9), 2)
+        XCTAssertEqual(AdClassificationLimits.production.totalWindows(segmentCount: 20), 3)
     }
 
     func testCorrectionSelectionIsRelevantNewestFirstAndBounded() throws {

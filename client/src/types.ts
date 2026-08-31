@@ -50,7 +50,7 @@ export interface EpisodeAdMarker {
 }
 
 export interface EpisodeShowNote {
-  /** Stable transcript segment identifier chosen by DeepSeek and validated by Swift. */
+  /** Stable transcript segment identifier chosen by the on-device classifier and validated by Swift. */
   id: string;
   /** Authoritative playback time in seconds, resolved locally from the transcript. */
   start_time: number;

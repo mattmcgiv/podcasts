@@ -75,7 +75,6 @@ final class PodsBackend: PlaybackProgressRecording {
     private let adRemovalFileCleanup: AdRemovalFileCleanup?
     private let adRemovalArtifactStore: AdRemovalArtifactStore?
     private let adRemovalDiagnostics: AdRemovalDiagnostics?
-    private let deepSeekCredentialStore: DeepSeekCredentialStoring
     private let episodeShowNotesStore: EpisodeShowNotesStore
     private let episodeShowNotesService: EpisodeShowNotesService?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
@@ -90,7 +89,6 @@ final class PodsBackend: PlaybackProgressRecording {
         directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
-        deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore(),
         episodeShowNotesService: EpisodeShowNotesService? = nil
     ) {
         self.database = database
@@ -98,7 +96,6 @@ final class PodsBackend: PlaybackProgressRecording {
         self.directorySearcher = directorySearcher
         self.adRemovalArtifactStore = adRemovalArtifactStore
         self.adRemovalDiagnostics = adRemovalDiagnostics
-        self.deepSeekCredentialStore = deepSeekCredentialStore
         self.episodeShowNotesStore = EpisodeShowNotesStore(database: database)
         self.episodeShowNotesService = episodeShowNotesService
         self.adRemovalFileCleanup = adRemovalArtifactStore.map {
@@ -340,16 +337,6 @@ final class PodsBackend: PlaybackProgressRecording {
         if path == "/api/ad-removal/settings", request.method == "GET" {
             return .json(try adRemovalSettings())
         }
-        if path == "/api/ad-removal/deepseek-key", request.method == "PUT" {
-            let body = try request.jsonObject()
-            guard let apiKey = body["api_key"] as? String else {
-                throw PodsBackendError.invalid("api_key is required")
-            }
-            try deepSeekCredentialStore.saveAPIKey(apiKey)
-            try AdRemovalJobStore(database: database).clearBlockingReasons([.modelRequired])
-            if let adRemovalRunRequestHandler { Task { await adRemovalRunRequestHandler() } }
-            return .json(try adRemovalSettings())
-        }
         if path == "/api/ad-removal/statuses", request.method == "GET" {
             return .json(try adRemovalStatuses(request: request))
         }
@@ -359,9 +346,7 @@ final class PodsBackend: PlaybackProgressRecording {
                 throw PodsBackendError.invalid("confirmed_bytes is required")
             }
             let settings = try enableAdRemoval(confirmedBytes: confirmedBytes)
-            if let adRemovalModelDownloadRequestHandler {
-                Task { await adRemovalModelDownloadRequestHandler(.qwen3OneSevenBFourBitV1) }
-            }
+            if let adRemovalRunRequestHandler { Task { await adRemovalRunRequestHandler() } }
             return .json(settings, statusCode: 202)
         }
         if path == "/api/ad-removal/disable", request.method == "POST" {
@@ -767,8 +752,8 @@ final class PodsBackend: PlaybackProgressRecording {
         CASE WHEN j.stage = 'classifying' THEN (
             CASE
                 WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
-                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
-                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 8 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 8 + 5) / 6
             END
         ) ELSE NULL END AS total_windows
         FROM episodes e JOIN podcasts p ON p.id = e.podcast_id
@@ -821,15 +806,6 @@ final class PodsBackend: PlaybackProgressRecording {
 
     private func adRemovalSettings() throws -> AdRemovalSettingsPayload {
         let values = try settingValues()
-        let manifest = AdModelManifest.qwen3OneSevenBFourBitV1
-        let modelDownloadState = values["ad_removal_model_download_state"] ?? "not_downloaded"
-        let modelBytesOnDisk = try modelDownloadedBytes(manifest: manifest)
-        let modelDownloadedBytes = modelDownloadState == "ready"
-            ? modelBytesOnDisk
-            : max(
-                modelBytesOnDisk,
-                Int64(values["ad_removal_model_downloaded_bytes"] ?? "") ?? 0
-            )
         let corrections = try database.query(
             """
             SELECT p.id, p.title, COUNT(c.id)
@@ -845,15 +821,16 @@ final class PodsBackend: PlaybackProgressRecording {
                 count: sqlite3_column_int64(statement, 2)
             )
         }
+        let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1
         return AdRemovalSettingsPayload(
             enabled: values["ad_removal_enabled"] == "true",
             enrollment_cutoff: values["ad_removal_enrollment_cutoff"].flatMap(Int64.init),
-            cloud_classifier_configured: deepSeekCredentialStore.hasAPIKey,
-            model_repository: "deepseek/deepseek-v4-pro",
-            model_revision: "api",
+            cloud_classifier_configured: true,
+            model_repository: descriptor.modelID,
+            model_revision: descriptor.modelRevision,
             model_total_bytes: 0,
             model_downloaded_bytes: 0,
-            model_download_state: deepSeekCredentialStore.hasAPIKey ? "ready" : "api_key_required",
+            model_download_state: "ready",
             episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
@@ -925,8 +902,8 @@ final class PodsBackend: PlaybackProgressRecording {
         CASE WHEN j.stage = 'classifying' THEN (
             CASE
                 WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
-                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
-                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 8 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 8 + 5) / 6
             END
         ) ELSE NULL END AS total_windows
         FROM episodes e
@@ -954,14 +931,17 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     private func enableAdRemoval(confirmedBytes: Int64) throws -> AdRemovalSettingsPayload {
-        guard deepSeekCredentialStore.hasAPIKey else {
-            throw PodsBackendError.invalid("DeepSeek API key is required")
-        }
+        // confirmed_bytes remains in the API for older clients. The on-device
+        // Apple Intelligence model is OS-managed, so no download consent is required.
+        _ = confirmedBytes
         let values = try settingValues()
         let cutoff = values["ad_removal_enrollment_cutoff"] ?? String(nowUnix())
+        let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1
         try database.withTransaction {
             try setSetting(key: "ad_removal_enabled", value: "true")
             try setSetting(key: "ad_removal_enrollment_cutoff", value: cutoff)
+            try setSetting(key: "ad_removal_model_repository", value: descriptor.modelID)
+            try setSetting(key: "ad_removal_model_revision", value: descriptor.modelRevision)
             try setSetting(key: "ad_removal_model_download_state", value: "ready")
         }
         try? adRemovalDiagnostics?.record(
@@ -969,7 +949,7 @@ final class PodsBackend: PlaybackProgressRecording {
             severity: .notice,
             fields: [
                 "cutoff": cutoff,
-                "classifier": "deepseek-v4-pro"
+                "classifier": descriptor.modelID
             ]
         )
         return try adRemovalSettings()
@@ -986,17 +966,6 @@ final class PodsBackend: PlaybackProgressRecording {
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             [.text(key), .text(value)]
         )
-    }
-
-    private func modelDownloadedBytes(manifest: AdModelManifest) throws -> Int64 {
-        guard let adRemovalArtifactStore else { return 0 }
-        let modelStore = try AdModelAssetStore(artifactStore: adRemovalArtifactStore)
-        var total: Int64 = 0
-        for file in manifest.files {
-            let url = try modelStore.fileURL(for: file, manifest: manifest)
-            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        }
-        return total
     }
 
     private func resetAdRemovalCorrections(podcastID: Int64) throws {

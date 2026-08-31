@@ -10,7 +10,7 @@ No discovery feed. No recommendations. Your subscriptions, unplayed episodes fir
 - **Search in Shows** for Podcast Index directory results and your local episodes (search is not a separate tab)
 - **Native feed refresh** on the iPhone (foreground catch-up plus opportunistic background refresh; manual refresh always works)
 - **Playback** with scrubber, skip back/forward, speeds through 3×, autoplay next, and mini player
-- **On-device ad removal** (optional): download audio, local speech transcription, DeepSeek classification of ad ranges, automatic skip during playback with undo
+- **On-device ad removal** (optional): download audio, local speech transcription, Apple Intelligence classification of ad ranges, automatic skip during playback with undo
 - **Generated show notes / chapters** from the episode transcript when ad-removal processing is ready
 - **Play on Mac** via the optional **Pods Speaker** menu-bar app (LAN cast, not AirPlay; progress saves on the phone)
 - **Library tools**: subscribe by search or RSS URL, OPML import/export, unsubscribe
@@ -97,9 +97,8 @@ Without keys, local episode search still works. Directory subscribe-by-search re
 
 Ad removal is off by default. In Settings:
 
-1. Save a DeepSeek API key (transcript text goes to DeepSeek for classification and show notes; audio stays on the phone).
-2. Enable ad removal and accept the model download when prompted.
-3. New subscribed episodes after the enrollment cutoff prepare in the background. Existing episodes can use **Prepare ad-free**.
+1. Enable ad removal. Classification and show notes use Apple Intelligence on this iPhone; no API key or model download is required.
+2. New subscribed episodes after the enrollment cutoff prepare in the background. Existing episodes can use **Prepare ad-free**.
 
 Details, storage rules, and acceptance criteria: `docs/ad-removal-design.md` and `docs/ad-removal-v1-acceptance.md`.
 

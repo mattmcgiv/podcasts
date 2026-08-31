@@ -79,7 +79,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             startupDatabase = database
             PodsDebugLog("Database summary \(Self.databaseSummary(database))")
             let artifactStore = try AdRemovalArtifactStore.applicationDefault()
-            let deepSeekCredentialStore = DeepSeekKeychainStore()
             let modelStore = try AdModelAssetStore(artifactStore: artifactStore)
             let cleanup = AdRemovalFileCleanup(
                 database: database,
@@ -90,8 +89,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let jobStore = AdRemovalJobStore(database: database)
             let episodeShowNotesService = EpisodeShowNotesService(
                 database: database,
-                generator: DeepSeekEpisodeShowNotesGenerator(
-                    credentialStore: deepSeekCredentialStore,
+                generator: AppleFoundationEpisodeShowNotesGenerator(
                     diagnostics: adRemovalDiagnostics
                 )
             )
@@ -118,8 +116,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 artifactStore: artifactStore,
                 audioDownloader: downloader,
                 transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
-                classifier: DeepSeekAdClassifier(
-                    credentialStore: deepSeekCredentialStore,
+                classifier: AppleFoundationAdClassifier(
                     diagnostics: adRemovalDiagnostics
                 ),
                 diagnostics: adRemovalDiagnostics
@@ -196,7 +193,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 database: database,
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
-                deepSeekCredentialStore: deepSeekCredentialStore,
                 episodeShowNotesService: episodeShowNotesService
             )
             let coordinator = FeedRefreshCoordinator(backend: backend)
@@ -238,9 +234,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             installForegroundRefreshHandler(coordinator)
             scheduleBackgroundRefresh()
             Self.approveCrashRecoveryModelReplacement(database: database)
-            if Self.shouldResumeModelDownload(database: database) {
-                Task { await modelDownloader.start(requestedManifest: .qwen3OneSevenBFourBitV1) }
-            }
             requestAdRemovalRun()
             PodsDebugLog("Local backend start requested")
         } catch {
@@ -558,15 +551,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
             map: { sqliteString($0, 0) }
         ).first) == "true"
-    }
-
-    private static func shouldResumeModelDownload(database: PodsDatabase) -> Bool {
-        guard isAdRemovalEnabled(database: database) else { return false }
-        let state = try? database.query(
-            "SELECT value FROM settings WHERE key = 'ad_removal_model_download_state'",
-            map: { sqliteString($0, 0) }
-        ).first
-        return state == "consented" || state == "downloading" || state == "failed"
     }
 
     /// The previously approved Qwen3.5-4B model deterministically exceeded the
