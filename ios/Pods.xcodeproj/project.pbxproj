@@ -50,7 +50,7 @@
 		115000000000000000000001 /* AdRemovalRangeServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000011 /* AdRemovalRangeServerTests.swift */; };
 		115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 115000000000000000000012 /* AdRemovalRangeServer.swift */; };
 		116000000000000000000001 /* AdRemovalEvaluation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 116000000000000000000011 /* AdRemovalEvaluation.swift */; };
-		117000000000000000000001 /* DeepSeekAdClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117000000000000000000011 /* DeepSeekAdClassifier.swift */; };
+		117000000000000000000001 /* AppleFoundationLanguageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117000000000000000000011 /* AppleFoundationLanguageModel.swift */; };
 		118000000000000000000001 /* EpisodeShowNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118000000000000000000011 /* EpisodeShowNotes.swift */; };
 		119000000000000000000001 /* CarBluetoothPlaybackPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119000000000000000000011 /* CarBluetoothPlaybackPolicy.swift */; };
 		119000000000000000000002 /* CarBluetoothPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119000000000000000000012 /* CarBluetoothPlaybackTests.swift */; };
@@ -106,7 +106,7 @@
 		112000000000000000000012 /* AdRemovalClassification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalClassification.swift; sourceTree = "<group>"; };
 		112000000000000000000013 /* AdRemovalModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalModel.swift; sourceTree = "<group>"; };
 		113000000000000000000013 /* AdRemovalMLXClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdRemovalMLXClassifier.swift; sourceTree = "<group>"; };
-		117000000000000000000011 /* DeepSeekAdClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekAdClassifier.swift; sourceTree = "<group>"; };
+		117000000000000000000011 /* AppleFoundationLanguageModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationLanguageModel.swift; sourceTree = "<group>"; };
 		118000000000000000000011 /* EpisodeShowNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeShowNotes.swift; sourceTree = "<group>"; };
 		119000000000000000000011 /* CarBluetoothPlaybackPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarBluetoothPlaybackPolicy.swift; sourceTree = "<group>"; };
 		119000000000000000000012 /* CarBluetoothPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarBluetoothPlaybackTests.swift; sourceTree = "<group>"; };
@@ -160,7 +160,7 @@
 				112000000000000000000012 /* AdRemovalClassification.swift */,
 				112000000000000000000013 /* AdRemovalModel.swift */,
 				113000000000000000000013 /* AdRemovalMLXClassifier.swift */,
-				117000000000000000000011 /* DeepSeekAdClassifier.swift */,
+				117000000000000000000011 /* AppleFoundationLanguageModel.swift */,
 				118000000000000000000011 /* EpisodeShowNotes.swift */,
 				114000000000000000000012 /* AdRemovalPlayback.swift */,
 				115000000000000000000012 /* AdRemovalRangeServer.swift */,
@@ -378,7 +378,7 @@
 				112000000000000000000002 /* AdRemovalClassification.swift in Sources */,
 				112000000000000000000003 /* AdRemovalModel.swift in Sources */,
 				113000000000000000000003 /* AdRemovalMLXClassifier.swift in Sources */,
-				117000000000000000000001 /* DeepSeekAdClassifier.swift in Sources */,
+				117000000000000000000001 /* AppleFoundationLanguageModel.swift in Sources */,
 				118000000000000000000001 /* EpisodeShowNotes.swift in Sources */,
 				114000000000000000000002 /* AdRemovalPlayback.swift in Sources */,
 				115000000000000000000002 /* AdRemovalRangeServer.swift in Sources */,

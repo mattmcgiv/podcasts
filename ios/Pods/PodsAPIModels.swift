@@ -106,6 +106,8 @@ struct AdRemovalSettingsPayload: Codable, Equatable {
     let model_total_bytes: Int64
     let model_downloaded_bytes: Int64
     let model_download_state: String
+    let classifier_available: Bool
+    let classifier_unavailable_reason: String?
     let episode_storage_bytes: Int64
     let episode_storage_limit_bytes: Int64
     let minimum_free_bytes: Int64

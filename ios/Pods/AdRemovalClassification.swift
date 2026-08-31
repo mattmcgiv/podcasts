@@ -21,6 +21,19 @@ struct AdClassifierDescriptor: Equatable, Codable {
         temperature: 0,
         topP: 1
     )
+
+    /// Apple's on-device SystemLanguageModel. Context is 4,096 tokens on iOS 26.0–26.3
+    /// and larger on later system models; the window builder uses this conservative cap.
+    static let appleSystemLanguageModelV1 = AdClassifierDescriptor(
+        modelID: "apple/system-language-model",
+        modelRevision: "on-device",
+        quantization: "system",
+        promptRevision: "ad-classifier-v1",
+        maximumContextTokens: 4_096,
+        maximumOutputTokens: 384,
+        temperature: 0,
+        topP: 1
+    )
 }
 
 protocol AdClassifier: AnyObject {
@@ -41,12 +54,25 @@ struct AdClassificationLimits: Equatable {
     let overlapSegmentCount: Int
 
     static let production = AdClassificationLimits(
-        maximumContextTokens: 1_000_000,
-        reservedOutputTokens: 8_192,
+        maximumContextTokens: AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens,
+        reservedOutputTokens: AdClassifierDescriptor.appleSystemLanguageModelV1.maximumOutputTokens,
         correctionTokenBudget: 1_024,
-        maximumSegmentsPerWindow: 64,
-        overlapSegmentCount: 4
+        maximumSegmentsPerWindow: 8,
+        overlapSegmentCount: 2
     )
+
+    /// Matches the overlapping window walk used by `AdClassificationWindowBuilder`.
+    func totalWindows(segmentCount: Int) -> Int? {
+        guard segmentCount > 0,
+              maximumSegmentsPerWindow > 0,
+              overlapSegmentCount >= 0,
+              overlapSegmentCount < maximumSegmentsPerWindow else {
+            return nil
+        }
+        if segmentCount <= maximumSegmentsPerWindow { return 1 }
+        let step = maximumSegmentsPerWindow - overlapSegmentCount
+        return 1 + (segmentCount - maximumSegmentsPerWindow + step - 1) / step
+    }
 }
 
 struct AdClassificationWindow: Equatable {

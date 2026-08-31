@@ -1358,6 +1358,7 @@ actor AdRemovalPipelineScheduler {
     private let coordinator: AdRemovalCoordinator
     private let isEnabled: () async -> Bool
     private let conditions: () async -> AdRemovalRuntimeConditions
+    private let isOnDeviceModelAvailable: () async -> Bool
     private let diagnostics: AdRemovalDiagnostics?
     private let now: () -> Int64
     private let sleep: (UInt64) async throws -> Void
@@ -1368,6 +1369,7 @@ actor AdRemovalPipelineScheduler {
         coordinator: AdRemovalCoordinator,
         isEnabled: @escaping () async -> Bool = { true },
         conditions: @escaping () async -> AdRemovalRuntimeConditions,
+        isOnDeviceModelAvailable: @escaping () async -> Bool = { false },
         diagnostics: AdRemovalDiagnostics? = nil,
         now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970) },
         sleep: @escaping (UInt64) async throws -> Void = { seconds in
@@ -1378,6 +1380,7 @@ actor AdRemovalPipelineScheduler {
         self.coordinator = coordinator
         self.isEnabled = isEnabled
         self.conditions = conditions
+        self.isOnDeviceModelAvailable = isOnDeviceModelAvailable
         self.diagnostics = diagnostics
         self.now = now
         self.sleep = sleep
@@ -1392,6 +1395,9 @@ actor AdRemovalPipelineScheduler {
         guard await isEnabled() else { return .completed }
         do {
             try store.clearTransientPolicyBlockingReasons()
+            if await isOnDeviceModelAvailable() {
+                try store.clearBlockingReasons([.modelRequired])
+            }
             for _ in 0..<maximumStageCount {
                 if Task.isCancelled { return .unsuccessful }
                 guard await isEnabled() else { return .completed }
