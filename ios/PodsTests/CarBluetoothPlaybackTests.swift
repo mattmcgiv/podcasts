@@ -3,221 +3,378 @@ import XCTest
 @testable import Pods
 
 final class CarBluetoothPlaybackTests: XCTestCase {
-    func testCarBluetoothPortsIncludeTeslaA2DPAndHFPButNotBuiltInSpeaker() {
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.bluetoothA2DP))
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.bluetoothHFP))
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.bluetoothLE))
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.carAudio))
-        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.builtInSpeaker))
-        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCarBluetoothPort(.headphones))
+    private let now: TimeInterval = 1_000_000
+    private let teslaA2DP = CarBluetoothRouteDescriptor(
+        uid: "aa:bb:cc:dd:ee:ff-tacl",
+        name: "Tesla Model 3",
+        portType: .bluetoothA2DP
+    )
+    private let teslaHFP = CarBluetoothRouteDescriptor(
+        uid: "aa:bb:cc:dd:ee:ff-tsco",
+        name: "Tesla Model 3",
+        portType: .bluetoothHFP
+    )
+    private let otherTesla = CarBluetoothRouteDescriptor(
+        uid: "11:22:33:44:55:66-tacl",
+        name: "Tesla Model Y",
+        portType: .bluetoothA2DP
+    )
+    private let airPods = CarBluetoothRouteDescriptor(
+        uid: "de:ad:be:ef:00:01-tacl",
+        name: "AirPods Pro",
+        portType: .bluetoothA2DP
+    )
+    private let jbl = CarBluetoothRouteDescriptor(
+        uid: "01:23:45:67:89:ab-tacl",
+        name: "JBL Flip",
+        portType: .bluetoothA2DP
+    )
+    private let wired = CarBluetoothRouteDescriptor(
+        uid: "WiredHeadphones",
+        name: "Headphones",
+        portType: .headphones
+    )
+    private let speaker = CarBluetoothRouteDescriptor(
+        uid: "Speaker",
+        name: "Speaker",
+        portType: .builtInSpeaker
+    )
+
+    func testDeviceKindSeparatesTeslaFromAirPodsAndSpeakers() {
+        XCTAssertEqual(teslaA2DP.kind, .car)
+        XCTAssertEqual(teslaHFP.kind, .car)
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.deviceKind(portType: .carAudio, name: "Car"),
+            .car
+        )
+        XCTAssertEqual(airPods.kind, .headphone)
+        XCTAssertEqual(wired.kind, .headphone)
+        XCTAssertEqual(jbl.kind, .otherBluetooth)
+        XCTAssertEqual(speaker.kind, .notBluetooth)
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.deviceKind(portType: .bluetoothA2DP, name: "Beats Solo"),
+            .headphone
+        )
     }
 
-    func testPreferredCarMediaIsA2DPOrCarAudioNotHFPAlone() {
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.routeIsPreferredCarMedia([.bluetoothA2DP]))
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.routeIsPreferredCarMedia([.bluetoothHFP, .bluetoothA2DP]))
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.routeIsPreferredCarMedia([.carAudio]))
-        XCTAssertFalse(CarBluetoothPlaybackPolicy.routeIsPreferredCarMedia([.bluetoothHFP]))
-        XCTAssertFalse(CarBluetoothPlaybackPolicy.routeIsPreferredCarMedia([.builtInSpeaker]))
+    func testTeslaHFPAndA2DPShareStableIdentity() {
+        XCTAssertEqual(teslaA2DP.stableDeviceKey, "aa:bb:cc:dd:ee:ff")
+        XCTAssertTrue(teslaA2DP.matches(teslaHFP))
+        XCTAssertFalse(teslaA2DP.matches(otherTesla))
+        XCTAssertFalse(teslaA2DP.matches(airPods))
+        XCTAssertFalse(airPods.matches(jbl))
     }
 
-    func testLosingCarBluetoothWhilePlayingRemembersResume() {
+    func testLosingTeslaWhilePlayingRemembersThatCarAndEpisode() {
+        let action = CarBluetoothPlaybackPolicy.action(
+            reason: .oldDeviceUnavailable,
+            previousRoutes: [teslaA2DP],
+            currentRoutes: [speaker],
+            hasActiveContent: true,
+            isPlaying: true,
+            intent: nil,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now
+        )
+        guard case .remember(let intent) = action else {
+            return XCTFail("expected remember, got \(action)")
+        }
+        XCTAssertTrue(intent.device.matches(teslaA2DP))
+        XCTAssertEqual(intent.episodeID, 9)
+        XCTAssertEqual(intent.armedAt, now)
+    }
+
+    func testLosingAirPodsA2DPDoesNotRememberResume() {
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
                 reason: .oldDeviceUnavailable,
-                previousHadCarBluetooth: true,
-                currentHasCarBluetooth: false,
+                previousRoutes: [airPods],
+                currentRoutes: [speaker],
                 hasActiveContent: true,
                 isPlaying: true,
-                resumeWhenCarConnects: false,
-                isLocalOutput: true
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             ),
-            .rememberResume
+            .none
         )
     }
 
-    func testLosingHeadphonesDoesNotRememberResume() {
+    func testLosingUnknownSpeakerDoesNotRememberResume() {
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
                 reason: .oldDeviceUnavailable,
-                previousHadCarBluetooth: false,
-                currentHasCarBluetooth: false,
+                previousRoutes: [jbl],
+                currentRoutes: [speaker],
                 hasActiveContent: true,
                 isPlaying: true,
-                resumeWhenCarConnects: false,
-                isLocalOutput: true
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             ),
             .none
         )
     }
 
-    func testCarBluetoothConnectResumesWhenIntentIsSet() {
+    func testLosingWiredHeadphonesDoesNotRememberResume() {
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
-                reason: .newDeviceAvailable,
-                previousHadCarBluetooth: false,
-                currentHasCarBluetooth: true,
-                hasActiveContent: true,
-                isPlaying: false,
-                resumeWhenCarConnects: true,
-                isLocalOutput: true
-            ),
-            .scheduleResume
-        )
-        XCTAssertEqual(
-            CarBluetoothPlaybackPolicy.action(
-                reason: .routeConfigurationChange,
-                previousHadCarBluetooth: true,
-                currentHasCarBluetooth: true,
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [wired],
+                currentRoutes: [speaker],
                 hasActiveContent: true,
                 isPlaying: true,
-                resumeWhenCarConnects: true,
-                isLocalOutput: true
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             ),
-            .scheduleResume
+            .none
         )
     }
 
-    func testCarBluetoothConnectDoesNotAutostartWithoutIntentOrContent() {
+    func testTeslaReconnectWithMatchingIdentitySchedulesArmedEpisode() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now - 60)
+        let action = CarBluetoothPlaybackPolicy.action(
+            reason: .newDeviceAvailable,
+            previousRoutes: [speaker],
+            currentRoutes: [teslaHFP],
+            hasActiveContent: true,
+            isPlaying: false,
+            intent: armed,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now
+        )
+        guard case .schedule(let scheduled) = action else {
+            return XCTFail("expected schedule, got \(action)")
+        }
+        XCTAssertTrue(scheduled.device.matches(teslaHFP))
+        XCTAssertEqual(scheduled.episodeID, 9)
+        XCTAssertEqual(scheduled.armedAt, armed.armedAt)
+    }
+
+    func testAirPodsConnectDoesNotConsumeTeslaIntent() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now - 60)
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
                 reason: .newDeviceAvailable,
-                previousHadCarBluetooth: false,
-                currentHasCarBluetooth: true,
+                previousRoutes: [speaker],
+                currentRoutes: [airPods],
                 hasActiveContent: true,
                 isPlaying: false,
-                resumeWhenCarConnects: false,
-                isLocalOutput: true
+                intent: armed,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             ),
             .none
+        )
+    }
+
+    func testDifferentCarDoesNotConsumeTeslaIntent() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now - 60)
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [otherTesla],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: armed,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+    }
+
+    func testTeslaConnectWithoutArmedIntentDoesNotAutostart() {
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [teslaA2DP],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+    }
+
+    func testPlayingOntoAppearingTeslaSchedulesThatCar() {
+        let action = CarBluetoothPlaybackPolicy.action(
+            reason: .newDeviceAvailable,
+            previousRoutes: [speaker],
+            currentRoutes: [teslaA2DP],
+            hasActiveContent: true,
+            isPlaying: true,
+            intent: nil,
+            currentEpisodeID: 4,
+            isLocalOutput: true,
+            now: now
+        )
+        guard case .schedule(let scheduled) = action else {
+            return XCTFail("expected schedule, got \(action)")
+        }
+        XCTAssertTrue(scheduled.device.matches(teslaA2DP))
+        XCTAssertEqual(scheduled.episodeID, 4)
+    }
+
+    func testExpiredIntentClearsInsteadOfScheduling() {
+        let expired = CarBluetoothResumeIntent(
+            device: teslaA2DP,
+            episodeID: 9,
+            armedAt: now - CarBluetoothPlaybackPolicy.resumeIntentTTL - 1
         )
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
                 reason: .newDeviceAvailable,
-                previousHadCarBluetooth: false,
-                currentHasCarBluetooth: true,
-                hasActiveContent: false,
+                previousRoutes: [speaker],
+                currentRoutes: [teslaA2DP],
+                hasActiveContent: true,
                 isPlaying: false,
-                resumeWhenCarConnects: true,
-                isLocalOutput: true
+                intent: expired,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             ),
-            .none
+            .clear
         )
+        XCTAssertNil(CarBluetoothPlaybackPolicy.validatedIntent(expired, now: now))
+    }
+
+    func testLegacySnapshotWithoutIdentityDoesNotValidate() {
+        let snapshot = CarBluetoothSessionSnapshot(
+            episodeID: 1,
+            publisherURL: "https://example.test/a.mp3",
+            position: 10,
+            rate: 1,
+            title: "A",
+            artist: "B",
+            artworkURL: nil,
+            duration: 100,
+            resumeIntent: nil
+        )
+        XCTAssertNil(CarBluetoothPlaybackPolicy.validatedIntent(snapshot.resumeIntent, now: now))
     }
 
     func testMacCastOutputNeverAutoResumesOnPhoneRouteChange() {
+        let armed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now)
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(
                 reason: .newDeviceAvailable,
-                previousHadCarBluetooth: false,
-                currentHasCarBluetooth: true,
+                previousRoutes: [speaker],
+                currentRoutes: [teslaA2DP],
                 hasActiveContent: true,
                 isPlaying: true,
-                resumeWhenCarConnects: true,
-                isLocalOutput: false
+                intent: armed,
+                currentEpisodeID: 9,
+                isLocalOutput: false,
+                now: now
             ),
             .none
         )
     }
 
-    func testScheduledResumeCommitsOnAnyCarBluetoothAfterSettle() {
+    func testCommitRequiresMatchingCarIdentityAndSameEpisode() {
+        let scheduled = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now - 10)
         XCTAssertTrue(
             CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
-                currentHasCarBluetooth: true,
-                hasActiveContent: true,
-                isLocalOutput: true
+                scheduled: scheduled,
+                currentRoutes: [teslaHFP],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             )
         )
         XCTAssertFalse(
             CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
-                currentHasCarBluetooth: false,
-                hasActiveContent: true,
-                isLocalOutput: true
+                scheduled: scheduled,
+                currentRoutes: [airPods],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             )
         )
         XCTAssertFalse(
             CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
-                currentHasCarBluetooth: true,
-                hasActiveContent: false,
-                isLocalOutput: true
+                scheduled: scheduled,
+                currentRoutes: [teslaA2DP],
+                currentEpisodeID: 10,
+                isLocalOutput: true,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+                scheduled: scheduled,
+                currentRoutes: [teslaA2DP],
+                currentEpisodeID: 9,
+                isLocalOutput: false,
+                now: now
+            )
+        )
+        let expired = CarBluetoothResumeIntent(
+            device: teslaA2DP,
+            episodeID: 9,
+            armedAt: now - CarBluetoothPlaybackPolicy.resumeIntentTTL - 5
+        )
+        XCTAssertFalse(
+            CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+                scheduled: expired,
+                currentRoutes: [teslaA2DP],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
             )
         )
     }
 
-    func testInterruptionResumeHonorsShouldResumeAndTeslaA2DPWithoutFlag() {
+    func testInterruptionResumeDoesNotTreatGenericBluetoothAsCar() {
         XCTAssertTrue(
             CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
                 shouldResumeOption: true,
-                currentIsPreferredCarMedia: false,
                 wasPlayingBeforeInterruption: true,
-                resumeWhenCarConnects: false,
+                currentCarMatchesArmedIntent: false,
                 isLocalOutput: true
             )
         )
         XCTAssertTrue(
             CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
                 shouldResumeOption: false,
-                currentIsPreferredCarMedia: true,
                 wasPlayingBeforeInterruption: true,
-                resumeWhenCarConnects: false,
+                currentCarMatchesArmedIntent: true,
                 isLocalOutput: true
             )
         )
         XCTAssertFalse(
             CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
                 shouldResumeOption: false,
-                currentIsPreferredCarMedia: false,
                 wasPlayingBeforeInterruption: true,
-                resumeWhenCarConnects: true,
+                currentCarMatchesArmedIntent: false,
                 isLocalOutput: true
             )
         )
         XCTAssertFalse(
             CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
                 shouldResumeOption: true,
-                currentIsPreferredCarMedia: true,
                 wasPlayingBeforeInterruption: true,
-                resumeWhenCarConnects: true,
+                currentCarMatchesArmedIntent: true,
                 isLocalOutput: false
             )
         )
     }
 
-    func testResumeIntentClearsOnUserPauseAndStop() {
-        XCTAssertTrue(
-            CarBluetoothPlaybackPolicy.nextResumeIntent(
-                current: false,
-                userInitiatedPause: false,
-                startedPlaying: true,
-                clearedSession: false
-            )
-        )
-        XCTAssertFalse(
-            CarBluetoothPlaybackPolicy.nextResumeIntent(
-                current: true,
-                userInitiatedPause: true,
-                startedPlaying: false,
-                clearedSession: false
-            )
-        )
-        XCTAssertFalse(
-            CarBluetoothPlaybackPolicy.nextResumeIntent(
-                current: true,
-                userInitiatedPause: false,
-                startedPlaying: false,
-                clearedSession: true
-            )
-        )
-        XCTAssertTrue(
-            CarBluetoothPlaybackPolicy.nextResumeIntent(
-                current: true,
-                userInitiatedPause: false,
-                startedPlaying: false,
-                clearedSession: false
-            )
-        )
-    }
-
-    func testSessionStoreRoundTripsSnapshot() {
+    func testSessionStoreRoundTripsIntentSnapshot() {
         let suite = "pods.carBluetooth.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -233,7 +390,11 @@ final class CarBluetoothPlaybackTests: XCTestCase {
             artist: "Show",
             artworkURL: "http://127.0.0.1:18180/art",
             duration: 3600,
-            resumeWhenCarConnects: true
+            resumeIntent: CarBluetoothResumeIntent(
+                device: teslaA2DP,
+                episodeID: 42,
+                armedAt: now
+            )
         )
         store.save(snapshot)
         XCTAssertEqual(store.load(), snapshot)
