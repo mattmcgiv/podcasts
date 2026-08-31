@@ -126,7 +126,8 @@ final class UserDefaultsCarBluetoothSessionStore: CarBluetoothSessionStoring {
 /// - Arm only when a **classified car** route is lost while playing (or that
 ///   same car is already armed). AirPods / speakers / wired headphones never arm.
 /// - Consume only when a route matching that **device identity** returns, the
-///   armed episode is still loaded, and the intent is inside the TTL.
+///   armed episode is still loaded, the intent is inside the TTL, and a
+///   **media-capable** port (A2DP / CarPlay) is up — not HFP-only handshake.
 /// - Playing onto a newly appeared car (get-in-the-car hop) re-asserts play
 ///   after settle, still bound to that car identity + current episode.
 enum CarBluetoothPlaybackPolicy {
@@ -177,6 +178,20 @@ enum CarBluetoothPlaybackPolicy {
 
     static func cars(in routes: [CarBluetoothRouteDescriptor]) -> [CarBluetoothRouteDescriptor] {
         routes.filter { $0.kind == .car }
+    }
+
+    /// Stereo / CarPlay media. Tesla HFP is the same *device* (identity + remember)
+    /// but not a media sink — commit must wait for this hop.
+    static func isMediaCapableCarRoute(_ route: CarBluetoothRouteDescriptor) -> Bool {
+        guard route.kind == .car else { return false }
+        return route.portType == .bluetoothA2DP || route.portType == .carAudio
+    }
+
+    static func hasMediaCapableCar(
+        matching device: CarBluetoothRouteDescriptor,
+        in routes: [CarBluetoothRouteDescriptor]
+    ) -> Bool {
+        routes.contains { isMediaCapableCarRoute($0) && $0.matches(device) }
     }
 
     static func lostCars(
@@ -289,7 +304,8 @@ enum CarBluetoothPlaybackPolicy {
         if let armedEpisode = scheduled.episodeID, armedEpisode != currentEpisodeID {
             return false
         }
-        return currentRoutes.contains { $0.kind == .car && $0.matches(scheduled.device) }
+        // HFP-only after settle is the handshake, not the stereo. Wait for A2DP.
+        return hasMediaCapableCar(matching: scheduled.device, in: currentRoutes)
     }
 
     static func shouldResumeAfterInterruption(
@@ -311,7 +327,7 @@ enum CarBluetoothPlaybackPolicy {
         now: TimeInterval
     ) -> Bool {
         guard let intent = validatedIntent(intent, now: now) else { return false }
-        return routes.contains { $0.kind == .car && $0.matches(intent.device) }
+        return hasMediaCapableCar(matching: intent.device, in: routes)
     }
 
     /// User/system events that must not leave a pending 0.7s callback or a
