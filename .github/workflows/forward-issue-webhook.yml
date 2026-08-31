@@ -1,9 +1,20 @@
-name: Forward issue webhook
+name: Forward GitHub webhook
 on:
   issues:
     types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
 jobs:
   forward:
+    if: |
+      (github.event_name == 'issues' && (github.event.action == 'opened' || github.event.action == 'reopened')) ||
+      (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request && github.event.comment.user.login == 'mattmcgiv') ||
+      (github.event_name == 'pull_request_review_comment' && github.event.action == 'created' && github.event.comment.user.login == 'mattmcgiv') ||
+      (github.event_name == 'pull_request_review' && github.event.action == 'submitted' && github.event.review.user.login == 'mattmcgiv' && github.event.review.body != '')
     runs-on: ubuntu-latest
     steps:
       - name: Forward to Grok Bot
@@ -14,7 +25,7 @@ jobs:
           code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${WEBHOOK_KEY}" \
             -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: issues" \
+            -H "X-GitHub-Event: ${GITHUB_EVENT_NAME}" \
             --data-binary @"$GITHUB_EVENT_PATH" \
             "$WEBHOOK_URL")
           echo "status=$code"
