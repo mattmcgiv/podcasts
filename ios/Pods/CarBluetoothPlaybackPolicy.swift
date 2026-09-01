@@ -131,10 +131,12 @@ struct CarBluetoothSessionSnapshot: Equatable, Codable {
     }
 }
 
-/// Extra signals used to promote a custom-named Tesla A2DP port to `.car`.
-/// Vehicle Bluetooth names are often the owner's car name ("Midnight"), not
-/// "Tesla Model 3". HFP on the same MAC — as an output or an available input —
-/// is the hands-free unit; portable speakers are A2DP-only.
+/// Extra signals for custom-named Teslas. Vehicle Bluetooth names are often
+/// the owner's car name ("Midnight"), not "Tesla Model 3".
+///
+/// `handsFreeDeviceKeys` is only a pairing hint: A2DP on the same MAC can be
+/// enrolled once. HFP alone never makes a device a car — headsets,
+/// intercoms, and speakerphones also use HFP.
 struct CarBluetoothRouteContext: Equatable {
     var knownCarDeviceKeys: Set<String>
     var handsFreeDeviceKeys: Set<String>
@@ -251,16 +253,14 @@ enum CarBluetoothPlaybackPolicy {
         if portType == .carAudio || nameContainsToken(name, tokens: carNameTokens) {
             return .car
         }
-        // Tesla's Bluetooth name is often the vehicle name ("Midnight"), not
-        // "Tesla Model 3". Non-headphone HFP is a hands-free unit (car), not
-        // a portable speaker — those are A2DP-only.
-        if portType == .bluetoothHFP {
-            return .car
-        }
         if isBluetoothPort(portType) {
             return .otherBluetooth
         }
         return .notBluetooth
+    }
+
+    static func isMediaPort(_ type: AVAudioSession.Port) -> Bool {
+        type == .bluetoothA2DP || type == .carAudio
     }
 
     static func isCar(
@@ -274,8 +274,12 @@ enum CarBluetoothPlaybackPolicy {
             return false
         case .otherBluetooth:
             let key = route.stableDeviceKey
-            return context.knownCarDeviceKeys.contains(key)
-                || context.handsFreeDeviceKeys.contains(key)
+            if context.knownCarDeviceKeys.contains(key) {
+                return true
+            }
+            // One-time enrollment: stereo media paired with HFP on the same
+            // MAC. HFP-only accessories (headsets, speakerphones) never qualify.
+            return isMediaPort(route.portType) && context.handsFreeDeviceKeys.contains(key)
         }
     }
 
@@ -313,6 +317,19 @@ enum CarBluetoothPlaybackPolicy {
         routes.contains { isCar($0, context: context) && $0.matches(device) }
     }
 
+    /// Consume an already-armed car identity when that MAC returns, including
+    /// Tesla HFP-first reconnect. Does not classify unknown HFP as a car.
+    static func matchingArmedIdentity(
+        routes: [CarBluetoothRouteDescriptor],
+        intent: CarBluetoothResumeIntent
+    ) -> CarBluetoothRouteDescriptor? {
+        routes.first { route in
+            route.matches(intent.device)
+                && route.kind != .headphone
+                && route.kind != .notBluetooth
+        }
+    }
+
     static func hasMediaCapableCar(
         matching device: CarBluetoothRouteDescriptor,
         in routes: [CarBluetoothRouteDescriptor],
@@ -335,8 +352,8 @@ enum CarBluetoothPlaybackPolicy {
         routes: [CarBluetoothRouteDescriptor],
         context: CarBluetoothRouteContext = .empty
     ) -> [String] {
-        var keys = context.knownCarDeviceKeys.union(context.handsFreeDeviceKeys)
-        for route in cars(in: routes, context: context) {
+        var keys = context.knownCarDeviceKeys
+        for route in routes where isCar(route, context: context) {
             keys.insert(route.stableDeviceKey)
         }
         return keys.sorted()
@@ -414,10 +431,6 @@ enum CarBluetoothPlaybackPolicy {
 
         case .newDeviceAvailable, .routeConfigurationChange:
             let currentCars = cars(in: currentRoutes, context: context)
-            if currentCars.isEmpty {
-                if intent != nil, validIntent == nil { return .clear }
-                return .none
-            }
 
             if isPlaying, let car = currentCars.first {
                 return .schedule(
@@ -429,15 +442,21 @@ enum CarBluetoothPlaybackPolicy {
                 )
             }
 
-            if let validIntent,
-               let car = currentCars.first(where: { $0.matches(validIntent.device) }) {
-                return .schedule(
-                    CarBluetoothResumeIntent(
-                        device: rememberedCarDevice(car, context: context),
-                        episodeID: validIntent.episodeID ?? currentEpisodeID,
-                        armedAt: validIntent.armedAt
+            if let validIntent {
+                let matched = currentCars.first(where: { $0.matches(validIntent.device) })
+                    ?? matchingArmedIdentity(routes: currentRoutes, intent: validIntent)
+                if let matched {
+                    let device = rememberedCarDevice(matched, context: context)
+                    return .schedule(
+                        CarBluetoothResumeIntent(
+                            device: device.kind == .car || isCar(device, context: context)
+                                ? device
+                                : validIntent.device,
+                            episodeID: validIntent.episodeID ?? currentEpisodeID,
+                            armedAt: validIntent.armedAt
+                        )
                     )
-                )
+                }
             }
 
             if intent != nil, validIntent == nil {
@@ -466,9 +485,10 @@ enum CarBluetoothPlaybackPolicy {
         if let armedEpisode = scheduled.episodeID, armedEpisode != currentEpisodeID {
             return false
         }
-        // Model 3 keeps HFP-only until the phone plays. Commit on the matching
-        // car identity (HFP or A2DP) after settle so play() can open stereo.
-        return hasMatchingCar(matching: scheduled.device, in: currentRoutes, context: context)
+        // Model 3 keeps HFP-only until the phone plays. Commit when the armed
+        // identity is back, including HFP. Unknown HFP accessories do not match.
+        return matchingArmedIdentity(routes: currentRoutes, intent: scheduled) != nil
+            || hasMatchingCar(matching: scheduled.device, in: currentRoutes, context: context)
     }
 
     static func shouldKeepSessionAlive(
@@ -491,7 +511,8 @@ enum CarBluetoothPlaybackPolicy {
     ) -> Bool {
         guard isLocalOutput, hasActiveContent else { return false }
         guard let intent = validatedIntent(intent, now: now, context: context) else { return false }
-        return hasMatchingCar(matching: intent.device, in: currentRoutes, context: context)
+        return matchingArmedIdentity(routes: currentRoutes, intent: intent) != nil
+            || hasMatchingCar(matching: intent.device, in: currentRoutes, context: context)
     }
 
     static func shouldPreserveResumeAcrossLoad(
@@ -522,7 +543,8 @@ enum CarBluetoothPlaybackPolicy {
         context: CarBluetoothRouteContext = .empty
     ) -> Bool {
         guard let intent = validatedIntent(intent, now: now, context: context) else { return false }
-        return hasMatchingCar(matching: intent.device, in: routes, context: context)
+        return matchingArmedIdentity(routes: routes, intent: intent) != nil
+            || hasMatchingCar(matching: intent.device, in: routes, context: context)
     }
 
     /// User/system events that must not leave a pending 0.7s callback or a

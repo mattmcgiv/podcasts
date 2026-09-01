@@ -54,6 +54,11 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         name: "AirPods Pro",
         portType: .bluetoothHFP
     )
+    private let polySpeakerphoneHFP = CarBluetoothRouteDescriptor(
+        uid: "99:88:77:66:55:44-tsco",
+        name: "Poly Sync 20",
+        portType: .bluetoothHFP
+    )
     private var midnightContext: CarBluetoothRouteContext {
         CarBluetoothRouteContext(
             knownCarDeviceKeys: [],
@@ -76,14 +81,20 @@ final class CarBluetoothPlaybackTests: XCTestCase {
             CarBluetoothPlaybackPolicy.deviceKind(portType: .bluetoothA2DP, name: "Beats Solo"),
             .headphone
         )
-        XCTAssertEqual(midnightHFP.kind, .car, "custom Tesla names still present HFP")
+        XCTAssertEqual(midnightHFP.kind, .otherBluetooth, "custom names are not intrinsically cars")
         XCTAssertEqual(midnightA2DP.kind, .otherBluetooth)
         XCTAssertEqual(airPodsHFP.kind, .headphone)
-        XCTAssertTrue(CarBluetoothPlaybackPolicy.isCar(midnightHFP))
+        XCTAssertEqual(polySpeakerphoneHFP.kind, .otherBluetooth)
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(midnightHFP))
+        XCTAssertFalse(
+            CarBluetoothPlaybackPolicy.isCar(midnightHFP, context: midnightContext),
+            "HFP pairing alone must not classify an accessory as a car"
+        )
         XCTAssertTrue(CarBluetoothPlaybackPolicy.isCar(midnightA2DP, context: midnightContext))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(midnightA2DP))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jbl, context: midnightContext))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(airPods, context: midnightContext))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(polySpeakerphoneHFP))
     }
 
     func testTeslaHFPAndA2DPShareStableIdentity() {
@@ -850,6 +861,92 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         let snapshot = try JSONDecoder().decode(CarBluetoothSessionSnapshot.self, from: json)
         XCTAssertEqual(snapshot.knownCarDeviceKeys, [])
         XCTAssertEqual(snapshot.resumeIntent?.episodeID, 1)
+    }
+
+    func testUnknownHFPSpeakerphoneDoesNotClassifyAsCarOrArm() {
+        let selfPaired = CarBluetoothRouteContext(
+            knownCarDeviceKeys: [],
+            handsFreeDeviceKeys: [polySpeakerphoneHFP.stableDeviceKey]
+        )
+        XCTAssertEqual(polySpeakerphoneHFP.kind, .otherBluetooth)
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(polySpeakerphoneHFP))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(polySpeakerphoneHFP, context: selfPaired))
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.discoveredCarDeviceKeys(
+                routes: [polySpeakerphoneHFP],
+                context: selfPaired
+            ),
+            [],
+            "unknown HFP must not be enrolled as a known car"
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [polySpeakerphoneHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [polySpeakerphoneHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: selfPaired
+            ),
+            .none,
+            "self-paired HFP speakerphone still must not arm"
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [polySpeakerphoneHFP],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+        let teslaArmed = CarBluetoothResumeIntent(device: teslaA2DP, episodeID: 9, armedAt: now - 60)
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [polySpeakerphoneHFP],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: teslaArmed,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            ),
+            .none
+        )
+        XCTAssertFalse(
+            CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+                scheduled: teslaArmed,
+                currentRoutes: [polySpeakerphoneHFP],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now
+            )
+        )
     }
 
     func testAirPodsHFPDoesNotPromoteOrConsumeTeslaIntent() {
