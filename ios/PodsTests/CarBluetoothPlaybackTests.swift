@@ -660,6 +660,115 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         store.clear()
         XCTAssertNil(store.load())
         XCTAssertEqual(store.loadKnownCarDeviceKeys(), [midnightA2DP.stableDeviceKey])
+        store.saveKnownCarDeviceKeys([])
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [])
+    }
+
+    func testExplicitEnrollmentFromEmptyStoreResumesCustomTeslaAndIgnoresUnenrolledHeadset() {
+        let suite = "pods.carBluetooth.enroll.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UserDefaultsCarBluetoothSessionStore(defaults: defaults)
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [], "fresh install has no enrolled car")
+
+        let midnightRoutes = [midnightA2DP, midnightHFP]
+        XCTAssertEqual(midnightA2DP.kind, .otherBluetooth)
+        XCTAssertNil(
+            CarBluetoothEnrollment.enrollableDevice(in: [airPods, airPodsHFP]),
+            "headphones are never enrollable"
+        )
+        XCTAssertEqual(
+            CarBluetoothEnrollment.enrollableDevice(in: midnightRoutes)?.stableDeviceKey,
+            midnightA2DP.stableDeviceKey
+        )
+
+        guard let enrolledKeys = CarBluetoothEnrollment.enroll(routes: midnightRoutes) else {
+            return XCTFail("production enroll path must accept a custom-named Tesla")
+        }
+        store.saveKnownCarDeviceKeys(enrolledKeys)
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [midnightA2DP.stableDeviceKey])
+
+        let enrolledContext = CarBluetoothRouteContext(
+            knownCarDeviceKeys: Set(store.loadKnownCarDeviceKeys()),
+            handsFreeDeviceKeys: []
+        )
+        let lost = CarBluetoothPlaybackPolicy.action(
+            reason: .oldDeviceUnavailable,
+            previousRoutes: midnightRoutes,
+            currentRoutes: [speaker],
+            hasActiveContent: true,
+            isPlaying: true,
+            intent: nil,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now,
+            context: enrolledContext
+        )
+        guard case .remember(let intent) = lost else {
+            return XCTFail("enrolled custom Tesla must arm on disconnect, got \(lost)")
+        }
+        XCTAssertEqual(intent.device.kind, .car)
+
+        let reconnect = CarBluetoothPlaybackPolicy.action(
+            reason: .newDeviceAvailable,
+            previousRoutes: [speaker],
+            currentRoutes: [midnightHFP],
+            hasActiveContent: true,
+            isPlaying: false,
+            intent: intent,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now
+        )
+        guard case .schedule(let scheduled) = reconnect else {
+            return XCTFail("HFP reconnect must resume after explicit enrollment, got \(reconnect)")
+        }
+        XCTAssertTrue(
+            CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+                scheduled: scheduled,
+                currentRoutes: [midnightHFP],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now + CarBluetoothPlaybackPolicy.resumeSettleDelay
+            )
+        )
+
+        XCTAssertNotNil(CarBluetoothEnrollment.enroll(routes: [jabraA2DP, jabraHFP]))
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [jabraA2DP, jabraHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: .empty
+            ),
+            .none,
+            "un-enrolled dual-profile headset must not arm"
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [jabraHFP],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: .empty
+            ),
+            .none,
+            "un-enrolled dual-profile headset must not resume"
+        )
+
+        store.saveKnownCarDeviceKeys(CarBluetoothEnrollment.unenroll())
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [])
     }
 
     func testCustomNamedTeslaA2DPPromotesViaHandsFreeIdentity() {

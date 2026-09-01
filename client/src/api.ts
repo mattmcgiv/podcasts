@@ -13,6 +13,7 @@ import type {
   Settings,
   Show,
   ShowDetailResponse,
+  CarBluetoothSettings,
 } from "./types";
 
 declare global {
@@ -146,6 +147,11 @@ export const Api = {
       method: "POST",
       body: JSON.stringify({ confirm: "DELETE_AD_REMOVAL_DATA" }),
     }),
+  carBluetoothSettings: () => request<CarBluetoothSettings>("/car-bluetooth"),
+  enrollCarBluetooth: () =>
+    request<CarBluetoothSettings>("/car-bluetooth/enroll", { method: "POST" }),
+  unenrollCarBluetooth: () =>
+    request<CarBluetoothSettings>("/car-bluetooth/unenroll", { method: "POST" }),
   settings: () => request<Settings>("/settings"),
   saveSettings: (s: Settings) =>
     request<void>("/settings", { method: "PUT", body: JSON.stringify(s) }),

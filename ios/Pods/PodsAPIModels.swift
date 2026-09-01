@@ -73,6 +73,17 @@ struct SettingsPayload: Codable, Equatable {
     let autoplay: Bool
 }
 
+/// Snapshot for the Settings car-Bluetooth enrollment control.
+/// `enrolled` means a stable key is persisted; `current_enrolled` is that key
+/// matching the connected output. Pairing is not enrollment.
+struct CarBluetoothSettingsPayload: Codable, Equatable {
+    let enrolled: Bool
+    let enrollable: Bool
+    let current_enrolled: Bool
+    let current_device_name: String?
+    let current_device_key: String?
+}
+
 /// Lightweight ad-removal status for a single episode, with no notes_html or
 /// other heavy fields. Used by the batch `/api/ad-removal/statuses` endpoint so
 /// the Listen view can poll many active rows with one bounded request instead

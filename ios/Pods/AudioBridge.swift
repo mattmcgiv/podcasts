@@ -1628,6 +1628,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         carBluetoothSessionStore.saveKnownCarDeviceKeys(knownCarDeviceKeys)
     }
 
+    /// Settings enrollment writes the remembered car key. Live policy must
+    /// pick it up immediately so disconnect/reconnect can arm without restart.
+    func applyEnrolledCarDeviceKeys(_ keys: [String]) {
+        knownCarDeviceKeys = Array(Set(keys)).sorted()
+        carBluetoothSessionStore.saveKnownCarDeviceKeys(knownCarDeviceKeys)
+        persistCarBluetoothSession()
+        attemptCarBluetoothResumeFromCurrentRoute()
+    }
+
     private func attemptCarBluetoothResumeFromCurrentRoute() {
         guard preferredOutput == .local else { return }
         let now = Date().timeIntervalSince1970

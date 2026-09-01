@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 import MediaPlayer
 import WebKit
@@ -676,6 +677,68 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(saved, SettingsPayload(speed: 2.5, autoplay: false))
         let invalidSettings = try await call(harness.backend, "PUT", "/api/settings", json: ["speed": 9.9, "autoplay": true])
         XCTAssertEqual(invalidSettings.statusCode, 422)
+    }
+
+    func testCarBluetoothEnrollmentAPIFromEmptyStorePersistsStableKey() async throws {
+        let harness = try makeHarness()
+        let suite = "pods.carBluetooth.api.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = UserDefaultsCarBluetoothSessionStore(defaults: defaults)
+        let midnightA2DP = CarBluetoothRouteDescriptor(
+            uid: "aa:bb:cc:dd:ee:ff-tacl",
+            name: "Midnight",
+            portType: .bluetoothA2DP
+        )
+        let midnightHFP = CarBluetoothRouteDescriptor(
+            uid: "aa:bb:cc:dd:ee:ff-tsco",
+            name: "Midnight",
+            portType: .bluetoothHFP
+        )
+        let airPods = CarBluetoothRouteDescriptor(
+            uid: "de:ad:be:ef:00:01-tacl",
+            name: "AirPods Pro",
+            portType: .bluetoothA2DP
+        )
+        var notified: [String] = []
+        harness.backend.setCarBluetoothSessionStore(store)
+        harness.backend.setCarBluetoothRouteProvider { [midnightA2DP, midnightHFP] }
+        harness.backend.setCarBluetoothEnrollmentChangedHandler { notified = $0 }
+
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [])
+        let before = try decode(
+            CarBluetoothSettingsPayload.self,
+            from: try await call(harness.backend, "GET", "/api/car-bluetooth")
+        )
+        XCTAssertFalse(before.enrolled)
+        XCTAssertTrue(before.enrollable)
+        XCTAssertFalse(before.current_enrolled)
+        XCTAssertEqual(before.current_device_name, "Midnight")
+        XCTAssertEqual(before.current_device_key, midnightA2DP.stableDeviceKey)
+
+        let enrolled = try decode(
+            CarBluetoothSettingsPayload.self,
+            from: try await call(harness.backend, "POST", "/api/car-bluetooth/enroll")
+        )
+        XCTAssertTrue(enrolled.enrolled)
+        XCTAssertTrue(enrolled.current_enrolled)
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [midnightA2DP.stableDeviceKey])
+        XCTAssertEqual(notified, [midnightA2DP.stableDeviceKey])
+
+        harness.backend.setCarBluetoothRouteProvider { [airPods] }
+        let headphones = try await call(harness.backend, "POST", "/api/car-bluetooth/enroll")
+        XCTAssertEqual(headphones.statusCode, 422)
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [midnightA2DP.stableDeviceKey])
+
+        harness.backend.setCarBluetoothRouteProvider { [midnightA2DP, midnightHFP] }
+        let forgotten = try decode(
+            CarBluetoothSettingsPayload.self,
+            from: try await call(harness.backend, "POST", "/api/car-bluetooth/unenroll")
+        )
+        XCTAssertFalse(forgotten.enrolled)
+        XCTAssertFalse(forgotten.current_enrolled)
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [])
+        XCTAssertEqual(notified, [])
     }
 
     func testMarkPlayedAwaitsShowNotesCancellationBeforeMetadataCleanup() async throws {

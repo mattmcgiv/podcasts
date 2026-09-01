@@ -83,6 +83,11 @@ final class PodsBackend: PlaybackProgressRecording {
     private var adRemovalModelDownloadRequestHandler: ((AdModelManifest) async -> Void)?
     private var adRemovalStopRequestHandler: (() async -> Void)?
     private var adRemovalCancellationRequestHandler: ((AdRemovalPipelineCancellationScope) async -> Void)?
+    private var carBluetoothSessionStore: CarBluetoothSessionStoring = UserDefaultsCarBluetoothSessionStore()
+    private var carBluetoothRouteProvider: () -> [CarBluetoothRouteDescriptor] = {
+        CarBluetoothPlaybackPolicy.currentAudioSessionRoutes()
+    }
+    private var carBluetoothEnrollmentChangedHandler: (([String]) -> Void)?
 
     init(
         database: PodsDatabase,
@@ -139,6 +144,18 @@ final class PodsBackend: PlaybackProgressRecording {
         _ handler: @escaping (AdRemovalPipelineCancellationScope) async -> Void
     ) {
         adRemovalCancellationRequestHandler = handler
+    }
+
+    func setCarBluetoothSessionStore(_ store: CarBluetoothSessionStoring) {
+        carBluetoothSessionStore = store
+    }
+
+    func setCarBluetoothRouteProvider(_ provider: @escaping () -> [CarBluetoothRouteDescriptor]) {
+        carBluetoothRouteProvider = provider
+    }
+
+    func setCarBluetoothEnrollmentChangedHandler(_ handler: @escaping ([String]) -> Void) {
+        carBluetoothEnrollmentChangedHandler = handler
     }
 
     func refreshStatus() -> RefreshStatus {
@@ -391,6 +408,15 @@ final class PodsBackend: PlaybackProgressRecording {
             await episodeShowNotesService?.cancelAll()
             try cleanupAdRemovalData()
             return .json(try adRemovalSettings())
+        }
+        if path == "/api/car-bluetooth", request.method == "GET" {
+            return .json(carBluetoothSettings())
+        }
+        if path == "/api/car-bluetooth/enroll", request.method == "POST" {
+            return .json(try enrollCarBluetooth())
+        }
+        if path == "/api/car-bluetooth/unenroll", request.method == "POST" {
+            return .json(unenrollCarBluetooth())
         }
         if path == "/api/settings", request.method == "GET" {
             return .json(try settings())
@@ -1132,6 +1158,32 @@ final class PodsBackend: PlaybackProgressRecording {
             sql = "\(Self.episodeItemSelect) WHERE s.played_at IS NULL AND s.archived_at IS NULL AND \(Self.inListenPredicate) AND (e.published_at < ?1 OR (e.published_at = ?1 AND e.id < ?2)) AND ?3 = ?3 ORDER BY e.published_at DESC, e.id DESC LIMIT 1"
         }
         return try database.query(sql, [.int(cur.0), .int(after), .int(cur.1)], map: Self.mapEpisodeItem).first
+    }
+
+    private func carBluetoothSettings() -> CarBluetoothSettingsPayload {
+        CarBluetoothEnrollment.snapshot(
+            routes: carBluetoothRouteProvider(),
+            enrolledKeys: carBluetoothSessionStore.loadKnownCarDeviceKeys()
+        )
+    }
+
+    private func enrollCarBluetooth() throws -> CarBluetoothSettingsPayload {
+        let routes = carBluetoothRouteProvider()
+        guard let keys = CarBluetoothEnrollment.enroll(routes: routes) else {
+            throw PodsBackendError.invalid("no enrollable Bluetooth output")
+        }
+        persistEnrolledCarDeviceKeys(keys)
+        return carBluetoothSettings()
+    }
+
+    private func unenrollCarBluetooth() -> CarBluetoothSettingsPayload {
+        persistEnrolledCarDeviceKeys(CarBluetoothEnrollment.unenroll())
+        return carBluetoothSettings()
+    }
+
+    private func persistEnrolledCarDeviceKeys(_ keys: [String]) {
+        carBluetoothSessionStore.saveKnownCarDeviceKeys(keys)
+        carBluetoothEnrollmentChangedHandler?(keys)
     }
 
     private func settings() throws -> SettingsPayload {

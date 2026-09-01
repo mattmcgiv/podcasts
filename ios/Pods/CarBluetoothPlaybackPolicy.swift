@@ -216,6 +216,7 @@ final class UserDefaultsCarBluetoothSessionStore: CarBluetoothSessionStoring {
     func saveKnownCarDeviceKeys(_ keys: [String]) {
         let unique = Array(Set(keys)).sorted()
         if unique.isEmpty {
+            defaults.removeObject(forKey: Self.knownCarsKey)
             return
         }
         defaults.set(unique, forKey: Self.knownCarsKey)
@@ -235,7 +236,9 @@ final class UserDefaultsCarBluetoothSessionStore: CarBluetoothSessionStoring {
 ///   cannot prove an HFP port is a vehicle. Dual-profile A2DP+HFP pairing
 ///   also does not prove a vehicle.
 /// - Custom-named Teslas use persisted enrollment (`knownCarDeviceKeys` and
-///   `enrolledAsVehicle` on the remembered identity).
+///   `enrolledAsVehicle` on the remembered identity). The production path that
+///   creates that state is an explicit Settings action (`CarBluetoothEnrollment`),
+///   not A2DP+HFP pairing.
 /// - Consume when a route matching that **device identity** returns, the armed
 ///   episode is still loaded, and the intent is inside the TTL.
 /// - **Commit on the matching armed identity, including Tesla HFP.** Model 3
@@ -596,6 +599,12 @@ enum CarBluetoothPlaybackPolicy {
         decision.clearIntent ? nil : intent
     }
 
+    static func currentAudioSessionRoutes(
+        session: AVAudioSession = .sharedInstance()
+    ) -> [CarBluetoothRouteDescriptor] {
+        session.currentRoute.outputs.map { CarBluetoothRouteDescriptor($0) }
+    }
+
     private static func nameContainsToken(_ name: String, tokens: [String]) -> Bool {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !n.isEmpty else { return false }
@@ -606,6 +615,57 @@ enum CarBluetoothPlaybackPolicy {
             let pattern = "\\b\(NSRegularExpression.escapedPattern(for: token))\\b"
             return n.range(of: pattern, options: .regularExpression) != nil
         }
+    }
+}
+
+/// One-time, user-explicit enrollment of a Bluetooth output as the car.
+/// Headphones are never enrollable. Dual-profile pairing is not enrollment.
+enum CarBluetoothEnrollment {
+    static func enrollableDevice(
+        in routes: [CarBluetoothRouteDescriptor]
+    ) -> CarBluetoothRouteDescriptor? {
+        let candidates = routes.filter { route in
+            guard CarBluetoothPlaybackPolicy.isBluetoothPort(route.portType) else { return false }
+            let kind = CarBluetoothPlaybackPolicy.deviceKind(
+                portType: route.portType,
+                name: route.name
+            )
+            return kind != .headphone && kind != .notBluetooth
+        }
+        if let preferred = candidates.first(where: {
+            $0.portType == .bluetoothA2DP || $0.portType == .carAudio
+        }) {
+            return preferred
+        }
+        return candidates.first
+    }
+
+    /// Replaces any previous enrollment with the connected enrollable device.
+    /// Personal app: one remembered car.
+    static func enroll(routes: [CarBluetoothRouteDescriptor]) -> [String]? {
+        guard let device = enrollableDevice(in: routes) else { return nil }
+        return [device.stableDeviceKey]
+    }
+
+    /// Forgets the remembered car. Safe when nothing is enrolled.
+    static func unenroll() -> [String] {
+        []
+    }
+
+    static func snapshot(
+        routes: [CarBluetoothRouteDescriptor],
+        enrolledKeys: [String]
+    ) -> CarBluetoothSettingsPayload {
+        let device = enrollableDevice(in: routes)
+        let key = device?.stableDeviceKey
+        let currentEnrolled = key.map { enrolledKeys.contains($0) } ?? false
+        return CarBluetoothSettingsPayload(
+            enrolled: !enrolledKeys.isEmpty,
+            enrollable: device != nil,
+            current_enrolled: currentEnrolled,
+            current_device_name: device?.name,
+            current_device_key: key
+        )
     }
 }
 
