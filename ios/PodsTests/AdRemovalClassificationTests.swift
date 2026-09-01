@@ -44,6 +44,32 @@ final class AdRemovalClassificationTests: XCTestCase {
             AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes,
             AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens * 4
         )
+        XCTAssertGreaterThanOrEqual(
+            AppleSystemLanguageModelResponder.showNotesMaximumResponseTokens,
+            1_024
+        )
+        XCTAssertLessThanOrEqual(
+            AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes / 4
+                + AppleSystemLanguageModelResponder.showNotesMaximumResponseTokens,
+            AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens
+        )
+    }
+
+    func testShowNotesChapterLimitIsASingleMaintainableBaseline() {
+        XCTAssertEqual(
+            EpisodeShowNotesLimits.maximumChapterCount,
+            36,
+            "Also update @Guide(.maximumCount) on AppleShowNotesPayload.chapters"
+        )
+        XCTAssertEqual(EpisodeShowNotesLimits.minimumChapterCount, 1)
+        XCTAssertEqual(EpisodeShowNotesLimits.requestedMinimumChapterCount, 3)
+        XCTAssertEqual(EpisodeShowNotesLimits.allowedChapterCount, 1...36)
+        XCTAssertTrue(
+            EpisodeShowNotesPrompt.systemMessage.contains(
+                "Return \(EpisodeShowNotesLimits.requestedMinimumChapterCount) to \(EpisodeShowNotesLimits.maximumChapterCount) chapters"
+            )
+        )
+        XCTAssertEqual(AppleFoundationEpisodeShowNotesGenerator().promptVersion, "episode-show-notes-v2")
     }
 
     private final class StubOnDeviceResponder: AppleOnDevicePromptResponding {
@@ -230,6 +256,56 @@ final class AdRemovalClassificationTests: XCTestCase {
         ))
     }
 
+    func testShowNotesParserAcceptsTheConfiguredChapterBaseline() throws {
+        let count = EpisodeShowNotesLimits.maximumChapterCount
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: "Topic \(index)"
+            )
+        }
+        let chapters = (0..<count).map { index in
+            "{\"segment_id\":\"s\(index)\",\"title\":\"Topic \(index)\",\"summary\":\"The discussion covers topic \(index).\"}"
+        }.joined(separator: ",")
+
+        let parsed = try EpisodeShowNotesResponseParser().parse(
+            "{\"chapters\":[\(chapters)]}",
+            segments: segments
+        )
+
+        XCTAssertEqual(parsed.count, count)
+        XCTAssertEqual(parsed.first?.segmentID, "segment-0")
+        XCTAssertEqual(parsed.last?.segmentID, "segment-\(count - 1)")
+    }
+
+    func testShowNotesParserRejectsMoreChaptersThanTheBaseline() {
+        let count = EpisodeShowNotesLimits.maximumChapterCount + 1
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: "Topic \(index)"
+            )
+        }
+        let chapters = (0..<count).map { index in
+            "{\"segment_id\":\"s\(index)\",\"title\":\"Topic \(index)\",\"summary\":\"The discussion covers topic \(index).\"}"
+        }.joined(separator: ",")
+
+        XCTAssertThrowsError(try EpisodeShowNotesResponseParser().parse(
+            "{\"chapters\":[\(chapters)]}",
+            segments: segments
+        )) { error in
+            XCTAssertEqual(error as? EpisodeShowNotesError, .invalidResponse)
+        }
+    }
+
     func testShowNotesPromptAppliesByteCapWhileEscapingUntrustedTranscript() throws {
         let segment = AdTranscriptSegment(
             id: "segment-opening",
@@ -334,6 +410,32 @@ final class AdRemovalClassificationTests: XCTestCase {
         } catch let error as EpisodeShowNotesError {
             XCTAssertEqual(error, .invalidResponse)
         }
+    }
+
+    func testShowNotesGeneratorAcceptsTheConfiguredChapterBaseline() async throws {
+        let count = EpisodeShowNotesLimits.maximumChapterCount
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index),
+                endTime: Double(index + 1),
+                text: "Topic \(index)"
+            )
+        }
+        let chapters = (0..<count).map { index in
+            "{\"segment_id\":\"s\(index)\",\"title\":\"Topic \(index)\",\"summary\":\"The discussion covers topic \(index).\"}"
+        }.joined(separator: ",")
+        let generator = AppleFoundationEpisodeShowNotesGenerator(
+            responder: StubOnDeviceResponder(result: .success("{\"chapters\":[\(chapters)]}"))
+        )
+
+        let notes = try await generator.generate(segments: segments)
+
+        XCTAssertEqual(notes.count, count)
+        XCTAssertEqual(notes.first?.segmentID, "segment-0")
+        XCTAssertEqual(notes.last?.segmentID, "segment-\(count - 1)")
     }
 
     func testAppleClassifierPausesWhenOnDeviceModelIsUnavailable() async throws {

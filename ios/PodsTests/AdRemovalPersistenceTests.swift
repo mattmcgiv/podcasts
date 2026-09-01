@@ -1021,6 +1021,76 @@ final class AdRemovalPersistenceTests: XCTestCase {
         )
     }
 
+    func testShowNotesStoreAcceptsTheConfiguredChapterBaseline() throws {
+        let harness = try makeHarness()
+        let store = EpisodeShowNotesStore(database: harness.database)
+        let count = EpisodeShowNotesLimits.maximumChapterCount
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index * 10),
+                endTime: Double(index * 10 + 5),
+                text: "Topic \(index)"
+            )
+        }
+        let drafts = segments.map { segment in
+            EpisodeShowNoteDraft(
+                segmentID: segment.id,
+                title: "Topic \(segment.index)",
+                summary: "The discussion covers topic \(segment.index)."
+            )
+        }
+
+        let notes = try store.replace(
+            episodeID: harness.episodeID,
+            segments: segments,
+            drafts: drafts,
+            modelID: "test/model",
+            promptVersion: "prompt-v2"
+        )
+
+        XCTAssertEqual(notes.count, count)
+        XCTAssertEqual(notes.first?.id, "segment-0")
+        XCTAssertEqual(notes.last?.id, "segment-\(count - 1)")
+        XCTAssertEqual(try store.notes(episodeID: harness.episodeID).count, count)
+    }
+
+    func testShowNotesStoreRejectsMoreChaptersThanTheBaseline() throws {
+        let harness = try makeHarness()
+        let store = EpisodeShowNotesStore(database: harness.database)
+        let count = EpisodeShowNotesLimits.maximumChapterCount + 1
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index * 10),
+                endTime: Double(index * 10 + 5),
+                text: "Topic \(index)"
+            )
+        }
+        let drafts = segments.map { segment in
+            EpisodeShowNoteDraft(
+                segmentID: segment.id,
+                title: "Topic \(segment.index)",
+                summary: "The discussion covers topic \(segment.index)."
+            )
+        }
+
+        XCTAssertThrowsError(try store.replace(
+            episodeID: harness.episodeID,
+            segments: segments,
+            drafts: drafts,
+            modelID: "test/model",
+            promptVersion: "prompt-v2"
+        )) { error in
+            XCTAssertEqual(error as? EpisodeShowNotesError, .invalidResponse)
+        }
+        XCTAssertTrue(try store.notes(episodeID: harness.episodeID).isEmpty)
+    }
+
     func testShowNotesStoreReplaceIsAtomicAndPreservesChapterOrderAndMetadata() throws {
         let harness = try makeHarness()
         let store = EpisodeShowNotesStore(database: harness.database)

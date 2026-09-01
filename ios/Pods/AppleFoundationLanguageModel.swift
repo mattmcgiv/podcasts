@@ -204,6 +204,12 @@ enum AppleAdClassificationKind: Equatable {
 
 @Generable
 struct AppleShowNotesPayload {
+    /// `@Guide` needs a compile-time literal. Keep these bounds identical to
+    /// `EpisodeShowNotesLimits.allowedChapterCount` (enforced by tests).
+    @Guide(
+        .minimumCount(1),
+        .maximumCount(36)
+    )
     var chapters: [AppleShowNoteChapter]
 }
 
@@ -312,8 +318,22 @@ final class AppleSystemLanguageModelResponder: AppleOnDevicePromptResponding {
         case .classifyAds:
             return AdClassifierDescriptor.appleSystemLanguageModelV1.maximumOutputTokens
         case .generateShowNotes:
-            return 1_024
+            return Self.showNotesMaximumResponseTokens
         }
+    }
+
+    /// Scaled from the original 12-chapter / 1,024-token pairing, then clamped
+    /// so the 8 KB prompt plus this response fit the conservative 4,096-token window.
+    static var showNotesMaximumResponseTokens: Int {
+        let originalChapterCount = 12
+        let originalTokenBudget = 1_024
+        let scaled = originalTokenBudget
+            * EpisodeShowNotesLimits.maximumChapterCount
+            / originalChapterCount
+        let promptTokenBudget = AppleFoundationEpisodeShowNotesGenerator.maximumPromptBytes / 4
+        let leftoverContext = AdClassifierDescriptor.appleSystemLanguageModelV1.maximumContextTokens
+            - promptTokenBudget
+        return min(max(scaled, originalTokenBudget), leftoverContext)
     }
 }
 
@@ -363,7 +383,7 @@ final class AppleFoundationEpisodeShowNotesGenerator: EpisodeShowNotesGenerating
     static let maximumPromptBytes = 8_000
 
     let modelID = AdClassifierDescriptor.appleSystemLanguageModelV1.modelID
-    let promptVersion = "episode-show-notes-v1"
+    let promptVersion = "episode-show-notes-v2"
 
     private let responder: AppleOnDevicePromptResponding
     private let parser = EpisodeShowNotesResponseParser()
