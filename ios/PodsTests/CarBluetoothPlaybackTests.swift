@@ -656,6 +656,11 @@ final class CarBluetoothPlaybackTests: XCTestCase {
             return XCTFail("expected remember for paired Tesla HFP/A2DP, got \(lost)")
         }
         XCTAssertTrue(intent.device.matches(midnightHFP))
+        XCTAssertEqual(
+            intent.device.kind,
+            .car,
+            "remembered identity must stay a car after the live HFP pairing is gone"
+        )
 
         let reconnect = CarBluetoothPlaybackPolicy.action(
             reason: .newDeviceAvailable,
@@ -680,6 +685,38 @@ final class CarBluetoothPlaybackTests: XCTestCase {
                 now: now + CarBluetoothPlaybackPolicy.resumeSettleDelay
             )
         )
+    }
+
+    func testValidatedIntentUsesKnownCarContextForPromotedA2DP() {
+        let leftover = CarBluetoothResumeIntent(device: midnightA2DP, episodeID: 9, armedAt: now)
+        XCTAssertEqual(midnightA2DP.kind, .otherBluetooth)
+        XCTAssertNil(
+            CarBluetoothPlaybackPolicy.validatedIntent(leftover, now: now),
+            "A2DP vehicle-name ports are not intrinsically cars"
+        )
+        XCTAssertNotNil(
+            CarBluetoothPlaybackPolicy.validatedIntent(leftover, now: now, context: midnightContext)
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.rememberedCarDevice(midnightA2DP, context: midnightContext).kind,
+            .car
+        )
+
+        let reconnectLeftover = CarBluetoothPlaybackPolicy.action(
+            reason: .newDeviceAvailable,
+            previousRoutes: [speaker],
+            currentRoutes: [midnightHFP],
+            hasActiveContent: true,
+            isPlaying: false,
+            intent: leftover,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now,
+            context: midnightContext
+        )
+        guard case .schedule = reconnectLeftover else {
+            return XCTFail("known-car context must not clear a promoted A2DP latch, got \(reconnectLeftover)")
+        }
     }
 
     func testKnownCarKeyPromotesCustomA2DPWithoutLiveHFP() {

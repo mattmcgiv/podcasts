@@ -1803,7 +1803,10 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             && (player?.rate ?? 0) == 0
             && CarBluetoothPlaybackPolicy.shouldKeepSessionAlive(
                 intent: carBluetoothResumeIntent,
-                now: Date().timeIntervalSince1970
+                now: Date().timeIntervalSince1970,
+                context: currentCarRouteContext(
+                    outputs: Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+                )
             )
     }
 
@@ -1867,7 +1870,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private func persistCarBluetoothSession() {
         guard let episodeID = currentEpisodeID, let publisherURL else { return }
         let now = Date().timeIntervalSince1970
-        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now)
+        let context = currentCarRouteContext(
+            outputs: Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        )
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(
+            carBluetoothResumeIntent,
+            now: now,
+            context: context
+        )
         let snapshot = CarBluetoothSessionSnapshot(
             episodeID: episodeID,
             publisherURL: publisherURL.absoluteString,
@@ -1877,7 +1887,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             artist: nowPlayingMetadata?.artist,
             artworkURL: nowPlayingMetadata?.artworkURL?.absoluteString,
             duration: Self.positiveDuration(nowPlayingDuration) ?? nowPlayingMetadata?.duration,
-            resumeIntent: CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now),
+            resumeIntent: CarBluetoothPlaybackPolicy.validatedIntent(
+                carBluetoothResumeIntent,
+                now: now,
+                context: context
+            ),
             knownCarDeviceKeys: knownCarDeviceKeys
         )
         carBluetoothSessionStore.save(snapshot)
@@ -1897,10 +1911,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         nowPlayingPosition = max(0, snapshot.position)
         nowPlayingDuration = snapshot.duration ?? 0
         nowPlayingRate = requestedRate
-        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(snapshot.resumeIntent, now: now)
         if !snapshot.knownCarDeviceKeys.isEmpty {
             knownCarDeviceKeys = snapshot.knownCarDeviceKeys
         }
+        let restoreContext = CarBluetoothRouteContext(
+            knownCarDeviceKeys: Set(knownCarDeviceKeys),
+            handsFreeDeviceKeys: []
+        )
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(
+            snapshot.resumeIntent,
+            now: now,
+            context: restoreContext
+        )
         let title = snapshot.title ?? ""
         if !title.isEmpty {
             nowPlayingMetadata = NowPlayingMetadata(

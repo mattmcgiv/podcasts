@@ -342,13 +342,30 @@ enum CarBluetoothPlaybackPolicy {
         return keys.sorted()
     }
 
+    /// Persist an identity whose `kind` stays `.car` after the live HFP pairing
+    /// is gone. Custom-named Tesla A2DP is `.otherBluetooth` until promoted;
+    /// storing that descriptor made `validatedIntent` drop the latch on reconnect.
+    static func rememberedCarDevice(
+        _ route: CarBluetoothRouteDescriptor,
+        context: CarBluetoothRouteContext = .empty
+    ) -> CarBluetoothRouteDescriptor {
+        if route.kind == .car { return route }
+        guard isCar(route, context: context) else { return route }
+        return CarBluetoothRouteDescriptor(
+            uid: route.uid,
+            name: route.name,
+            portType: .bluetoothHFP
+        )
+    }
+
     static func validatedIntent(
         _ intent: CarBluetoothResumeIntent?,
         now: TimeInterval,
-        ttl: TimeInterval = resumeIntentTTL
+        ttl: TimeInterval = resumeIntentTTL,
+        context: CarBluetoothRouteContext = .empty
     ) -> CarBluetoothResumeIntent? {
         guard let intent else { return nil }
-        guard intent.device.kind == .car else { return nil }
+        guard isCar(intent.device, context: context) else { return nil }
         guard now >= intent.armedAt, now - intent.armedAt <= ttl else { return nil }
         return intent
     }
@@ -374,7 +391,7 @@ enum CarBluetoothPlaybackPolicy {
     ) -> ResumeAction {
         guard isLocalOutput, hasActiveContent else { return .none }
 
-        let validIntent = validatedIntent(intent, now: now)
+        let validIntent = validatedIntent(intent, now: now, context: context)
 
         switch reason {
         case .oldDeviceUnavailable:
@@ -389,7 +406,7 @@ enum CarBluetoothPlaybackPolicy {
             guard isPlaying || alreadyArmedForThisCar else { return .none }
             return .remember(
                 CarBluetoothResumeIntent(
-                    device: lost,
+                    device: rememberedCarDevice(lost, context: context),
                     episodeID: currentEpisodeID,
                     armedAt: now
                 )
@@ -405,7 +422,7 @@ enum CarBluetoothPlaybackPolicy {
             if isPlaying, let car = currentCars.first {
                 return .schedule(
                     CarBluetoothResumeIntent(
-                        device: car,
+                        device: rememberedCarDevice(car, context: context),
                         episodeID: currentEpisodeID,
                         armedAt: validIntent?.armedAt ?? now
                     )
@@ -416,7 +433,7 @@ enum CarBluetoothPlaybackPolicy {
                let car = currentCars.first(where: { $0.matches(validIntent.device) }) {
                 return .schedule(
                     CarBluetoothResumeIntent(
-                        device: car,
+                        device: rememberedCarDevice(car, context: context),
                         episodeID: validIntent.episodeID ?? currentEpisodeID,
                         armedAt: validIntent.armedAt
                     )
@@ -445,7 +462,7 @@ enum CarBluetoothPlaybackPolicy {
         context: CarBluetoothRouteContext = .empty
     ) -> Bool {
         guard isLocalOutput else { return false }
-        guard validatedIntent(scheduled, now: now) != nil else { return false }
+        guard validatedIntent(scheduled, now: now, context: context) != nil else { return false }
         if let armedEpisode = scheduled.episodeID, armedEpisode != currentEpisodeID {
             return false
         }
@@ -457,9 +474,10 @@ enum CarBluetoothPlaybackPolicy {
     static func shouldKeepSessionAlive(
         intent: CarBluetoothResumeIntent?,
         now: TimeInterval,
-        keepAliveDuration: TimeInterval = resumeKeepAliveDuration
+        keepAliveDuration: TimeInterval = resumeKeepAliveDuration,
+        context: CarBluetoothRouteContext = .empty
     ) -> Bool {
-        guard let intent = validatedIntent(intent, now: now) else { return false }
+        guard let intent = validatedIntent(intent, now: now, context: context) else { return false }
         return now >= intent.armedAt && now - intent.armedAt <= keepAliveDuration
     }
 
@@ -472,7 +490,7 @@ enum CarBluetoothPlaybackPolicy {
         context: CarBluetoothRouteContext = .empty
     ) -> Bool {
         guard isLocalOutput, hasActiveContent else { return false }
-        guard let intent = validatedIntent(intent, now: now) else { return false }
+        guard let intent = validatedIntent(intent, now: now, context: context) else { return false }
         return hasMatchingCar(matching: intent.device, in: currentRoutes, context: context)
     }
 
@@ -503,7 +521,7 @@ enum CarBluetoothPlaybackPolicy {
         now: TimeInterval,
         context: CarBluetoothRouteContext = .empty
     ) -> Bool {
-        guard let intent = validatedIntent(intent, now: now) else { return false }
+        guard let intent = validatedIntent(intent, now: now, context: context) else { return false }
         return hasMatchingCar(matching: intent.device, in: routes, context: context)
     }
 
