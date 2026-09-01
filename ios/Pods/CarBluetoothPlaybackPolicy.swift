@@ -209,14 +209,15 @@ final class UserDefaultsCarBluetoothSessionStore: CarBluetoothSessionStoring {
 /// Auto-resume is a finite state machine:
 /// - Arm only when a **classified car** route is lost while playing (or that
 ///   same car is already armed). AirPods / speakers / wired headphones never arm.
+///   Unknown HFP headsets and speakerphones are not cars; a negative name list
+///   cannot prove an HFP port is a vehicle.
+/// - Custom-named Teslas enroll once: A2DP media paired with HFP on the same
+///   MAC is persisted in `knownCarDeviceKeys`. HFP-only accessories never enroll.
 /// - Consume when a route matching that **device identity** returns, the armed
 ///   episode is still loaded, and the intent is inside the TTL.
-/// - **Commit on the matching car, including HFP.** Tesla Model 3 often holds
-///   HFP-only until the phone starts playback; waiting for A2DP deadlocks
-///   (the car never opens stereo / never sends AVRCP play). `play()` after
-///   settle is what completes the media hop. AirPods stay excluded by name.
-/// - Playing onto a newly appeared car (get-in-the-car hop) re-asserts play
-///   after settle, still bound to that car identity + current episode.
+/// - **Commit on the matching armed identity, including Tesla HFP.** Model 3
+///   often holds HFP-only until the phone starts playback; waiting for A2DP
+///   deadlocks. `play()` after settle completes the media hop.
 enum CarBluetoothPlaybackPolicy {
     /// Let Tesla finish the HFP bounce, then play so A2DP can come up.
     static let resumeSettleDelay: TimeInterval = 1.2
