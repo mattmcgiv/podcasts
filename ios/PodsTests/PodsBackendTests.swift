@@ -287,6 +287,63 @@ final class PodsBackendTests: XCTestCase {
         override func stopLoading() {}
     }
 
+    private final class SchemeRetryURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var requested: [URL] = []
+        private static var failSchemes: Set<String> = ["http"]
+
+        static func reset(failSchemes: Set<String> = ["http"]) {
+            lock.lock()
+            defer { lock.unlock() }
+            requested = []
+            Self.failSchemes = failSchemes
+        }
+
+        static func requestedURLs() -> [URL] {
+            lock.lock()
+            defer { lock.unlock() }
+            return requested
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool {
+            request.url?.host == "retry.example"
+        }
+
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+            request
+        }
+
+        override func startLoading() {
+            Self.lock.lock()
+            Self.requested.append(request.url!)
+            let shouldFail = Self.failSchemes.contains(request.url?.scheme ?? "")
+            Self.lock.unlock()
+            guard !shouldFail else {
+                // Mirrors the on-device ATS violation for http feed URLs.
+                let atsError = URLError(
+                    URLError.Code(rawValue: -1022),
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection."
+                    ]
+                )
+                client?.urlProtocol(self, didFailWithError: atsError)
+                return
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("<rss/>".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
+    }
+
     private struct MockDirectorySearcher: PodcastDirectorySearching {
         var podcasts: [DirectoryPodcast]
 
@@ -319,21 +376,21 @@ final class PodsBackendTests: XCTestCase {
         let adRemovalArtifactStore: AdRemovalArtifactStore
     }
 
-    private final class StubOnDeviceAvailability: AppleOnDeviceModelAvailabilityReading {
-        var availability: AppleOnDeviceModelAvailability
+    private final class StubDeepSeekCredentialStore: DeepSeekCredentialStoring {
+        private var apiKey: String?
 
-        init(_ availability: AppleOnDeviceModelAvailability = .available) {
-            self.availability = availability
+        init(apiKey: String? = "test-api-key") {
+            self.apiKey = apiKey
         }
 
-        func currentAvailability() -> AppleOnDeviceModelAvailability {
-            availability
-        }
+        var hasAPIKey: Bool { !(apiKey ?? "").isEmpty }
+        func readAPIKey() throws -> String? { apiKey }
+        func saveAPIKey(_ value: String) throws { apiKey = value }
     }
 
     private func makeHarness(
         directorySearcher: PodcastDirectorySearching? = nil,
-        modelAvailability: AppleOnDeviceModelAvailability = .available
+        deepSeekAPIKey: String? = "test-api-key"
     ) throws -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PodsBackendTests-\(UUID().uuidString)", isDirectory: true)
@@ -348,7 +405,7 @@ final class PodsBackendTests: XCTestCase {
             feedFetcher: fetcher,
             directorySearcher: directorySearcher ?? DisabledPodcastDirectorySearcher(),
             adRemovalArtifactStore: adRemovalArtifactStore,
-            onDeviceModelAvailability: StubOnDeviceAvailability(modelAvailability)
+            deepSeekCredentialStore: StubDeepSeekCredentialStore(apiKey: deepSeekAPIKey)
         )
         return Harness(
             backend: backend,
@@ -678,7 +735,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(invalidSettings.statusCode, 422)
     }
 
-    func testMarkPlayedAwaitsShowNotesCancellationBeforeMetadataCleanup() async throws {
+    func testMarkPlayedPersistsBeforeShowNotesCancellationAndDefersMetadataCleanup() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/show-notes-cancellation.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
@@ -744,6 +801,17 @@ final class PodsBackendTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(observedCancellation, "mark-played must cancel active show-note generation")
+        let response = await markPlayed.value
+        XCTAssertEqual(response.statusCode, 204)
+        let recentWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(backend, "GET", "/api/recent")
+        )
+        XCTAssertFalse(recentWhileCancellationIsBlocked.items.contains { $0.id == episodeID })
+        XCTAssertNotNil(try harness.database.scalarInt64(
+            "SELECT played_at FROM episode_state WHERE episode_id = ?",
+            [.int(episodeID)]
+        ))
         let cancellingJob = try XCTUnwrap(jobStore.job(episodeID: episodeID))
         XCTAssertEqual(
             cancellingJob.stage,
@@ -756,14 +824,12 @@ final class PodsBackendTests: XCTestCase {
         )
 
         await generator.releaseAfterCancellation()
-        let response = await markPlayed.value
-        XCTAssertEqual(response.statusCode, 204)
+        for _ in 0..<200 {
+            if try jobStore.job(episodeID: episodeID) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertNil(try jobStore.job(episodeID: episodeID))
         XCTAssertTrue(try jobStore.transcriptSegments(episodeID: episodeID).isEmpty)
-        XCTAssertNotNil(try harness.database.scalarInt64(
-            "SELECT played_at FROM episode_state WHERE episode_id = ?",
-            [.int(episodeID)]
-        ))
         do {
             _ = try await generation.value
             XCTFail("Expected mark-played to cancel in-flight show-note generation")
@@ -772,7 +838,7 @@ final class PodsBackendTests: XCTestCase {
         }
     }
 
-    func testMarkPlayedDrainsPipelineAndRejectsCancelledClassifierWrite() async throws {
+    func testMarkPlayedIsImmediatelyDurableWhileCleanupContinuesInBackground() async throws {
         let harness = try makeHarness()
         let prepared = try await prepareClassifyingEpisode(harness, guid: "pipeline-mark-played")
         let executor = CancellationHoldingClassificationExecutor(store: prepared.store)
@@ -795,12 +861,35 @@ final class PodsBackendTests: XCTestCase {
         await executor.waitUntilCancellationObserved()
 
         let completedBeforeRelease = await completion.isCompleted()
-        XCTAssertFalse(completedBeforeRelease, "mark-played returned before pipeline termination")
+        XCTAssertTrue(
+            completedBeforeRelease,
+            "mark-played must return without waiting for background pipeline cancellation"
+        )
+        let recentWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(harness.backend, "GET", "/api/recent")
+        )
+        XCTAssertFalse(
+            recentWhileCancellationIsBlocked.items.contains { $0.id == prepared.episodeID },
+            "the user's mark-played tap must become authoritative before background cancellation finishes"
+        )
+        let playedWhileCancellationIsBlocked = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(harness.backend, "GET", "/api/played")
+        )
+        XCTAssertTrue(
+            playedWhileCancellationIsBlocked.items.contains { $0.id == prepared.episodeID },
+            "the played list must expose the durable tap while cleanup remains blocked"
+        )
         XCTAssertEqual(try prepared.store.job(id: prepared.job.id)?.stage, .cancelled)
         await executor.release()
 
         let response = await markPlayed.value
         XCTAssertEqual(response.statusCode, 204)
+        for _ in 0..<200 {
+            if try prepared.store.job(id: prepared.job.id) == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         let staleWriteSucceeded = await executor.didPersistAfterCancellation()
         XCTAssertEqual(staleWriteSucceeded, false)
         XCTAssertNil(try prepared.store.job(id: prepared.job.id))
@@ -811,6 +900,42 @@ final class PodsBackendTests: XCTestCase {
         } catch is CancellationError {
             // Expected.
         }
+    }
+
+    func testBackendStartupReconcilesInterruptedPlayedCleanup() async throws {
+        let harness = try makeHarness()
+        let prepared = try await prepareClassifyingEpisode(harness, guid: "played-cleanup-restart")
+        try harness.database.withTransaction {
+            try harness.database.execute(
+                "UPDATE ad_removal_jobs SET stage = 'cancelled', updated_at = 2_000 WHERE episode_id = ?",
+                [.int(prepared.episodeID)]
+            )
+            try harness.database.execute(
+                """
+                INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, 2_000, 2_000)
+                ON CONFLICT (episode_id) DO UPDATE SET played_at = 2_000, updated_at = 2_000
+                """,
+                [.int(prepared.episodeID)]
+            )
+        }
+
+        let restartedBackend = PodsBackend(
+            database: harness.database,
+            feedFetcher: harness.fetcher,
+            directorySearcher: DisabledPodcastDirectorySearcher(),
+            adRemovalArtifactStore: harness.adRemovalArtifactStore,
+            recoverInterruptedPlayedCleanup: true
+        )
+
+        let played = try decode(
+            Page<EpisodeItem>.self,
+            from: try await call(restartedBackend, "GET", "/api/played")
+        )
+        XCTAssertTrue(played.items.contains { $0.id == prepared.episodeID })
+        XCTAssertNil(
+            try prepared.store.job(episodeID: prepared.episodeID),
+            "startup must finish cleanup that was interrupted after the authoritative tap committed"
+        )
     }
 
     func testFeatureCleanupWaitsForPipelineTerminationBeforeDeletingLateWrites() async throws {
@@ -972,7 +1097,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(detail.ad_removal_stage, "downloading", "downloading stage is exposed exactly")
         XCTAssertEqual(detail.ad_removal_blocking_reason, "storage_limit", "storage_limit blocking reason is exposed")
         _ = try store.setBlockingReason(jobID: job.id, reason: nil)
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             _ = try store.recordFailure(jobID: job.id, errorCode: "test", message: "failed")
         }
         detail = try decode(EpisodeDetail.self, from: try await call(
@@ -1181,8 +1306,8 @@ final class PodsBackendTests: XCTestCase {
         ))
         XCTAssertFalse(settings.enabled)
         XCTAssertNil(settings.enrollment_cutoff)
-        XCTAssertEqual(settings.model_repository, AdClassifierDescriptor.appleSystemLanguageModelV1.modelID)
-        XCTAssertEqual(settings.model_revision, AdClassifierDescriptor.appleSystemLanguageModelV1.modelRevision)
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-pro")
+        XCTAssertEqual(settings.model_revision, "api")
         XCTAssertEqual(settings.model_total_bytes, 0)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertTrue(settings.cloud_classifier_configured)
@@ -1201,7 +1326,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertTrue(settings.enabled)
         XCTAssertNotNil(settings.enrollment_cutoff)
         XCTAssertEqual(settings.model_download_state, "ready")
-        XCTAssertEqual(settings.model_revision, "on-device")
+        XCTAssertEqual(settings.model_revision, "api")
         XCTAssertTrue(settings.classifier_available)
 
         let existingID = try XCTUnwrap(harness.database.scalarInt64(
@@ -1230,48 +1355,29 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
     }
 
-    func testAdRemovalSettingsAndEnableReflectSystemLanguageModelAvailability() async throws {
-        let cases: [(AppleOnDeviceModelAvailability, String, String)] = [
-            (.unavailable(.deviceNotEligible), "device_not_eligible", "device_not_eligible"),
-            (.unavailable(.appleIntelligenceNotEnabled), "apple_intelligence_disabled", "apple_intelligence_not_enabled"),
-            (.unavailable(.modelNotReady), "downloading", "model_not_ready"),
-            (.unavailable(.unknown), "unavailable", "unknown")
-        ]
-        for (availability, downloadState, reason) in cases {
-            let harness = try makeHarness(modelAvailability: availability)
-            let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
-                harness.backend,
-                "GET",
-                "/api/ad-removal/settings"
-            ))
-            XCTAssertFalse(settings.classifier_available)
-            XCTAssertFalse(settings.cloud_classifier_configured)
-            XCTAssertEqual(settings.model_download_state, downloadState)
-            XCTAssertEqual(settings.classifier_unavailable_reason, reason)
-            XCTAssertFalse(settings.enabled)
+    func testAdRemovalSettingsAndEnableRequireDeepSeekAPIKey() async throws {
+        let harness = try makeHarness(deepSeekAPIKey: nil)
+        let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertFalse(settings.classifier_available)
+        XCTAssertFalse(settings.cloud_classifier_configured)
+        XCTAssertEqual(settings.model_download_state, "api_key_required")
+        XCTAssertEqual(settings.classifier_unavailable_reason, "api_key_required")
 
-            let enabled = try await call(
-                harness.backend,
-                "POST",
-                "/api/ad-removal/enable",
-                json: ["confirmed_bytes": 0]
-            )
-            XCTAssertEqual(enabled.statusCode, 422, downloadState)
-            let body = try JSONSerialization.jsonObject(with: enabled.body) as? [String: String]
-            XCTAssertEqual(body?["error"], availability.enableError)
-            XCTAssertNotEqual(
-                try harness.database.query(
-                    "SELECT value FROM settings WHERE key = 'ad_removal_enabled'",
-                    map: { sqliteString($0, 0) }
-                ).first,
-                "true",
-                downloadState
-            )
-        }
+        let enabled = try await call(
+            harness.backend,
+            "POST",
+            "/api/ad-removal/enable",
+            json: ["confirmed_bytes": 0]
+        )
+        XCTAssertEqual(enabled.statusCode, 422)
     }
 
-    func testAdRemovalPrepareRejectsWhenSystemLanguageModelIsUnavailable() async throws {
-        let harness = try makeHarness(modelAvailability: .unavailable(.appleIntelligenceNotEnabled))
+    func testAdRemovalPrepareRejectsWhenDeepSeekAPIKeyIsMissing() async throws {
+        let harness = try makeHarness(deepSeekAPIKey: nil)
         let feedURL = "https://feeds.example/unavailable-prepare.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
             show: "Unavailable",
@@ -1349,7 +1455,7 @@ final class PodsBackendTests: XCTestCase {
             directorySearcher: DisabledPodcastDirectorySearcher(),
             adRemovalArtifactStore: harness.adRemovalArtifactStore,
             adRemovalDiagnostics: diagnostics,
-            onDeviceModelAvailability: StubOnDeviceAvailability(.available)
+            deepSeekCredentialStore: StubDeepSeekCredentialStore()
         )
         let feedURL = "https://feeds.example/data-controls.xml"
         harness.fetcher.responses[feedURL] = Data(Self.rss(
@@ -1423,7 +1529,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertFalse(settings.enabled)
         XCTAssertEqual(settings.model_download_state, "ready")
         XCTAssertEqual(settings.model_downloaded_bytes, 0)
-        XCTAssertEqual(settings.model_repository, "apple/system-language-model")
+        XCTAssertEqual(settings.model_repository, "deepseek-v4-pro")
     }
 
     func testPlayedCleanupRemovesEpisodeAdArtifactsButUnsubscribeOwnsPodcastCorrections() async throws {
@@ -1487,6 +1593,14 @@ final class PodsBackendTests: XCTestCase {
 
         let played = try await call(harness.backend, "POST", "/api/episodes/\(episode.id)/played")
         XCTAssertEqual(played.statusCode, 204)
+        for _ in 0..<200 {
+            let jobRemoved = try store.job(episodeID: episode.id) == nil
+            let cleanupDrained = try harness.database.scalarInt64(
+                "SELECT COUNT(*) FROM ad_artifact_cleanup"
+            ) == 0
+            if jobRemoved && cleanupDrained { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: try harness.adRemovalArtifactStore.url(for: audioArtifact.relativePath).path
         ))
@@ -1806,6 +1920,68 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(FeedRequestCaptureURLProtocol.request()?.timeoutInterval, 12)
     }
 
+    func testFeedFetcherRetriesHTTPFeedOverHTTPSWhenTheFirstFetchFails() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: ["http"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        let response = try await fetcher.response(
+            for: try XCTUnwrap(URL(string: "http://retry.example/feed.xml")),
+            validators: FeedValidators()
+        )
+
+        guard case .data(let data, _) = response else {
+            return XCTFail("expected feed data after the https retry")
+        }
+        XCTAssertEqual(String(data: data, encoding: .utf8), "<rss/>")
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["http://retry.example/feed.xml", "https://retry.example/feed.xml"]
+        )
+    }
+
+    func testFeedFetcherDoesNotRetryWhenTheListedFeedIsAlreadyHTTPS() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: ["https"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        do {
+            _ = try await fetcher.response(
+                for: try XCTUnwrap(URL(string: "https://retry.example/feed.xml")),
+                validators: FeedValidators()
+            )
+            XCTFail("expected the https failure to propagate")
+        } catch {
+            // Expected: https failures are not retried against themselves.
+        }
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["https://retry.example/feed.xml"]
+        )
+    }
+
+    func testFeedFetcherDoesNotRetryWhenTheHTTPFeedSucceeds() async throws {
+        SchemeRetryURLProtocol.reset(failSchemes: [])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SchemeRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let fetcher = URLSessionFeedFetcher(session: session, requestTimeout: 12)
+
+        _ = try await fetcher.response(
+            for: try XCTUnwrap(URL(string: "http://retry.example/feed.xml")),
+            validators: FeedValidators()
+        )
+
+        XCTAssertEqual(
+            SchemeRetryURLProtocol.requestedURLs().map(\.absoluteString),
+            ["http://retry.example/feed.xml"]
+        )
+    }
+
     func testManualRefreshUsesTheNativeCoordinatorAndOverridesTheFreshnessWindow() async throws {
         let harness = try makeHarness()
         let feedURL = "https://feeds.example/a.xml"
@@ -2082,10 +2258,10 @@ final class PodsBackendTests: XCTestCase {
 
     func testTemporaryDebugLogExpiresAfterThreeDays() throws {
         let formatter = ISO8601DateFormatter()
-        let beforeExpiry = try XCTUnwrap(formatter.date(from: "2026-07-04T23:59:58Z"))
-        let afterExpiry = try XCTUnwrap(formatter.date(from: "2026-07-05T00:00:00Z"))
+        let beforeExpiry = try XCTUnwrap(formatter.date(from: "2026-08-17T23:59:58Z"))
+        let afterExpiry = try XCTUnwrap(formatter.date(from: "2026-08-18T00:00:00Z"))
 
-        XCTAssertEqual(PodsTemporaryDebugLog.expiryISO8601, "2026-07-04T23:59:59Z")
+        XCTAssertEqual(PodsTemporaryDebugLog.expiryISO8601, "2026-08-17T23:59:59Z")
         XCTAssertTrue(PodsTemporaryDebugLog.isEnabled(now: beforeExpiry))
         XCTAssertFalse(PodsTemporaryDebugLog.isEnabled(now: afterExpiry))
     }

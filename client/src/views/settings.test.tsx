@@ -9,8 +9,8 @@ const adRemovalSettings = {
   enabled: false,
   enrollment_cutoff: null,
   cloud_classifier_configured: true,
-  model_repository: "apple/system-language-model",
-  model_revision: "on-device",
+  model_repository: "deepseek/api",
+  model_revision: "deepseek-v4-pro",
   model_total_bytes: 0,
   model_downloaded_bytes: 0,
   model_download_state: "ready",
@@ -127,7 +127,7 @@ describe("SettingsSheet", () => {
     expect(screen.queryByRole("button", { name: "Close settings" })).not.toBeInTheDocument();
   });
 
-  it("enables on-device ad removal without an API key", async () => {
+  it("enables DeepSeek Pro ad removal when an API key is configured", async () => {
     const { calls } = installApi({
       "GET /api/ad-removal/settings": adRemovalSettings,
       "POST /api/ad-removal/enable": {
@@ -145,46 +145,38 @@ describe("SettingsSheet", () => {
     expect(enable).toBeEnabled();
     await user.click(enable);
 
-    await screen.findByText(/On-device classifier: Apple Intelligence is ready/);
+    await screen.findByText(/Cloud classifier: DeepSeek V4 Pro ready/);
     const call = calls.find((item) => item.key === "POST /api/ad-removal/enable");
     expect(JSON.parse(String(call?.init.body))).toEqual({ confirmed_bytes: 0 });
     expect(
-      screen.getByText(/Ad classification and generated show notes run on this iPhone with Apple Intelligence/),
+      screen.getByText(/Transcript text is sent to DeepSeek V4 Pro/),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText("DeepSeek API key")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("DeepSeek API key")).toHaveAttribute("placeholder", "DeepSeek API key saved");
   });
 
-  it("keeps enable disabled and explains each Apple Intelligence unavailable reason", async () => {
+  it("saves a DeepSeek API key and then allows enable", async () => {
     const unavailable = {
       ...adRemovalSettings,
       cloud_classifier_configured: false,
       classifier_available: false,
-      classifier_unavailable_reason: "apple_intelligence_not_enabled" as const,
-      model_download_state: "apple_intelligence_disabled",
+      classifier_unavailable_reason: "api_key_required" as const,
     };
-    installApi({ "GET /api/ad-removal/settings": unavailable });
-    render(<SettingsSheet onClose={() => {}} />);
-
-    expect(await screen.findByRole("button", { name: "Enable ad removal" })).toBeDisabled();
-    expect(screen.getByText("Apple Intelligence is turned off.")).toBeInTheDocument();
-    expect(screen.getByText(/Apple Intelligence & Siri/)).toBeInTheDocument();
-  });
-
-  it("tells the user to wait when the on-device model is still downloading", async () => {
-    installApi({
-      "GET /api/ad-removal/settings": {
-        ...adRemovalSettings,
-        cloud_classifier_configured: false,
-        classifier_available: false,
-        classifier_unavailable_reason: "model_not_ready",
-        model_download_state: "downloading",
-      },
+    const { calls } = installApi({
+      "GET /api/ad-removal/settings": unavailable,
+      "PUT /api/ad-removal/deepseek-key": adRemovalSettings,
     });
+    const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
 
-    expect(await screen.findByRole("button", { name: "Enable ad removal" })).toBeDisabled();
-    expect(screen.getByText("Apple Intelligence is still downloading.")).toBeInTheDocument();
-    expect(screen.getByText(/Enable ad removal once the download finishes/)).toBeInTheDocument();
+    const enable = await screen.findByRole("button", { name: "Enable ad removal" });
+    expect(enable).toBeDisabled();
+    expect(screen.getByText(/API key required/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("DeepSeek API key"), "sk-test");
+    await user.click(screen.getByRole("button", { name: "Save DeepSeek API key" }));
+    await screen.findByText("DeepSeek API key saved in iPhone Keychain");
+    expect(screen.getByRole("button", { name: "Enable ad removal" })).toBeEnabled();
+    const save = calls.find((item) => item.key === "PUT /api/ad-removal/deepseek-key");
+    expect(JSON.parse(String(save?.init.body))).toEqual({ api_key: "sk-test" });
   });
 
   it("keeps disable available and explains a pause when already enabled", async () => {
@@ -194,8 +186,7 @@ describe("SettingsSheet", () => {
         enabled: true,
         cloud_classifier_configured: false,
         classifier_available: false,
-        classifier_unavailable_reason: "model_not_ready",
-        model_download_state: "downloading",
+        classifier_unavailable_reason: "api_key_required",
       },
     });
     render(<SettingsSheet onClose={() => {}} />);
@@ -203,26 +194,9 @@ describe("SettingsSheet", () => {
     expect(await screen.findByRole("button", { name: "Disable ad removal" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Enable ad removal" })).not.toBeInTheDocument();
     expect(
-      screen.getByText(/classification is paused until Apple Intelligence is available/),
+      screen.getByText(/classification is paused until a DeepSeek API key is saved/),
     ).toBeInTheDocument();
-    expect(screen.getByText("Apple Intelligence is still downloading.")).toBeInTheDocument();
-  });
-
-  it("explains an unsupported device and does not offer a download wait", async () => {
-    installApi({
-      "GET /api/ad-removal/settings": {
-        ...adRemovalSettings,
-        cloud_classifier_configured: false,
-        classifier_available: false,
-        classifier_unavailable_reason: "device_not_eligible",
-        model_download_state: "device_not_eligible",
-      },
-    });
-    render(<SettingsSheet onClose={() => {}} />);
-
-    expect(await screen.findByRole("button", { name: "Enable ad removal" })).toBeDisabled();
-    expect(screen.getByText("Apple Intelligence is not available on this iPhone.")).toBeInTheDocument();
-    expect(screen.getByText(/this device cannot run/)).toBeInTheDocument();
+    expect(screen.getByText(/API key required/)).toBeInTheDocument();
   });
 
   it("shows storage and correction controls and runs destructive actions explicitly", async () => {

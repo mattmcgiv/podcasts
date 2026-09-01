@@ -364,21 +364,21 @@ describe("RecentView", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("shows an Apple Intelligence pause banner on Listen when the classifier is unavailable", async () => {
+  it("shows a DeepSeek key pause banner on Listen when the classifier is unavailable", async () => {
     installApi({
       ...settings,
       "GET /api/ad-removal/settings": adRemovalSettings({
         enabled: true,
         classifier_available: false,
-        classifier_unavailable_reason: "apple_intelligence_not_enabled",
+        classifier_unavailable_reason: "api_key_required",
         cloud_classifier_configured: false,
       }),
       "GET /api/recent": page([episode({ id: 1, title: "Any Ep" })]),
     });
     wrap(<RecentView />);
     const banner = await screen.findByText(/Ad finding paused/);
-    expect(banner.textContent).toMatch(/Apple Intelligence is turned off/i);
-    expect(banner.textContent).toMatch(/Apple Intelligence & Siri/i);
+    expect(banner.textContent).toMatch(/DeepSeek API key required/i);
+    expect(banner.textContent).toMatch(/Save a DeepSeek API key/i);
   });
 
   it("hides the low-storage banner when ad removal is disabled even with low space", async () => {
@@ -592,7 +592,7 @@ describe("RecentView", () => {
     const r1 = (await screen.findByText("Storage Blocked")).closest("li")!;
     expect(within(r1).getByText(/Paused.*low storage/i)).toBeInTheDocument();
     const r2 = screen.getByText("Model Blocked").closest("li")!;
-    expect(within(r2).getByText(/Waiting for Apple Intelligence/i)).toBeInTheDocument();
+    expect(within(r2).getByText(/Waiting for DeepSeek API key/i)).toBeInTheDocument();
     const r3 = screen.getByText("Low Power").closest("li")!;
     expect(within(r3).getByText(/Paused.*low power/i)).toBeInTheDocument();
     const r4 = screen.getByText("Thermal").closest("li")!;

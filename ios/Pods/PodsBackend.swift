@@ -75,7 +75,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private let adRemovalFileCleanup: AdRemovalFileCleanup?
     private let adRemovalArtifactStore: AdRemovalArtifactStore?
     private let adRemovalDiagnostics: AdRemovalDiagnostics?
-    private let onDeviceModelAvailability: AppleOnDeviceModelAvailabilityReading
+    private let deepSeekCredentialStore: DeepSeekCredentialStoring
     private let episodeShowNotesStore: EpisodeShowNotesStore
     private let episodeShowNotesService: EpisodeShowNotesService?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
@@ -90,21 +90,25 @@ final class PodsBackend: PlaybackProgressRecording {
         directorySearcher: PodcastDirectorySearching = PodcastIndexClient.fromBundle() ?? DisabledPodcastDirectorySearcher(),
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
-        onDeviceModelAvailability: AppleOnDeviceModelAvailabilityReading = SystemLanguageModelAvailabilityReader(),
-        episodeShowNotesService: EpisodeShowNotesService? = nil
+        deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore(),
+        episodeShowNotesService: EpisodeShowNotesService? = nil,
+        recoverInterruptedPlayedCleanup: Bool = false
     ) {
         self.database = database
         self.feedFetcher = feedFetcher
         self.directorySearcher = directorySearcher
         self.adRemovalArtifactStore = adRemovalArtifactStore
         self.adRemovalDiagnostics = adRemovalDiagnostics
-        self.onDeviceModelAvailability = onDeviceModelAvailability
+        self.deepSeekCredentialStore = deepSeekCredentialStore
         self.episodeShowNotesStore = EpisodeShowNotesStore(database: database)
         self.episodeShowNotesService = episodeShowNotesService
         self.adRemovalFileCleanup = adRemovalArtifactStore.map {
             AdRemovalFileCleanup(database: database, artifactStore: $0)
         }
         recoverInterruptedRefreshAttempts()
+        if recoverInterruptedPlayedCleanup {
+            recoverInterruptedPlayedCleanupAfterColdStart()
+        }
     }
 
     func recordPlaybackProgress(episodeID: Int64, seconds: Double) {
@@ -338,6 +342,16 @@ final class PodsBackend: PlaybackProgressRecording {
             return .json(["stage": job.stage.rawValue], statusCode: 202)
         }
         if path == "/api/ad-removal/settings", request.method == "GET" {
+            return .json(try adRemovalSettings())
+        }
+        if path == "/api/ad-removal/deepseek-key", request.method == "PUT" {
+            let body = try request.jsonObject()
+            guard let apiKey = body["api_key"] as? String else {
+                throw PodsBackendError.invalid("api_key is required")
+            }
+            try deepSeekCredentialStore.saveAPIKey(apiKey)
+            try AdRemovalJobStore(database: database).clearBlockingReasons([.modelRequired])
+            if let adRemovalRunRequestHandler { Task { await adRemovalRunRequestHandler() } }
             return .json(try adRemovalSettings())
         }
         if path == "/api/ad-removal/statuses", request.method == "GET" {
@@ -755,8 +769,8 @@ final class PodsBackend: PlaybackProgressRecording {
         CASE WHEN j.stage = 'classifying' THEN (
             CASE
                 WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
-                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 8 THEN 1
-                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 8 + 5) / 6
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
             END
         ) ELSE NULL END AS total_windows
         FROM episodes e JOIN podcasts p ON p.id = e.podcast_id
@@ -783,15 +797,14 @@ final class PodsBackend: PlaybackProgressRecording {
         }
     }
 
-    private func requireOnDeviceClassifierAvailable() throws {
-        let availability = onDeviceModelAvailability.currentAvailability()
-        guard availability.available else {
-            throw PodsBackendError.invalid(availability.enableError)
+    private func requireCloudClassifierAvailable() throws {
+        guard deepSeekCredentialStore.hasAPIKey else {
+            throw PodsBackendError.invalid("DeepSeek API key is required")
         }
     }
 
     private func prepareAdRemoval(id: Int64) throws -> AdRemovalJob {
-        try requireOnDeviceClassifierAvailable()
+        try requireCloudClassifierAvailable()
         try episodeExists(id: id)
         let store = AdRemovalJobStore(database: database)
         if let existing = try store.job(episodeID: id) {
@@ -804,7 +817,7 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     private func retryAdRemoval(id: Int64) throws -> AdRemovalJob {
-        try requireOnDeviceClassifierAvailable()
+        try requireCloudClassifierAvailable()
         try episodeExists(id: id)
         let store = AdRemovalJobStore(database: database)
         guard let existing = try store.job(episodeID: id) else {
@@ -833,19 +846,19 @@ final class PodsBackend: PlaybackProgressRecording {
                 count: sqlite3_column_int64(statement, 2)
             )
         }
-        let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1
-        let availability = onDeviceModelAvailability.currentAvailability()
+        let descriptor = DeepSeekAdClassifier(credentialStore: deepSeekCredentialStore).descriptor
+        let classifierAvailable = deepSeekCredentialStore.hasAPIKey
         return AdRemovalSettingsPayload(
             enabled: values["ad_removal_enabled"] == "true",
             enrollment_cutoff: values["ad_removal_enrollment_cutoff"].flatMap(Int64.init),
-            cloud_classifier_configured: availability.available,
+            cloud_classifier_configured: classifierAvailable,
             model_repository: descriptor.modelID,
             model_revision: descriptor.modelRevision,
             model_total_bytes: 0,
             model_downloaded_bytes: 0,
-            model_download_state: availability.downloadState,
-            classifier_available: availability.available,
-            classifier_unavailable_reason: availability.reason?.rawValue,
+            model_download_state: classifierAvailable ? "ready" : "api_key_required",
+            classifier_available: classifierAvailable,
+            classifier_unavailable_reason: classifierAvailable ? nil : "api_key_required",
             episode_storage_bytes: (try adRemovalArtifactStore?.episodeArtifactBytes()) ?? 0,
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
@@ -917,8 +930,8 @@ final class PodsBackend: PlaybackProgressRecording {
         CASE WHEN j.stage = 'classifying' THEN (
             CASE
                 WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) = 0 THEN NULL
-                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 8 THEN 1
-                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 8 + 5) / 6
+                WHEN (SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) <= 64 THEN 1
+                ELSE 1 + ((SELECT COUNT(*) FROM ad_transcript_segments s WHERE s.episode_id = e.id) - 64 + 59) / 60
             END
         ) ELSE NULL END AS total_windows
         FROM episodes e
@@ -946,16 +959,15 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     private func enableAdRemoval(confirmedBytes: Int64) throws -> AdRemovalSettingsPayload {
-        // confirmed_bytes remains in the API for older clients. The on-device
-        // Apple Intelligence model is OS-managed, so no download consent is required.
-        _ = confirmedBytes
-        let availability = onDeviceModelAvailability.currentAvailability()
-        guard availability.available else {
-            throw PodsBackendError.invalid(availability.enableError)
+        guard deepSeekCredentialStore.hasAPIKey else {
+            throw PodsBackendError.invalid("DeepSeek API key is required")
         }
+        // confirmed_bytes remains in the API for older clients. Cloud classification
+        // does not require a local model download.
+        _ = confirmedBytes
         let values = try settingValues()
         let cutoff = values["ad_removal_enrollment_cutoff"] ?? String(nowUnix())
-        let descriptor = AdClassifierDescriptor.appleSystemLanguageModelV1
+        let descriptor = DeepSeekAdClassifier(credentialStore: deepSeekCredentialStore).descriptor
         try database.withTransaction {
             try setSetting(key: "ad_removal_enabled", value: "true")
             try setSetting(key: "ad_removal_enrollment_cutoff", value: cutoff)
@@ -1054,24 +1066,19 @@ final class PodsBackend: PlaybackProgressRecording {
     private func setPlayed(id: Int64) async throws {
         try episodeExists(id: id)
         let ts = nowUnix()
-        // Make the persisted source unavailable before awaiting cancellation.
-        // The service tombstone covers the await itself; this cancelled stage
-        // closes the handoff between cancellation completion and cleanup.
-        try database.execute(
-            """
-            UPDATE ad_removal_jobs
-            SET stage = 'cancelled', blocking_reason = NULL, updated_at = ?
-            WHERE episode_id = ?
-            """,
-            [.int(ts), .int(id)]
-        )
-        // The classifier/transcriber/downloader may still hold episode input
-        // in memory. Drain that worker before deleting its durable sources.
-        await cancelAdRemovalPipeline(.episode(id))
-        // A generation task may still hold the transcript in memory. Wait for
-        // it to finish cancelling before deleting the episode's source data.
-        await episodeShowNotesService?.cancel(episodeID: id)
+        // The user's tap is authoritative. Persist both the played state and
+        // the pipeline tombstone in one transaction before starting any work
+        // that can suspend. Reads and app restarts must observe the tap even if
+        // cancellation is slow or the process is terminated during cleanup.
         try database.withTransaction {
+            try database.execute(
+                """
+                UPDATE ad_removal_jobs
+                SET stage = 'cancelled', blocking_reason = NULL, updated_at = ?
+                WHERE episode_id = ?
+                """,
+                [.int(ts), .int(id)]
+            )
             try database.execute(
                 """
                 INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?)
@@ -1079,11 +1086,60 @@ final class PodsBackend: PlaybackProgressRecording {
                 """,
                 [.int(id), .int(ts), .int(ts)]
             )
-            try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
         }
-        try adRemovalFileCleanup?.drain()
+
+        // Cancellation and artifact cleanup are deliberately detached from the
+        // HTTP response. The cancelled job is a durable restart marker; init
+        // reconciles it if this task is interrupted by process termination.
+        Task { [weak self] in
+            await self?.finishPlayedCleanup(id: id)
+        }
+    }
+
+    private func finishPlayedCleanup(id: Int64) async {
+        // Workers can still hold episode input in memory. Drain them before
+        // deleting durable sources so a cancelled worker cannot write late.
+        await cancelAdRemovalPipeline(.episode(id))
+        await episodeShowNotesService?.cancel(episodeID: id)
+        do {
+            try database.withTransaction {
+                try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: id)
+            }
+            try adRemovalFileCleanup?.drain()
+        } catch {
+            PodsLog("Pods played-episode background cleanup failed episodeID=\(id): \(error)")
+        }
         if let adRemovalRunRequestHandler {
             await adRemovalRunRequestHandler()
+        }
+    }
+
+    /// A process can be terminated after the played-state transaction commits
+    /// but before its background cancellation finishes. No old worker survives
+    /// a relaunch, so stale metadata for played episodes is safe to reconcile
+    /// synchronously before the scheduler is allowed to resume.
+    private func recoverInterruptedPlayedCleanupAfterColdStart() {
+        do {
+            let episodeIDs = try database.query(
+                """
+                SELECT j.episode_id
+                FROM ad_removal_jobs j
+                JOIN episode_state s ON s.episode_id = j.episode_id
+                WHERE s.played_at IS NOT NULL
+                ORDER BY j.episode_id
+                """,
+                map: { sqlite3_column_int64($0, 0) }
+            )
+            guard !episodeIDs.isEmpty else { return }
+            try database.withTransaction {
+                for episodeID in episodeIDs {
+                    try AdRemovalJobStore.cleanupEpisodeMetadata(in: database, episodeID: episodeID)
+                }
+            }
+            try adRemovalFileCleanup?.drain()
+            PodsLog("Pods recovered played-episode cleanup count=\(episodeIDs.count)")
+        } catch {
+            PodsLog("Pods played-episode cleanup recovery failed: \(error)")
         }
     }
 

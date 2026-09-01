@@ -174,15 +174,15 @@ describe("PlayerSheet + MiniPlayer", () => {
     await screen.findByRole("dialog", { name: "Player" });
     const audio = FakeAudio.last();
 
-    const firstNext = screen.getByRole("button", { name: "Next: A new direction (0hrs 2mins)" });
+    const firstNext = screen.getByRole("button", { name: "Next: A new direction (+2 mins)" });
     expect(firstNext.querySelector(".next-chapter-prefix")).toHaveTextContent("Next:");
-    expect(firstNext.querySelector(".next-chapter-time")).toHaveTextContent("(0hrs 2mins)");
+    expect(firstNext.querySelector(".next-chapter-time")).toHaveTextContent("(+2 mins)");
     expect(screen.queryByRole("button", { name: /Next: Ads/ })).not.toBeInTheDocument();
     await user.click(firstNext);
     expect(audio.currentTime).toBe(125.25);
-    const closing = screen.getByRole("button", { name: "Next: Closing lessons (0hrs 4mins)" });
+    const closing = screen.getByRole("button", { name: "Next: Closing lessons (+2 mins)" });
     await user.click(closing);
-    expect(screen.getByRole("button", { name: "Next: Long-form takeaway (1hr 1min)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next: Long-form takeaway (+57 mins)" })).toBeInTheDocument();
   });
 
   it("places playback options above Chapters and collapses consecutive ad markers", async () => {

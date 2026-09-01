@@ -5,7 +5,7 @@ import { APP_NAME } from "../config";
 import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { useList } from "../hooks";
 import { usePlayer } from "../player";
-import { onDeviceClassifierCopy } from "../lib";
+import { cloudClassifierCopy } from "../lib";
 import { refreshFeeds } from "../refreshFeeds";
 import type { AdRemovalSettings, AdRemovalStage, EpisodeItem, RefreshStatus } from "../types";
 import type { AdRemovalStatusItem } from "../types";
@@ -320,7 +320,7 @@ export function RecentView() {
 
   const classifierPause = useMemo(() => {
     if (!adSettings || !adSettings.enabled || adSettings.classifier_available) return null;
-    return onDeviceClassifierCopy(adSettings);
+    return cloudClassifierCopy(adSettings);
   }, [adSettings]);
 
   function markPlayed(item: EpisodeItem) {

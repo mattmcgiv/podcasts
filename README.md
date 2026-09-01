@@ -10,7 +10,7 @@ No discovery feed. No recommendations. Your subscriptions, unplayed episodes fir
 - **Search in Shows** for Podcast Index directory results and your local episodes (search is not a separate tab)
 - **Native feed refresh** on the iPhone (foreground catch-up plus opportunistic background refresh; manual refresh always works)
 - **Playback** with scrubber, skip back/forward, speeds through 3×, autoplay next, and mini player
-- **On-device ad removal** (optional): download audio, local speech transcription, Apple Intelligence classification of ad ranges, automatic skip during playback with undo
+- **Ad removal** (optional): download audio, local speech transcription, DeepSeek V4 Pro classification of ad ranges, automatic skip during playback with undo
 - **Generated show notes / chapters** from the episode transcript when ad-removal processing is ready
 - **Play on Mac** via the optional **Pods Speaker** menu-bar app (LAN cast, not AirPlay; progress saves on the phone)
 - **Library tools**: subscribe by search or RSS URL, OPML import/export, unsubscribe
@@ -25,7 +25,7 @@ People-following / guest appearances exist in the codebase but stay off by defau
 | `client/` | React UI (runtime deps: `react` + `react-dom` only) |
 | `ios/` | Private iPhone target, Swift backend, local server, reinstall automation |
 | `mac/` | Optional **Pods Speaker** menu-bar companion |
-| `docs/` | Design notes (for example on-device ad removal) |
+| `docs/` | Design notes (for example ad removal) |
 | `dev/` | Isolated Apple `container` workflow for frontend tooling |
 | `shared/` | Small shared Swift helpers |
 
@@ -97,7 +97,7 @@ Without keys, local episode search still works. Directory subscribe-by-search re
 
 Ad removal is off by default. In Settings:
 
-1. Enable ad removal when Apple Intelligence is available on this iPhone. Classification and show notes stay on device; no API key is required. If the model is downloading, Apple Intelligence is off, or the device/region is ineligible, Settings explains why and what to do.
+1. Save a DeepSeek API key in Settings, then enable ad removal. Transcript text is sent to DeepSeek V4 Pro for classification and generated show notes; episode audio stays on the iPhone.
 2. New subscribed episodes after the enrollment cutoff prepare in the background. Existing episodes can use **Prepare ad-free**.
 
 Details, storage rules, and acceptance criteria: `docs/ad-removal-design.md` and `docs/ad-removal-v1-acceptance.md`.
