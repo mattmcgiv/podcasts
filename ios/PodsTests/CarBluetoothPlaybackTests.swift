@@ -745,10 +745,10 @@ final class CarBluetoothPlaybackTests: XCTestCase {
                 currentEpisodeID: 9,
                 isLocalOutput: true,
                 now: now,
-                context: .empty
+                context: enrolledContext
             ),
             .none,
-            "un-enrolled dual-profile headset must not arm"
+            "enrolling Midnight must not treat an un-enrolled dual-profile headset as a car"
         )
         XCTAssertEqual(
             CarBluetoothPlaybackPolicy.action(

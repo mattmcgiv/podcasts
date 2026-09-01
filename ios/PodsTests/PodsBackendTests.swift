@@ -679,12 +679,13 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(invalidSettings.statusCode, 422)
     }
 
-    func testCarBluetoothEnrollmentAPIFromEmptyStorePersistsStableKey() async throws {
+    func testCarBluetoothEnrollmentAPIFromEmptyStoreResumesCustomTeslaAndIgnoresHeadset() async throws {
         let harness = try makeHarness()
         let suite = "pods.carBluetooth.api.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = UserDefaultsCarBluetoothSessionStore(defaults: defaults)
+        let now: TimeInterval = 1_000_000
         let midnightA2DP = CarBluetoothRouteDescriptor(
             uid: "aa:bb:cc:dd:ee:ff-tacl",
             name: "Midnight",
@@ -695,17 +696,49 @@ final class PodsBackendTests: XCTestCase {
             name: "Midnight",
             portType: .bluetoothHFP
         )
+        let jabraA2DP = CarBluetoothRouteDescriptor(
+            uid: "fe:ed:fa:ce:00:11-tacl",
+            name: "Jabra Elite 7",
+            portType: .bluetoothA2DP
+        )
+        let jabraHFP = CarBluetoothRouteDescriptor(
+            uid: "fe:ed:fa:ce:00:11-tsco",
+            name: "Jabra Elite 7",
+            portType: .bluetoothHFP
+        )
         let airPods = CarBluetoothRouteDescriptor(
             uid: "de:ad:be:ef:00:01-tacl",
             name: "AirPods Pro",
             portType: .bluetoothA2DP
+        )
+        let speaker = CarBluetoothRouteDescriptor(
+            uid: "Speaker",
+            name: "Speaker",
+            portType: .builtInSpeaker
         )
         var notified: [String] = []
         harness.backend.setCarBluetoothSessionStore(store)
         harness.backend.setCarBluetoothRouteProvider { [midnightA2DP, midnightHFP] }
         harness.backend.setCarBluetoothEnrollmentChangedHandler { notified = $0 }
 
-        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [])
+        XCTAssertEqual(store.loadKnownCarDeviceKeys(), [], "fresh install has no enrolled car")
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [midnightA2DP, midnightHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: .empty
+            ),
+            .none,
+            "custom name without production enrollment is not a car"
+        )
+
         let before = try decode(
             CarBluetoothSettingsPayload.self,
             from: try await call(harness.backend, "GET", "/api/car-bluetooth")
@@ -724,6 +757,66 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertTrue(enrolled.current_enrolled)
         XCTAssertEqual(store.loadKnownCarDeviceKeys(), [midnightA2DP.stableDeviceKey])
         XCTAssertEqual(notified, [midnightA2DP.stableDeviceKey])
+
+        let enrolledContext = CarBluetoothRouteContext(
+            knownCarDeviceKeys: Set(store.loadKnownCarDeviceKeys()),
+            handsFreeDeviceKeys: []
+        )
+        let lost = CarBluetoothPlaybackPolicy.action(
+            reason: .oldDeviceUnavailable,
+            previousRoutes: [midnightA2DP, midnightHFP],
+            currentRoutes: [speaker],
+            hasActiveContent: true,
+            isPlaying: true,
+            intent: nil,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now,
+            context: enrolledContext
+        )
+        guard case .remember(let intent) = lost else {
+            return XCTFail("HTTP enrollment must arm the custom Tesla on disconnect, got \(lost)")
+        }
+        let reconnect = CarBluetoothPlaybackPolicy.action(
+            reason: .newDeviceAvailable,
+            previousRoutes: [speaker],
+            currentRoutes: [midnightHFP],
+            hasActiveContent: true,
+            isPlaying: false,
+            intent: intent,
+            currentEpisodeID: 9,
+            isLocalOutput: true,
+            now: now
+        )
+        guard case .schedule(let scheduled) = reconnect else {
+            return XCTFail("HFP reconnect must resume after HTTP enrollment, got \(reconnect)")
+        }
+        XCTAssertTrue(
+            CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
+                scheduled: scheduled,
+                currentRoutes: [midnightHFP],
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now + CarBluetoothPlaybackPolicy.resumeSettleDelay
+            )
+        )
+
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [jabraA2DP, jabraHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: enrolledContext
+            ),
+            .none,
+            "enrolling Midnight must not treat an un-enrolled dual-profile headset as a car"
+        )
 
         harness.backend.setCarBluetoothRouteProvider { [airPods] }
         let headphones = try await call(harness.backend, "POST", "/api/car-bluetooth/enroll")
