@@ -28,7 +28,9 @@ enum EpisodeShowNotesError: Error, Equatable {
 ///
 /// Change `maximumChapterCount`, then keep
 /// `@Guide(.maximumCount)` on `AppleShowNotesPayload.chapters` identical.
-/// The on-device response-token budget scales from that count automatically.
+/// DeepSeek and Apple both send `EpisodeShowNotesPrompt` and persist
+/// `EpisodeShowNotesPrompt.version`. The on-device response-token budget
+/// scales from that count automatically.
 enum EpisodeShowNotesLimits {
     /// Parser and store accept a single chapter for short episodes.
     static let minimumChapterCount = 1
@@ -256,7 +258,7 @@ final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
     }
 
     let modelID = DeepSeekAdClassifier.modelID
-    let promptVersion = "episode-show-notes-v1"
+    let promptVersion = EpisodeShowNotesPrompt.version
     private let credentialStore: DeepSeekCredentialStoring
     private let transport: Transport
     private let parser = EpisodeShowNotesResponseParser()

@@ -107,6 +107,18 @@ final class AdRemovalClassificationTests: XCTestCase {
             AppleFoundationEpisodeShowNotesGenerator().promptVersion,
             EpisodeShowNotesPrompt.version
         )
+        XCTAssertEqual(
+            DeepSeekEpisodeShowNotesGenerator(
+                credentialStore: StubDeepSeekShowNotesCredentialStore()
+            ).promptVersion,
+            EpisodeShowNotesPrompt.version
+        )
+    }
+
+    private final class StubDeepSeekShowNotesCredentialStore: DeepSeekCredentialStoring {
+        var hasAPIKey: Bool { true }
+        func readAPIKey() throws -> String? { "test-api-key" }
+        func saveAPIKey(_ value: String) throws {}
     }
 
     private final class StubOnDeviceResponder: AppleOnDevicePromptResponding {
