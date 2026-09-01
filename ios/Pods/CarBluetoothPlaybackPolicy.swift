@@ -9,15 +9,33 @@ struct CarBluetoothRouteDescriptor: Equatable, Codable {
     var uid: String
     var name: String
     var portTypeRaw: String
+    /// Persisted enrollment for a custom-named vehicle. Name tokens and
+    /// `.carAudio` remain the only intrinsic classifiers; A2DP+HFP pairing
+    /// is not a vehicle.
+    var enrolledAsVehicle: Bool
 
-    init(uid: String, name: String, portType: AVAudioSession.Port) {
+    init(
+        uid: String,
+        name: String,
+        portType: AVAudioSession.Port,
+        enrolledAsVehicle: Bool = false
+    ) {
         self.uid = uid
         self.name = name
         self.portTypeRaw = portType.rawValue
+        self.enrolledAsVehicle = enrolledAsVehicle
     }
 
     init(_ port: AVAudioSessionPortDescription) {
         self.init(uid: port.uid, name: port.portName, portType: port.portType)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        uid = try container.decode(String.self, forKey: .uid)
+        name = try container.decode(String.self, forKey: .name)
+        portTypeRaw = try container.decode(String.self, forKey: .portTypeRaw)
+        enrolledAsVehicle = try container.decodeIfPresent(Bool.self, forKey: .enrolledAsVehicle) ?? false
     }
 
     var portType: AVAudioSession.Port {
@@ -25,7 +43,11 @@ struct CarBluetoothRouteDescriptor: Equatable, Codable {
     }
 
     var kind: CarBluetoothDeviceKind {
-        CarBluetoothPlaybackPolicy.deviceKind(portType: portType, name: name)
+        let classified = CarBluetoothPlaybackPolicy.deviceKind(portType: portType, name: name)
+        if enrolledAsVehicle, classified != .headphone, classified != .notBluetooth {
+            return .car
+        }
+        return classified
     }
 
     var normalizedName: String {
@@ -134,9 +156,9 @@ struct CarBluetoothSessionSnapshot: Equatable, Codable {
 /// Extra signals for custom-named Teslas. Vehicle Bluetooth names are often
 /// the owner's car name ("Midnight"), not "Tesla Model 3".
 ///
-/// `handsFreeDeviceKeys` is only a pairing hint: A2DP on the same MAC can be
-/// enrolled once. HFP alone never makes a device a car — headsets,
-/// intercoms, and speakerphones also use HFP.
+/// `knownCarDeviceKeys` is the only custom-name enrollment signal. Dual-profile
+/// A2DP+HFP pairing (`handsFreeDeviceKeys`) does not prove a vehicle — headsets
+/// commonly expose both.
 struct CarBluetoothRouteContext: Equatable {
     var knownCarDeviceKeys: Set<String>
     var handsFreeDeviceKeys: Set<String>
@@ -210,9 +232,10 @@ final class UserDefaultsCarBluetoothSessionStore: CarBluetoothSessionStoring {
 /// - Arm only when a **classified car** route is lost while playing (or that
 ///   same car is already armed). AirPods / speakers / wired headphones never arm.
 ///   Unknown HFP headsets and speakerphones are not cars; a negative name list
-///   cannot prove an HFP port is a vehicle.
-/// - Custom-named Teslas enroll once: A2DP media paired with HFP on the same
-///   MAC is persisted in `knownCarDeviceKeys`. HFP-only accessories never enroll.
+///   cannot prove an HFP port is a vehicle. Dual-profile A2DP+HFP pairing
+///   also does not prove a vehicle.
+/// - Custom-named Teslas use persisted enrollment (`knownCarDeviceKeys` and
+///   `enrolledAsVehicle` on the remembered identity).
 /// - Consume when a route matching that **device identity** returns, the armed
 ///   episode is still loaded, and the intent is inside the TTL.
 /// - **Commit on the matching armed identity, including Tesla HFP.** Model 3
@@ -260,10 +283,6 @@ enum CarBluetoothPlaybackPolicy {
         return .notBluetooth
     }
 
-    static func isMediaPort(_ type: AVAudioSession.Port) -> Bool {
-        type == .bluetoothA2DP || type == .carAudio
-    }
-
     static func isCar(
         _ route: CarBluetoothRouteDescriptor,
         context: CarBluetoothRouteContext = .empty
@@ -274,13 +293,7 @@ enum CarBluetoothPlaybackPolicy {
         case .headphone, .notBluetooth:
             return false
         case .otherBluetooth:
-            let key = route.stableDeviceKey
-            if context.knownCarDeviceKeys.contains(key) {
-                return true
-            }
-            // One-time enrollment: stereo media paired with HFP on the same
-            // MAC. HFP-only accessories (headsets, speakerphones) never qualify.
-            return isMediaPort(route.portType) && context.handsFreeDeviceKeys.contains(key)
+            return context.knownCarDeviceKeys.contains(route.stableDeviceKey)
         }
     }
 
@@ -360,19 +373,20 @@ enum CarBluetoothPlaybackPolicy {
         return keys.sorted()
     }
 
-    /// Persist an identity whose `kind` stays `.car` after the live HFP pairing
-    /// is gone. Custom-named Tesla A2DP is `.otherBluetooth` until promoted;
-    /// storing that descriptor made `validatedIntent` drop the latch on reconnect.
+    /// Persist an enrolled vehicle identity so `kind` stays `.car` after
+    /// reconnect, without rewriting the port to HFP (HFP is not intrinsically
+    /// a car). Dual-profile pairing is not enrollment.
     static func rememberedCarDevice(
         _ route: CarBluetoothRouteDescriptor,
         context: CarBluetoothRouteContext = .empty
     ) -> CarBluetoothRouteDescriptor {
-        if route.kind == .car { return route }
         guard isCar(route, context: context) else { return route }
+        if route.enrolledAsVehicle { return route }
         return CarBluetoothRouteDescriptor(
             uid: route.uid,
             name: route.name,
-            portType: .bluetoothHFP
+            portType: route.portType,
+            enrolledAsVehicle: true
         )
     }
 

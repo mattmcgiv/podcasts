@@ -59,10 +59,26 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         name: "Poly Sync 20",
         portType: .bluetoothHFP
     )
+    private let jabraA2DP = CarBluetoothRouteDescriptor(
+        uid: "fe:ed:fa:ce:00:11-tacl",
+        name: "Jabra Elite 7",
+        portType: .bluetoothA2DP
+    )
+    private let jabraHFP = CarBluetoothRouteDescriptor(
+        uid: "fe:ed:fa:ce:00:11-tsco",
+        name: "Jabra Elite 7",
+        portType: .bluetoothHFP
+    )
     private var midnightContext: CarBluetoothRouteContext {
         CarBluetoothRouteContext(
+            knownCarDeviceKeys: [midnightA2DP.stableDeviceKey],
+            handsFreeDeviceKeys: []
+        )
+    }
+    private var jabraDualProfileContext: CarBluetoothRouteContext {
+        CarBluetoothRouteContext(
             knownCarDeviceKeys: [],
-            handsFreeDeviceKeys: [midnightHFP.stableDeviceKey]
+            handsFreeDeviceKeys: [jabraHFP.stableDeviceKey]
         )
     }
 
@@ -87,14 +103,26 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         XCTAssertEqual(polySpeakerphoneHFP.kind, .otherBluetooth)
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(midnightHFP))
         XCTAssertFalse(
-            CarBluetoothPlaybackPolicy.isCar(midnightHFP, context: midnightContext),
-            "HFP pairing alone must not classify an accessory as a car"
+            CarBluetoothPlaybackPolicy.isCar(
+                midnightA2DP,
+                context: CarBluetoothRouteContext(
+                    knownCarDeviceKeys: [],
+                    handsFreeDeviceKeys: [midnightHFP.stableDeviceKey]
+                )
+            ),
+            "A2DP+HFP pairing alone must not classify an accessory as a car"
         )
         XCTAssertTrue(CarBluetoothPlaybackPolicy.isCar(midnightA2DP, context: midnightContext))
+        XCTAssertTrue(
+            CarBluetoothPlaybackPolicy.isCar(midnightHFP, context: midnightContext),
+            "persisted enrollment applies to every profile of that MAC"
+        )
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(midnightA2DP))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jbl, context: midnightContext))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(airPods, context: midnightContext))
         XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(polySpeakerphoneHFP))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jabraA2DP, context: jabraDualProfileContext))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jabraHFP, context: jabraDualProfileContext))
     }
 
     func testTeslaHFPAndA2DPShareStableIdentity() {
@@ -648,7 +676,7 @@ final class CarBluetoothPlaybackTests: XCTestCase {
                 now: now
             ),
             .none,
-            "A2DP-only custom name without HFP pairing is a speaker, not a car"
+            "custom name without persisted enrollment is not a car"
         )
 
         let lost = CarBluetoothPlaybackPolicy.action(
@@ -664,13 +692,13 @@ final class CarBluetoothPlaybackTests: XCTestCase {
             context: midnightContext
         )
         guard case .remember(let intent) = lost else {
-            return XCTFail("expected remember for paired Tesla HFP/A2DP, got \(lost)")
+            return XCTFail("expected remember for enrolled custom Tesla, got \(lost)")
         }
         XCTAssertTrue(intent.device.matches(midnightHFP))
         XCTAssertEqual(
             intent.device.kind,
             .car,
-            "remembered identity must stay a car after the live HFP pairing is gone"
+            "remembered identity must stay a car after enrollment context is gone"
         )
 
         let reconnect = CarBluetoothPlaybackPolicy.action(
@@ -704,6 +732,17 @@ final class CarBluetoothPlaybackTests: XCTestCase {
         XCTAssertNil(
             CarBluetoothPlaybackPolicy.validatedIntent(leftover, now: now),
             "A2DP vehicle-name ports are not intrinsically cars"
+        )
+        XCTAssertNil(
+            CarBluetoothPlaybackPolicy.validatedIntent(
+                leftover,
+                now: now,
+                context: CarBluetoothRouteContext(
+                    knownCarDeviceKeys: [],
+                    handsFreeDeviceKeys: [midnightHFP.stableDeviceKey]
+                )
+            ),
+            "A2DP+HFP pairing is not enrollment"
         )
         XCTAssertNotNil(
             CarBluetoothPlaybackPolicy.validatedIntent(leftover, now: now, context: midnightContext)
@@ -946,6 +985,56 @@ final class CarBluetoothPlaybackTests: XCTestCase {
                 isLocalOutput: true,
                 now: now
             )
+        )
+    }
+
+    func testUnknownDualProfileHeadsetDoesNotClassifyAsCarOrArm() {
+        XCTAssertEqual(jabraA2DP.kind, .otherBluetooth)
+        XCTAssertEqual(jabraHFP.kind, .otherBluetooth)
+        XCTAssertTrue(jabraA2DP.matches(jabraHFP))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jabraA2DP, context: jabraDualProfileContext))
+        XCTAssertFalse(CarBluetoothPlaybackPolicy.isCar(jabraHFP, context: jabraDualProfileContext))
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.rememberedCarDevice(jabraA2DP, context: jabraDualProfileContext).kind,
+            .otherBluetooth
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.discoveredCarDeviceKeys(
+                routes: [jabraA2DP, jabraHFP],
+                context: jabraDualProfileContext
+            ),
+            [],
+            "A2DP+HFP pairing must not enroll an unknown headset"
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .oldDeviceUnavailable,
+                previousRoutes: [jabraA2DP, jabraHFP],
+                currentRoutes: [speaker],
+                hasActiveContent: true,
+                isPlaying: true,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: jabraDualProfileContext
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            CarBluetoothPlaybackPolicy.action(
+                reason: .newDeviceAvailable,
+                previousRoutes: [speaker],
+                currentRoutes: [jabraHFP, jabraA2DP],
+                hasActiveContent: true,
+                isPlaying: false,
+                intent: nil,
+                currentEpisodeID: 9,
+                isLocalOutput: true,
+                now: now,
+                context: jabraDualProfileContext
+            ),
+            .none
         )
     }
 
