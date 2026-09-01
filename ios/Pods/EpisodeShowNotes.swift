@@ -24,6 +24,26 @@ enum EpisodeShowNotesError: Error, Equatable {
     case transcriptTooLarge
 }
 
+/// Single place to retune how many chapters an episode may have.
+///
+/// Change `maximumChapterCount`, then keep
+/// `@Guide(.maximumCount)` on `AppleShowNotesPayload.chapters` identical.
+/// DeepSeek and Apple both send `EpisodeShowNotesPrompt` and persist
+/// `EpisodeShowNotesPrompt.version`. The on-device response-token budget
+/// scales from that count automatically.
+enum EpisodeShowNotesLimits {
+    /// Parser and store accept a single chapter for short episodes.
+    static let minimumChapterCount = 1
+    /// Prompt asks the model for at least this many when the material supports it.
+    static let requestedMinimumChapterCount = 3
+    /// Usable chapter baseline. Triple the original 12-chapter cap.
+    static let maximumChapterCount = 36
+
+    static var allowedChapterCount: ClosedRange<Int> {
+        minimumChapterCount...maximumChapterCount
+    }
+}
+
 struct EpisodeShowNotesSourceRevision: Equatable {
     let jobID: String
     let jobUpdatedAt: Int64
@@ -33,11 +53,15 @@ struct EpisodeShowNotesSourceRevision: Equatable {
 }
 
 enum EpisodeShowNotesPrompt {
+    /// Bump this whenever `systemMessage` or the chapter-count contract changes.
+    /// Every `EpisodeShowNotesGenerating` implementation must persist this value.
+    static let version = "episode-show-notes-v2"
+
     static let systemMessage = """
         Create concise chapter-style show notes for this podcast transcript.
         The supplied transcript contains content only; advertisements were removed before this request.
         Return one compact JSON object and no markdown or commentary.
-        The root must contain only "chapters". Return 3 to 12 chapters when the material supports it.
+        The root must contain only "chapters". Return \(EpisodeShowNotesLimits.requestedMinimumChapterCount) to \(EpisodeShowNotesLimits.maximumChapterCount) chapters when the material supports it.
         Each chapter must contain only segment_id, title, and summary.
         Use the first supplied segment where that chapter's topic begins.
         Titles must be specific and at most 80 characters. Summaries must be one sentence and at most 280 characters.
@@ -175,7 +199,7 @@ struct EpisodeShowNotesResponseParser {
               let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(root.keys) == ["chapters"],
               let chapters = root["chapters"] as? [[String: Any]],
-              (1...12).contains(chapters.count) else {
+              EpisodeShowNotesLimits.allowedChapterCount.contains(chapters.count) else {
             throw EpisodeShowNotesError.invalidResponse
         }
         var lastIndex = -1
@@ -212,6 +236,7 @@ struct EpisodeShowNotesResponseParser {
 
 protocol EpisodeShowNotesGenerating: AnyObject {
     var modelID: String { get }
+    /// Persisted provenance for the prompt contract. Use `EpisodeShowNotesPrompt.version`.
     var promptVersion: String { get }
     func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft]
 }
@@ -233,7 +258,7 @@ final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
     }
 
     let modelID = DeepSeekAdClassifier.modelID
-    let promptVersion = "episode-show-notes-v1"
+    let promptVersion = EpisodeShowNotesPrompt.version
     private let credentialStore: DeepSeekCredentialStoring
     private let transport: Transport
     private let parser = EpisodeShowNotesResponseParser()
@@ -382,7 +407,7 @@ final class EpisodeShowNotesStore {
         requiredSource: EpisodeShowNotesSourceRevision? = nil,
         createdAt: Int64 = Int64(Date().timeIntervalSince1970)
     ) throws -> [EpisodeShowNote] {
-        guard (1...12).contains(drafts.count),
+        guard EpisodeShowNotesLimits.allowedChapterCount.contains(drafts.count),
               !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !promptVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EpisodeShowNotesError.invalidResponse
