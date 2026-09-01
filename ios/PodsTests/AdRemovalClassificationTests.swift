@@ -69,7 +69,11 @@ final class AdRemovalClassificationTests: XCTestCase {
                 "Return \(EpisodeShowNotesLimits.requestedMinimumChapterCount) to \(EpisodeShowNotesLimits.maximumChapterCount) chapters"
             )
         )
-        XCTAssertEqual(AppleFoundationEpisodeShowNotesGenerator().promptVersion, "episode-show-notes-v2")
+        XCTAssertEqual(EpisodeShowNotesPrompt.version, "episode-show-notes-v2")
+        XCTAssertEqual(
+            AppleFoundationEpisodeShowNotesGenerator().promptVersion,
+            EpisodeShowNotesPrompt.version
+        )
     }
 
     private final class StubOnDeviceResponder: AppleOnDevicePromptResponding {

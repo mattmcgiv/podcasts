@@ -51,6 +51,10 @@ struct EpisodeShowNotesSourceRevision: Equatable {
 }
 
 enum EpisodeShowNotesPrompt {
+    /// Bump this whenever `systemMessage` or the chapter-count contract changes.
+    /// Every `EpisodeShowNotesGenerating` implementation must persist this value.
+    static let version = "episode-show-notes-v2"
+
     static let systemMessage = """
         Create concise chapter-style show notes for this podcast transcript.
         The supplied transcript contains content only; advertisements were removed before this request.
@@ -230,6 +234,7 @@ struct EpisodeShowNotesResponseParser {
 
 protocol EpisodeShowNotesGenerating: AnyObject {
     var modelID: String { get }
+    /// Persisted provenance for the prompt contract. Use `EpisodeShowNotesPrompt.version`.
     var promptVersion: String { get }
     func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft]
 }

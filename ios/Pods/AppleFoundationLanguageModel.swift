@@ -383,7 +383,7 @@ final class AppleFoundationEpisodeShowNotesGenerator: EpisodeShowNotesGenerating
     static let maximumPromptBytes = 8_000
 
     let modelID = AdClassifierDescriptor.appleSystemLanguageModelV1.modelID
-    let promptVersion = "episode-show-notes-v2"
+    let promptVersion = EpisodeShowNotesPrompt.version
 
     private let responder: AppleOnDevicePromptResponding
     private let parser = EpisodeShowNotesResponseParser()
