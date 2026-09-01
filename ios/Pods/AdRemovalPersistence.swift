@@ -1359,6 +1359,7 @@ actor AdRemovalPipelineScheduler {
     private let isEnabled: () async -> Bool
     private let conditions: () async -> AdRemovalRuntimeConditions
     private let isOnDeviceModelAvailable: () async -> Bool
+    private let idleWork: () async throws -> Bool
     private let diagnostics: AdRemovalDiagnostics?
     private let now: () -> Int64
     private let sleep: (UInt64) async throws -> Void
@@ -1370,6 +1371,7 @@ actor AdRemovalPipelineScheduler {
         isEnabled: @escaping () async -> Bool = { true },
         conditions: @escaping () async -> AdRemovalRuntimeConditions,
         isOnDeviceModelAvailable: @escaping () async -> Bool = { false },
+        idleWork: @escaping () async throws -> Bool = { false },
         diagnostics: AdRemovalDiagnostics? = nil,
         now: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970) },
         sleep: @escaping (UInt64) async throws -> Void = { seconds in
@@ -1381,6 +1383,7 @@ actor AdRemovalPipelineScheduler {
         self.isEnabled = isEnabled
         self.conditions = conditions
         self.isOnDeviceModelAvailable = isOnDeviceModelAvailable
+        self.idleWork = idleWork
         self.diagnostics = diagnostics
         self.now = now
         self.sleep = sleep
@@ -1402,6 +1405,7 @@ actor AdRemovalPipelineScheduler {
                 if Task.isCancelled { return .unsuccessful }
                 guard await isEnabled() else { return .completed }
                 guard let next = try store.nextRunnableJob() else {
+                    if try await idleWork() { continue }
                     guard let deadline = try store.earliestRetryAt() else { return .completed }
                     let delay = UInt64(max(0, deadline - now()))
                     try? diagnostics?.record(

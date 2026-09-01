@@ -11,11 +11,19 @@ function speedCorrelationID(): string {
   return `speed-${Date.now().toString(36)}-${nextSpeedInteraction++}`;
 }
 
-function fmtChapterTime(secs: number): string {
-  const total = Math.max(0, Math.floor(secs));
-  const hours = Math.floor(total / 3_600);
-  const minutes = Math.floor((total % 3_600) / 60);
-  return `${hours}${hours === 1 ? "hr" : "hrs"} ${minutes}${minutes === 1 ? "min" : "mins"}`;
+/** Distance from the playhead to a chapter start: "+45 secs", "+3 mins", "+1hr 5mins". */
+function fmtChapterDelta(secs: number): string {
+  const total = Math.max(0, Math.round(secs));
+  if (total < 60) {
+    return `+${total} ${total === 1 ? "sec" : "secs"}`;
+  }
+  const minutes = Math.round(total / 60);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours > 0) {
+    return `+${hours} ${hours === 1 ? "hr" : "hrs"} ${rest} ${rest === 1 ? "min" : "mins"}`;
+  }
+  return `+${minutes} ${minutes === 1 ? "min" : "mins"}`;
 }
 
 export function PlayerSheet() {
@@ -123,7 +131,7 @@ export function PlayerSheet() {
             onClick={() => p.seekTo(nextChapter.start_time)}
           >
             <span className="next-chapter-prefix">Next:</span>{" "}{nextChapter.title}{" "}
-            <span className="next-chapter-time">({fmtChapterTime(nextChapter.start_time)})</span>
+            <span className="next-chapter-time">({fmtChapterDelta(nextChapter.start_time - p.position)})</span>
           </button>
         )}
 

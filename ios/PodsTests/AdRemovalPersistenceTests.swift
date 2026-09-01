@@ -766,6 +766,29 @@ final class AdRemovalPersistenceTests: XCTestCase {
         )
     }
 
+    func testShowNotesServiceProcessesReadyEpisodeWithoutClientRequest() async throws {
+        let harness = try makeHarness()
+        try setAdRemovalEnabled(harness.database)
+        let segment = try prepareReadyShowNotesEpisode(harness)
+        let generator = RecordingShowNotesGenerator(drafts: [EpisodeShowNoteDraft(
+            segmentID: segment.id,
+            title: "Opening",
+            summary: "The episode begins."
+        )])
+        let service = EpisodeShowNotesService(database: harness.database, generator: generator)
+
+        let processedEpisodeID = try await service.generateNextPending()
+
+        XCTAssertEqual(processedEpisodeID, harness.episodeID)
+        XCTAssertEqual(generator.receivedSegments.map(\.id), [segment.id])
+        XCTAssertFalse(
+            try EpisodeShowNotesStore(database: harness.database)
+                .notes(episodeID: harness.episodeID).isEmpty
+        )
+        let nextEpisodeID = try await service.generateNextPending()
+        XCTAssertNil(nextEpisodeID)
+    }
+
     func testShowNotesServiceDoesNotSendTranscriptWhenFeatureIsDisabled() async throws {
         let harness = try makeHarness()
         let jobStore = AdRemovalJobStore(database: harness.database, now: { 1_000 })
@@ -1019,6 +1042,76 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertTrue(
             try EpisodeShowNotesStore(database: harness.database).notes(episodeID: harness.episodeID).isEmpty
         )
+    }
+
+    func testShowNotesStoreAcceptsTheConfiguredChapterBaseline() throws {
+        let harness = try makeHarness()
+        let store = EpisodeShowNotesStore(database: harness.database)
+        let count = EpisodeShowNotesLimits.maximumChapterCount
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index * 10),
+                endTime: Double(index * 10 + 5),
+                text: "Topic \(index)"
+            )
+        }
+        let drafts = segments.map { segment in
+            EpisodeShowNoteDraft(
+                segmentID: segment.id,
+                title: "Topic \(segment.index)",
+                summary: "The discussion covers topic \(segment.index)."
+            )
+        }
+
+        let notes = try store.replace(
+            episodeID: harness.episodeID,
+            segments: segments,
+            drafts: drafts,
+            modelID: "test/model",
+            promptVersion: "prompt-v2"
+        )
+
+        XCTAssertEqual(notes.count, count)
+        XCTAssertEqual(notes.first?.id, "segment-0")
+        XCTAssertEqual(notes.last?.id, "segment-\(count - 1)")
+        XCTAssertEqual(try store.notes(episodeID: harness.episodeID).count, count)
+    }
+
+    func testShowNotesStoreRejectsMoreChaptersThanTheBaseline() throws {
+        let harness = try makeHarness()
+        let store = EpisodeShowNotesStore(database: harness.database)
+        let count = EpisodeShowNotesLimits.maximumChapterCount + 1
+        let segments = (0..<count).map { index in
+            AdTranscriptSegment(
+                id: "segment-\(index)",
+                index: index,
+                language: "en",
+                startTime: Double(index * 10),
+                endTime: Double(index * 10 + 5),
+                text: "Topic \(index)"
+            )
+        }
+        let drafts = segments.map { segment in
+            EpisodeShowNoteDraft(
+                segmentID: segment.id,
+                title: "Topic \(segment.index)",
+                summary: "The discussion covers topic \(segment.index)."
+            )
+        }
+
+        XCTAssertThrowsError(try store.replace(
+            episodeID: harness.episodeID,
+            segments: segments,
+            drafts: drafts,
+            modelID: "test/model",
+            promptVersion: "prompt-v2"
+        )) { error in
+            XCTAssertEqual(error as? EpisodeShowNotesError, .invalidResponse)
+        }
+        XCTAssertTrue(try store.notes(episodeID: harness.episodeID).isEmpty)
     }
 
     func testShowNotesStoreReplaceIsAtomicAndPreservesChapterOrderAndMetadata() throws {
@@ -1395,6 +1488,29 @@ final class AdRemovalPersistenceTests: XCTestCase {
         XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
         XCTAssertNil(try store.job(id: queued.id)?.blockingReason)
         XCTAssertEqual(executor.executedStages, [.downloading, .transcribing, .classifying])
+    }
+
+    func testSchedulerRunsShowNotesQueueOnlyAfterAdRemovalWorkIsIdle() async throws {
+        let harness = try makeHarness()
+        let store = AdRemovalJobStore(database: harness.database, now: { 1_000 })
+        let queued = try store.enqueue(episodeID: harness.episodeID)
+        let executor = RecordingStageExecutor(store: store)
+        var idleWorkCalls = 0
+        let scheduler = AdRemovalPipelineScheduler(
+            store: store,
+            coordinator: AdRemovalCoordinator(store: store, executor: executor),
+            conditions: { .init(lowPowerMode: false, seriousThermalPressure: false) },
+            idleWork: {
+                idleWorkCalls += 1
+                XCTAssertEqual(executor.executedStages, [.downloading, .transcribing, .classifying])
+                return false
+            }
+        )
+
+        await scheduler.runUntilIdle()
+
+        XCTAssertEqual(try store.job(id: queued.id)?.stage, .ready)
+        XCTAssertEqual(idleWorkCalls, 1)
     }
 
     func testSchedulerDoesNoWorkWhileFeatureIsDisabled() async throws {

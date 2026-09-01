@@ -115,11 +115,26 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
                 segments: segments,
                 corrections: corrections
             )
-            let runID = UUID().uuidString.lowercased()
-            var evidence: [AdClassificationEvidence] = []
+            let resumableEvidence = try resumableClassificationEvidence(
+                episodeID: job.episodeID,
+                windows: windows,
+                descriptor: classifier.descriptor
+            )
+            let runID = resumableEvidence.first?.runID ?? UUID().uuidString.lowercased()
+            var evidence = resumableEvidence
+            let completedWindowIndexes = Set(resumableEvidence.map(\.windowIndex))
+            let remainingWindows = windows.filter { !completedWindowIndexes.contains($0.index) }
             do {
-                for batchStart in stride(from: 0, to: windows.count, by: 4) {
-                    let batch = Array(windows[batchStart..<min(batchStart + 4, windows.count)])
+                // Foundation Models runs on a shared on-device model. Parallel sessions
+                // increase latency and thermal pressure; one window at a time is both
+                // faster in practice and gives every completed window a durable checkpoint.
+                let batchSize = 1
+                for batchStart in stride(from: 0, to: remainingWindows.count, by: batchSize) {
+                    let batch = Array(
+                        remainingWindows[
+                            batchStart..<min(batchStart + batchSize, remainingWindows.count)
+                        ]
+                    )
                     let records: [AdClassificationEvidence]
                     do {
                         records = try await withThrowingTaskGroup(of: AdClassificationEvidence.self) { group in
@@ -310,6 +325,40 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
             }
         }
         throw CancellationError()
+    }
+
+    /// Reuses the largest valid, descriptor-compatible partial run. Evidence is
+    /// checkpointed after every completed batch, so a foreground interruption does
+    /// not force a long episode back to window zero.
+    private func resumableClassificationEvidence(
+        episodeID: Int64,
+        windows: [AdClassificationWindow],
+        descriptor: AdClassifierDescriptor
+    ) throws -> [AdClassificationEvidence] {
+        let candidates = try jobStore.classificationEvidence(episodeID: episodeID)
+        let grouped = Dictionary(grouping: candidates, by: \.runID)
+        return grouped.values.compactMap { records -> [AdClassificationEvidence]? in
+            guard !records.isEmpty else { return nil }
+            var seenIndexes: Set<Int> = []
+            for record in records {
+                guard record.schemaValid,
+                      record.descriptor == descriptor,
+                      windows.indices.contains(record.windowIndex),
+                      seenIndexes.insert(record.windowIndex).inserted else {
+                    return nil
+                }
+                let window = windows[record.windowIndex]
+                guard record.segmentIDs == window.segmentIDs,
+                      record.correctionIDs == window.corrections.map(\.id),
+                      record.prompt == window.prompt else {
+                    return nil
+                }
+            }
+            return records.sorted { $0.windowIndex < $1.windowIndex }
+        }.max { left, right in
+            if left.count != right.count { return left.count < right.count }
+            return (left.map(\.createdAt).max() ?? 0) < (right.map(\.createdAt).max() ?? 0)
+        } ?? []
     }
 
     private func saveClassificationSnapshot(

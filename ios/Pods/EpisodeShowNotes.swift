@@ -24,6 +24,26 @@ enum EpisodeShowNotesError: Error, Equatable {
     case transcriptTooLarge
 }
 
+/// Single place to retune how many chapters an episode may have.
+///
+/// Change `maximumChapterCount`, then keep
+/// `@Guide(.maximumCount)` on `AppleShowNotesPayload.chapters` identical.
+/// DeepSeek and Apple both send `EpisodeShowNotesPrompt` and persist
+/// `EpisodeShowNotesPrompt.version`. The on-device response-token budget
+/// scales from that count automatically.
+enum EpisodeShowNotesLimits {
+    /// Parser and store accept a single chapter for short episodes.
+    static let minimumChapterCount = 1
+    /// Prompt asks the model for at least this many when the material supports it.
+    static let requestedMinimumChapterCount = 3
+    /// Usable chapter baseline. Triple the original 12-chapter cap.
+    static let maximumChapterCount = 36
+
+    static var allowedChapterCount: ClosedRange<Int> {
+        minimumChapterCount...maximumChapterCount
+    }
+}
+
 struct EpisodeShowNotesSourceRevision: Equatable {
     let jobID: String
     let jobUpdatedAt: Int64
@@ -33,11 +53,15 @@ struct EpisodeShowNotesSourceRevision: Equatable {
 }
 
 enum EpisodeShowNotesPrompt {
+    /// Bump this whenever `systemMessage` or the chapter-count contract changes.
+    /// Every `EpisodeShowNotesGenerating` implementation must persist this value.
+    static let version = "episode-show-notes-v2"
+
     static let systemMessage = """
         Create concise chapter-style show notes for this podcast transcript.
         The supplied transcript contains content only; advertisements were removed before this request.
         Return one compact JSON object and no markdown or commentary.
-        The root must contain only "chapters". Return 3 to 12 chapters when the material supports it.
+        The root must contain only "chapters". Return \(EpisodeShowNotesLimits.requestedMinimumChapterCount) to \(EpisodeShowNotesLimits.maximumChapterCount) chapters when the material supports it.
         Each chapter must contain only segment_id, title, and summary.
         Use the first supplied segment where that chapter's topic begins.
         Titles must be specific and at most 80 characters. Summaries must be one sentence and at most 280 characters.
@@ -175,7 +199,7 @@ struct EpisodeShowNotesResponseParser {
               let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(root.keys) == ["chapters"],
               let chapters = root["chapters"] as? [[String: Any]],
-              (1...12).contains(chapters.count) else {
+              EpisodeShowNotesLimits.allowedChapterCount.contains(chapters.count) else {
             throw EpisodeShowNotesError.invalidResponse
         }
         var lastIndex = -1
@@ -212,8 +236,101 @@ struct EpisodeShowNotesResponseParser {
 
 protocol EpisodeShowNotesGenerating: AnyObject {
     var modelID: String { get }
+    /// Persisted provenance for the prompt contract. Use `EpisodeShowNotesPrompt.version`.
     var promptVersion: String { get }
     func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft]
+}
+
+final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
+    static let maximumPromptBytes = 600_000
+    static let maximumResponseBytes = 128_000
+
+    struct Transport {
+        let send: (URLRequest) async throws -> (Data, HTTPURLResponse)
+
+        static let live = Transport { request in
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw DeepSeekClassifierError.invalidResponse
+            }
+            return (data, http)
+        }
+    }
+
+    let modelID = DeepSeekAdClassifier.modelID
+    let promptVersion = EpisodeShowNotesPrompt.version
+    private let credentialStore: DeepSeekCredentialStoring
+    private let transport: Transport
+    private let parser = EpisodeShowNotesResponseParser()
+    private let diagnostics: AdRemovalDiagnostics?
+
+    init(
+        credentialStore: DeepSeekCredentialStoring,
+        transport: Transport = .live,
+        diagnostics: AdRemovalDiagnostics? = nil
+    ) {
+        self.credentialStore = credentialStore
+        self.transport = transport
+        self.diagnostics = diagnostics
+    }
+
+    func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft] {
+        guard !segments.isEmpty else { throw EpisodeShowNotesError.noContent }
+        guard let key = try credentialStore.readAPIKey()?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !key.isEmpty else {
+            throw DeepSeekClassifierError.missingAPIKey
+        }
+        let systemMessage = EpisodeShowNotesPrompt.systemMessage
+        guard systemMessage.utf8.count < Self.maximumPromptBytes else {
+            throw EpisodeShowNotesError.transcriptTooLarge
+        }
+        let prompt = try EpisodeShowNotesPrompt.make(
+            segments: segments,
+            maximumBytes: Self.maximumPromptBytes - systemMessage.utf8.count
+        )
+        var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": modelID,
+            "messages": [
+                ["role": "system", "content": systemMessage],
+                ["role": "user", "content": prompt]
+            ],
+            "thinking": ["type": "disabled"],
+            "response_format": ["type": "json_object"],
+            "max_tokens": 8_192,
+            "stream": false
+        ])
+        let started = Date()
+        let (data, response) = try await transport.send(request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw DeepSeekClassifierError.httpStatus(response.statusCode)
+        }
+        guard data.count <= Self.maximumResponseBytes,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              firstChoice["finish_reason"] as? String == "stop",
+              let message = firstChoice["message"] as? [String: Any],
+              let content = message["content"] as? String else {
+            throw DeepSeekClassifierError.invalidResponse
+        }
+        let notes = try parser.parse(content, segments: segments)
+        try? diagnostics?.record(
+            eventName: "episode_show_notes_generated",
+            severity: .notice,
+            fields: [
+                "chapter_count": String(notes.count),
+                "segment_count": String(segments.count),
+                "latency_ms": String(Int(Date().timeIntervalSince(started) * 1_000)),
+                "provider": "deepseek"
+            ]
+        )
+        return notes
+    }
 }
 
 final class EpisodeShowNotesStore {
@@ -248,6 +365,23 @@ final class EpisodeShowNotesStore {
         }.first == "true"
     }
 
+    func nextPendingEpisodeID() throws -> Int64? {
+        try database.query(
+            """
+            SELECT j.episode_id
+            FROM ad_removal_jobs j
+            WHERE j.stage = 'ready'
+              AND NOT EXISTS (
+                  SELECT 1 FROM episode_show_notes n WHERE n.episode_id = j.episode_id
+              )
+            ORDER BY COALESCE(j.classified_at, j.updated_at), j.enrolled_at, j.episode_id
+            LIMIT 1
+            """
+        ) { statement in
+            sqlite3_column_int64(statement, 0)
+        }.first
+    }
+
     func sourceRevision(episodeID: Int64) throws -> EpisodeShowNotesSourceRevision? {
         let jobStore = AdRemovalJobStore(database: database)
         guard let job = try jobStore.job(episodeID: episodeID), job.stage == .ready else {
@@ -273,7 +407,7 @@ final class EpisodeShowNotesStore {
         requiredSource: EpisodeShowNotesSourceRevision? = nil,
         createdAt: Int64 = Int64(Date().timeIntervalSince1970)
     ) throws -> [EpisodeShowNote] {
-        guard (1...12).contains(drafts.count),
+        guard EpisodeShowNotesLimits.allowedChapterCount.contains(drafts.count),
               !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !promptVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EpisodeShowNotesError.invalidResponse
@@ -388,6 +522,14 @@ actor EpisodeShowNotesService {
             }
         }
         return try await task.value
+    }
+
+    /// Generates one queued ready episode. The ad-removal scheduler invokes this
+    /// only after it has no runnable download, transcription, or classification work.
+    func generateNextPending() async throws -> Int64? {
+        guard let episodeID = try store.nextPendingEpisodeID() else { return nil }
+        _ = try await generate(episodeID: episodeID)
+        return episodeID
     }
 
     func cancel(episodeID: Int64) async {
