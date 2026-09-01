@@ -3,7 +3,7 @@ import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
-import type { AdRemovalSettings, RefreshStatus } from "../types";
+import type { AdRemovalSettings, CarBluetoothSettings, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
@@ -34,6 +34,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
+  const [carBluetooth, setCarBluetooth] = useState<CarBluetoothSettings | null>(null);
   const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
   const [themePreference, setThemePreference] = useState<ThemePreference>(currentThemePreference);
@@ -55,6 +56,13 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       })
       .catch(() => {
         // Older/native-less runtimes may not expose this optional settings section.
+      });
+    void Api.carBluetoothSettings()
+      .then((settings) => {
+        if (active) setCarBluetooth(settings);
+      })
+      .catch(() => {
+        // Older/native-less runtimes may not expose car Bluetooth enrollment.
       });
     return () => {
       active = false;
@@ -181,6 +189,20 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
+  async function enrollCarBluetooth() {
+    await run("Remembering car Bluetooth", async () => {
+      setCarBluetooth(await Api.enrollCarBluetooth());
+      return "Remembered this Bluetooth as your car";
+    });
+  }
+
+  async function unenrollCarBluetooth() {
+    await run("Forgetting car Bluetooth", async () => {
+      setCarBluetooth(await Api.unenrollCarBluetooth());
+      return "Forgot remembered car Bluetooth";
+    });
+  }
+
   async function cleanupAdRemovalData() {
     if (!window.confirm(
       "Delete the classifier model, every prepared episode, and all learned corrections? This cannot be undone.",
@@ -218,6 +240,49 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         </section>
+        {carBluetooth && (
+          <section className="settings-section" aria-labelledby="car-bluetooth-title">
+            <h2 className="section-title" id="car-bluetooth-title">Car Bluetooth</h2>
+            <p className="settings-detail">
+              Remember the Bluetooth output that should auto-resume playback.
+              A Tesla that still uses its factory name works automatically.
+              A renamed car needs to be remembered once. Headphones are never remembered.
+            </p>
+            {carBluetooth.current_device_name && (
+              <p className="settings-detail">
+                Connected: {carBluetooth.current_device_name}
+              </p>
+            )}
+            {carBluetooth.current_enrolled && (
+              <p className="settings-detail" role="status">
+                {carBluetooth.current_device_name ?? "This output"} is remembered as your car.
+              </p>
+            )}
+            {carBluetooth.enrolled && !carBluetooth.current_enrolled && (
+              <p className="settings-detail" role="status">
+                A car is already remembered.
+                {carBluetooth.enrollable
+                  ? " Remembering this output replaces it."
+                  : " Connect to change it."}
+              </p>
+            )}
+            {!carBluetooth.enrolled && !carBluetooth.enrollable && (
+              <p className="settings-detail">
+                Connect to the car&apos;s Bluetooth, then remember it here.
+              </p>
+            )}
+            {carBluetooth.enrollable && !carBluetooth.current_enrolled && (
+              <button className="ghost-btn" onClick={() => void enrollCarBluetooth()}>
+                Remember this Bluetooth as my car
+              </button>
+            )}
+            {carBluetooth.enrolled && (
+              <button className="ghost-btn" onClick={() => void unenrollCarBluetooth()}>
+                Forget remembered car
+              </button>
+            )}
+          </section>
+        )}
         {adRemoval && (
           <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>

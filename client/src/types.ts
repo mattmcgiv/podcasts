@@ -125,6 +125,14 @@ export interface Settings {
   autoplay: boolean;
 }
 
+export interface CarBluetoothSettings {
+  enrolled: boolean;
+  enrollable: boolean;
+  current_enrolled: boolean;
+  current_device_name: string | null;
+  current_device_key: string | null;
+}
+
 export interface AdRemovalCorrectionCount {
   podcast_id: number;
   podcast_title: string;

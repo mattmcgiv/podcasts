@@ -187,10 +187,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private var shouldResumeAfterInterruption = false
     /// Armed car-device resume. Nil unless a classified car was lost while playing.
     private var carBluetoothResumeIntent: CarBluetoothResumeIntent?
-    /// Bumped to supersede an in-flight 0.7s settle callback.
+    /// Bumped to supersede an in-flight settle callback.
     private var carBluetoothResumeGeneration: UInt64 = 0
     private var carBluetoothResumeWorkItem: DispatchWorkItem?
     private let carBluetoothSessionStore: CarBluetoothSessionStoring
+    /// Tesla vehicles are often renamed; remember MAC keys seen as a car/HFP unit.
+    private var knownCarDeviceKeys: [String] = []
     private var nowPlayingMetadata: NowPlayingMetadata?
     private var nowPlayingArtwork: MPMediaItemArtwork?
     private var nowPlayingArtworkURL: URL?
@@ -290,12 +292,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         switch command {
         case "load":
             guard let src = body["src"] as? String, let url = URL(string: src) else { return }
+            let episodeID = Self.int64Value(body["episodeId"]) ?? Self.int64Value(body["episode_id"])
+            let sameEpisode = CarBluetoothPlaybackPolicy.shouldPreserveResumeAcrossLoad(
+                incomingEpisodeID: episodeID,
+                currentEpisodeID: currentEpisodeID
+            )
             load(
                 id: id,
                 url: url,
-                episodeID: Self.int64Value(body["episodeId"]) ?? Self.int64Value(body["episode_id"]),
+                episodeID: episodeID,
                 position: Self.doubleValue(body["position"]) ?? 0,
-                rate: Self.normalizedRate(Self.floatValue(body["rate"]) ?? 1)
+                rate: Self.normalizedRate(Self.floatValue(body["rate"]) ?? 1),
+                clearsCarResume: !sameEpisode
             )
         case "metadata":
             setNowPlayingMetadata(Self.metadata(from: body))
@@ -661,6 +669,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             recordCurrentProgress(force: true)
             applyCarResumeLifecycle(.ended)
             persistCarBluetoothSession()
+            updateCastKeepAlive()
             emit(type: "ended", id: currentId, position: position, duration: duration, playbackRate: rate ?? requestedRate, paused: true)
         case "state":
             if let position {
@@ -695,6 +704,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         rate: Float,
         clearsCarResume: Bool = true
     ) {
+        let restorePlayback = !clearsCarResume && (!nowPlayingPaused || (player?.rate ?? 0) > 0)
         applyCarResumeLifecycle(clearsCarResume ? .userLoad : .rebuildSameEpisode)
         playbackSessionID = AdRemovalPlaybackSession.makeID()
         currentEpisodeID = episodeID
@@ -785,6 +795,11 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         updateCastKeepAlive()
         loadLocal(id: id, url: selectedURL, episodeID: episodeID, position: position, rate: rate)
         persistCarBluetoothSession()
+        if restorePlayback {
+            playLocal(id: id)
+        } else if !clearsCarResume {
+            attemptCarBluetoothResumeFromCurrentRoute()
+        }
     }
 
     private func loadLocal(id: Int, url: URL, episodeID: Int64?, position: Double, rate: Float) {
@@ -855,6 +870,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         applyCarResumeLifecycle(.manualPlay)
         updateNowPlaying(rate: requestedRate, paused: false)
         persistCarBluetoothSession()
+        updateCastKeepAlive()
         emit(type: "play", id: id, playbackRate: requestedRate, paused: false)
     }
 
@@ -894,6 +910,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         recordCurrentProgress(force: true)
         updateNowPlaying(rate: 0, paused: true)
         persistCarBluetoothSession()
+        updateCastKeepAlive()
         emitPlaybackState(type: "pause", id: id, paused: true)
     }
 
@@ -979,6 +996,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         lastSrc = nil
         applyCarResumeLifecycle(.stop)
         carBluetoothSessionStore.clear()
+        updateCastKeepAlive()
         clearNowPlaying()
         emit(type: "pause", id: id, position: 0, duration: 0)
     }
@@ -1405,6 +1423,7 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         recordCurrentProgress(force: true)
         applyCarResumeLifecycle(.ended)
         persistCarBluetoothSession()
+        updateCastKeepAlive()
         emit(type: "ended", id: currentId, paused: true)
     }
 
@@ -1439,13 +1458,15 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             let rawOptions = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
             let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+            let context = currentCarRouteContext(outputs: currentRoutes)
             if CarBluetoothPlaybackPolicy.shouldResumeAfterInterruption(
                 shouldResumeOption: options.contains(.shouldResume),
                 wasPlayingBeforeInterruption: shouldResumeAfterInterruption,
                 currentCarMatchesArmedIntent: CarBluetoothPlaybackPolicy.currentCarMatchesIntent(
                     routes: currentRoutes,
                     intent: carBluetoothResumeIntent,
-                    now: Date().timeIntervalSince1970
+                    now: Date().timeIntervalSince1970,
+                    context: context
                 ),
                 isLocalOutput: preferredOutput == .local
             ) {
@@ -1465,6 +1486,8 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         let previousRoute = info?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
         let previousRoutes = Self.routeDescriptors(previousRoute)
         let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        let context = currentCarRouteContext(outputs: currentRoutes + previousRoutes)
+        rememberCarIdentities(from: currentRoutes + previousRoutes, context: context)
         let hasContent = currentEpisodeID != nil || lastSrc != nil || publisherURL != nil
         let isPlaying = !nowPlayingPaused || (player?.rate ?? 0) > 0
         let now = Date().timeIntervalSince1970
@@ -1478,7 +1501,12 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             intent: carBluetoothResumeIntent,
             currentEpisodeID: currentEpisodeID,
             isLocalOutput: preferredOutput == .local,
-            now: now
+            now: now,
+            context: context
+        )
+        PodsLog(
+            "Pods car-resume reason=\(reason.rawValue) action=\(String(describing: action)) " +
+            "current=\(currentRoutes.map { "\($0.name)/\($0.portTypeRaw)" }.joined(separator: ","))"
         )
         switch action {
         case .remember(let intent):
@@ -1487,13 +1515,16 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             if isPlaying {
                 pause(id: currentId, userInitiated: false)
             }
+            updateCastKeepAlive()
         case .schedule(let intent):
             carBluetoothResumeIntent = intent
             persistCarBluetoothSession()
             scheduleCarBluetoothResume(intent)
+            updateCastKeepAlive()
         case .clear:
             applyCarResumeLifecycle(.expired)
             persistCarBluetoothSession()
+            updateCastKeepAlive()
         case .none:
             break
         }
@@ -1555,16 +1586,76 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         carBluetoothResumeWorkItem = nil
         guard preferredOutput == .local else { return }
         let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        let context = currentCarRouteContext(outputs: currentRoutes)
+        rememberCarIdentities(from: currentRoutes, context: context)
         guard CarBluetoothPlaybackPolicy.shouldCommitScheduledResume(
             scheduled: scheduled,
             currentRoutes: currentRoutes,
             currentEpisodeID: currentEpisodeID,
             isLocalOutput: true,
-            now: Date().timeIntervalSince1970
+            now: Date().timeIntervalSince1970,
+            context: context
+        ) else {
+            PodsLog(
+                "Pods car-resume commit deferred current=\(currentRoutes.map { "\($0.name)/\($0.portTypeRaw)" }.joined(separator: ","))"
+            )
+            return
+        }
+        PodsLog("Pods car-resume commit play episode_id=\(currentEpisodeID.map(String.init) ?? "none")")
+        play(id: currentId)
+    }
+
+    private func currentCarRouteContext(
+        outputs: [CarBluetoothRouteDescriptor]
+    ) -> CarBluetoothRouteContext {
+        let inputs = AVAudioSession.sharedInstance().availableInputs?.map {
+            CarBluetoothRouteDescriptor($0)
+        } ?? []
+        return CarBluetoothRouteContext(
+            knownCarDeviceKeys: Set(knownCarDeviceKeys),
+            handsFreeDeviceKeys: CarBluetoothRouteContext.handsFreeDeviceKeys(from: outputs + inputs)
+        )
+    }
+
+    private func rememberCarIdentities(
+        from routes: [CarBluetoothRouteDescriptor],
+        context: CarBluetoothRouteContext
+    ) {
+        knownCarDeviceKeys = CarBluetoothPlaybackPolicy.discoveredCarDeviceKeys(
+            routes: routes,
+            context: context
+        )
+        carBluetoothSessionStore.saveKnownCarDeviceKeys(knownCarDeviceKeys)
+    }
+
+    /// Settings enrollment writes the remembered car key. Live policy must
+    /// pick it up immediately so disconnect/reconnect can arm without restart.
+    func applyEnrolledCarDeviceKeys(_ keys: [String]) {
+        knownCarDeviceKeys = Array(Set(keys)).sorted()
+        carBluetoothSessionStore.saveKnownCarDeviceKeys(knownCarDeviceKeys)
+        persistCarBluetoothSession()
+        attemptCarBluetoothResumeFromCurrentRoute()
+    }
+
+    private func attemptCarBluetoothResumeFromCurrentRoute() {
+        guard preferredOutput == .local else { return }
+        let now = Date().timeIntervalSince1970
+        let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        let context = currentCarRouteContext(outputs: currentRoutes)
+        rememberCarIdentities(from: currentRoutes, context: context)
+        guard CarBluetoothPlaybackPolicy.shouldScheduleResumeOnForeground(
+            intent: carBluetoothResumeIntent,
+            currentRoutes: currentRoutes,
+            hasActiveContent: hasPlayableContent,
+            isLocalOutput: true,
+            now: now,
+            context: context
         ) else {
             return
         }
-        play(id: currentId)
+        guard let intent = carBluetoothResumeIntent else { return }
+        PodsLog("Pods car-resume foreground/hydrate schedule episode_id=\(intent.episodeID.map(String.init) ?? "none")")
+        scheduleCarBluetoothResume(intent)
     }
 
     private static func routeDescriptors(_ route: AVAudioSessionRouteDescription?) -> [CarBluetoothRouteDescriptor] {
@@ -1707,11 +1798,25 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Cast keep-alive (prevents iOS suspend while Mac plays)
 
     private func updateCastKeepAlive() {
-        if PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: preferredOutput == .mac) {
+        if PlaybackProgressPolicy.shouldRunCastKeepAlive(preferredOutputIsMac: preferredOutput == .mac)
+            || shouldRunCarResumeKeepAlive() {
             startCastKeepAliveIfNeeded()
         } else {
             stopCastKeepAlive()
         }
+    }
+
+    private func shouldRunCarResumeKeepAlive() -> Bool {
+        preferredOutput == .local
+            && nowPlayingPaused
+            && (player?.rate ?? 0) == 0
+            && CarBluetoothPlaybackPolicy.shouldKeepSessionAlive(
+                intent: carBluetoothResumeIntent,
+                now: Date().timeIntervalSince1970,
+                context: currentCarRouteContext(
+                    outputs: Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+                )
+            )
     }
 
     private func startCastKeepAliveIfNeeded() {
@@ -1746,14 +1851,19 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         // Re-browse so a Mac that launched (or recovered) while we were suspended shows up.
         CastSession.shared.refreshBrowsing()
         emitCastStatus(CastSession.shared.currentStatus)
-        guard preferredOutput == .mac else { return }
-        updateCastKeepAlive()
-        if CastSession.shared.currentStatus.connected {
-            // Pull latest Mac clock after any suspension gap.
-            CastSession.shared.sendCommand(["cmd": "ping"])
-        } else {
-            CastSession.shared.connectToFirstAvailable()
+        if preferredOutput == .mac {
+            updateCastKeepAlive()
+            if CastSession.shared.currentStatus.connected {
+                // Pull latest Mac clock after any suspension gap.
+                CastSession.shared.sendCommand(["cmd": "ping"])
+            } else {
+                CastSession.shared.connectToFirstAvailable()
+            }
+            return
         }
+        configureSession()
+        attemptCarBluetoothResumeFromCurrentRoute()
+        updateCastKeepAlive()
     }
 
     private func setNowPlayingMetadata(_ metadata: NowPlayingMetadata?) {
@@ -1769,7 +1879,14 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
     private func persistCarBluetoothSession() {
         guard let episodeID = currentEpisodeID, let publisherURL else { return }
         let now = Date().timeIntervalSince1970
-        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now)
+        let context = currentCarRouteContext(
+            outputs: Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        )
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(
+            carBluetoothResumeIntent,
+            now: now,
+            context: context
+        )
         let snapshot = CarBluetoothSessionSnapshot(
             episodeID: episodeID,
             publisherURL: publisherURL.absoluteString,
@@ -1779,12 +1896,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             artist: nowPlayingMetadata?.artist,
             artworkURL: nowPlayingMetadata?.artworkURL?.absoluteString,
             duration: Self.positiveDuration(nowPlayingDuration) ?? nowPlayingMetadata?.duration,
-            resumeIntent: CarBluetoothPlaybackPolicy.validatedIntent(carBluetoothResumeIntent, now: now)
+            resumeIntent: CarBluetoothPlaybackPolicy.validatedIntent(
+                carBluetoothResumeIntent,
+                now: now,
+                context: context
+            ),
+            knownCarDeviceKeys: knownCarDeviceKeys
         )
         carBluetoothSessionStore.save(snapshot)
     }
 
     private func restorePersistedCarBluetoothSession() {
+        knownCarDeviceKeys = carBluetoothSessionStore.loadKnownCarDeviceKeys()
         guard let snapshot = carBluetoothSessionStore.load(),
               let url = URL(string: snapshot.publisherURL) else {
             return
@@ -1797,7 +1920,18 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
         nowPlayingPosition = max(0, snapshot.position)
         nowPlayingDuration = snapshot.duration ?? 0
         nowPlayingRate = requestedRate
-        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(snapshot.resumeIntent, now: now)
+        if !snapshot.knownCarDeviceKeys.isEmpty {
+            knownCarDeviceKeys = snapshot.knownCarDeviceKeys
+        }
+        let restoreContext = CarBluetoothRouteContext(
+            knownCarDeviceKeys: Set(knownCarDeviceKeys),
+            handsFreeDeviceKeys: []
+        )
+        carBluetoothResumeIntent = CarBluetoothPlaybackPolicy.validatedIntent(
+            snapshot.resumeIntent,
+            now: now,
+            context: restoreContext
+        )
         let title = snapshot.title ?? ""
         if !title.isEmpty {
             nowPlayingMetadata = NowPlayingMetadata(
@@ -1817,16 +1951,20 @@ final class AudioBridge: NSObject, WKScriptMessageHandler {
             paused: true
         )
         let currentRoutes = Self.routeDescriptors(AVAudioSession.sharedInstance().currentRoute)
+        let context = currentCarRouteContext(outputs: currentRoutes)
+        rememberCarIdentities(from: currentRoutes, context: context)
         if let intent = carBluetoothResumeIntent,
            CarBluetoothPlaybackPolicy.currentCarMatchesIntent(
                routes: currentRoutes,
                intent: intent,
-               now: now
+               now: now,
+               context: context
            ) {
             scheduleCarBluetoothResume(intent)
         } else if snapshot.resumeIntent != nil, carBluetoothResumeIntent == nil {
             persistCarBluetoothSession()
         }
+        updateCastKeepAlive()
         PodsLog(
             "Pods restored car-bluetooth session episode_id=\(snapshot.episodeID) " +
             "position=\(snapshot.position) resume=\(carBluetoothResumeIntent != nil)"

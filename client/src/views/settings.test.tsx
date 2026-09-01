@@ -199,6 +199,66 @@ describe("SettingsSheet", () => {
     expect(screen.getByText(/API key required/)).toBeInTheDocument();
   });
 
+  it("hides car Bluetooth until the native enrollment API is available", async () => {
+    installApi({});
+    render(<SettingsSheet onClose={() => {}} />);
+    expect(screen.queryByRole("heading", { name: "Car Bluetooth" })).not.toBeInTheDocument();
+  });
+
+  it("enrolls the connected custom-named car and can forget it", async () => {
+    let current = {
+      enrolled: false,
+      enrollable: true,
+      current_enrolled: false,
+      current_device_name: "Midnight",
+      current_device_key: "aa:bb:cc:dd:ee:ff",
+    };
+    const { calls } = installApi({
+      "GET /api/car-bluetooth": () => current,
+      "POST /api/car-bluetooth/enroll": () => {
+        current = { ...current, enrolled: true, current_enrolled: true };
+        return current;
+      },
+      "POST /api/car-bluetooth/unenroll": () => {
+        current = { ...current, enrolled: false, current_enrolled: false };
+        return current;
+      },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByRole("heading", { name: "Car Bluetooth" })).toBeInTheDocument();
+    expect(screen.getByText("Connected: Midnight")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remember this Bluetooth as my car" }));
+    await screen.findByText("Remembered this Bluetooth as your car");
+    expect(calls.some((call) => call.key === "POST /api/car-bluetooth/enroll")).toBe(true);
+    expect(screen.getByText("Midnight is remembered as your car.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remember this Bluetooth as my car" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Forget remembered car" }));
+    await screen.findByText("Forgot remembered car Bluetooth");
+    expect(calls.some((call) => call.key === "POST /api/car-bluetooth/unenroll")).toBe(true);
+    expect(screen.getByRole("button", { name: "Remember this Bluetooth as my car" })).toBeInTheDocument();
+  });
+
+  it("does not offer enrollment for a disconnected or headphone output", async () => {
+    installApi({
+      "GET /api/car-bluetooth": {
+        enrolled: false,
+        enrollable: false,
+        current_enrolled: false,
+        current_device_name: null,
+        current_device_key: null,
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByRole("heading", { name: "Car Bluetooth" })).toBeInTheDocument();
+    expect(screen.getByText(/Connect to the car/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remember this Bluetooth as my car" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Forget remembered car" })).not.toBeInTheDocument();
+  });
+
   it("shows storage and correction controls and runs destructive actions explicitly", async () => {
     const resetSettings = { ...adRemovalSettings, corrections: [] };
     const { calls } = installApi({

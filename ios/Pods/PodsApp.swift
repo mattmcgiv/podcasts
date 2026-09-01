@@ -220,6 +220,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                     await modelDownloader?.cancel()
                 }
             }
+            backend.setCarBluetoothEnrollmentChangedHandler { keys in
+                AudioBridge.shared.applyEnrolledCarDeviceKeys(keys)
+            }
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(adRemovalConditionsDidChange),
@@ -301,6 +304,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         let coordinator = FeedRefreshCoordinator(backend: backend)
         backend.setRefreshRequestHandler { source in
             await coordinator.refreshNow(source: source)
+        }
+        backend.setCarBluetoothEnrollmentChangedHandler { keys in
+            AudioBridge.shared.applyEnrolledCarDeviceKeys(keys)
         }
         AudioBridge.shared.progressRecorder = backend
         let server = PodsLocalServer(backend: backend, staticAssets: staticAssets)
