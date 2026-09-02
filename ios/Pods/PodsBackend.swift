@@ -610,6 +610,10 @@ final class PodsBackend: PlaybackProgressRecording {
         ).first else {
             throw PodsBackendError.database("could not load added episode")
         }
+        if (try? settingValues()["ad_removal_enabled"]) == "true",
+           let adRemovalRunRequestHandler {
+            Task { await adRemovalRunRequestHandler() }
+        }
         NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
         return item
     }

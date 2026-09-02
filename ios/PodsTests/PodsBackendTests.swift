@@ -800,6 +800,40 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(Set(shows.map(\.title)), ["One Off Show", "Subscribed Show"])
     }
 
+    func testAddListenEpisodeWakesAdRemovalScheduler() async throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            "INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        let schedulerRequested = expectation(description: "ad-removal scheduler requested")
+        harness.backend.setAdRemovalRunRequestHandler { schedulerRequested.fulfill() }
+        let feedURL = "https://feeds.example/one-off-ad-removal.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "One Off Ad Removal",
+            items: [
+                ("Ep1", "ar1", "https://h.example/ar1.mp3", Self.d1),
+                ("Ep2", "ar2", "https://h.example/ar2.mp3", Self.d2),
+                ("Ep3", "ar3", "https://h.example/ar3.mp3", Self.d3)
+            ]
+        ).utf8)
+
+        let response = try await call(
+            harness.backend,
+            "POST",
+            "/api/listen-episodes",
+            json: ["feed_url": feedURL, "guid": "ar2"]
+        )
+        XCTAssertEqual(response.statusCode, 201)
+        await fulfillment(of: [schedulerRequested], timeout: 1)
+        let enrolledTitles = try harness.database.query(
+            "SELECT e.title FROM ad_removal_jobs j JOIN episodes e ON e.id = j.episode_id ORDER BY e.published_at",
+            map: { sqliteString($0, 0) }
+        )
+        XCTAssertEqual(enrolledTitles, ["Ep2"])
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes"), 1)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT is_subscribed FROM podcasts"), 0)
+    }
+
     func testSubscribeEnrollsOnlyVisibleEpisodesAndWakesAdRemovalScheduler() async throws {
         let harness = try makeHarness()
         try harness.database.execute(
