@@ -100,6 +100,14 @@ export function adRemovalSettings(
     device_available_bytes: 20_000_000_000,
     minimum_free_bytes: 10_000_000_000,
     corrections: [],
+    deepseek_usage: {
+      total_cost_usd: 0,
+      average_cost_per_episode_usd: null,
+      average_cost_per_podcast_minute_usd: null,
+      ad_detection_cost_usd: 0,
+      show_notes_cost_usd: 0,
+      telemetry_complete: true,
+    },
     ...overrides,
   };
 }

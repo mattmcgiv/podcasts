@@ -88,11 +88,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             let jobStore = AdRemovalJobStore(database: database)
             _ = try cleanup.drain()
+            let deepSeekUsageStore = DeepSeekUsageStore(
+                database: database,
+                fallbackURL: try DeepSeekUsageStore.applicationDefaultFallbackURL()
+            )
             let episodeShowNotesService = EpisodeShowNotesService(
                 database: database,
                 generator: DeepSeekEpisodeShowNotesGenerator(
                     credentialStore: deepSeekCredentialStore,
-                    diagnostics: adRemovalDiagnostics
+                    diagnostics: adRemovalDiagnostics,
+                    usageStore: deepSeekUsageStore
                 )
             )
             let diagnostics = adRemovalDiagnostics
@@ -120,7 +125,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 transcriber: AppleSpeechAnalyzerTranscriber(diagnostics: adRemovalDiagnostics),
                 classifier: DeepSeekAdClassifier(
                     credentialStore: deepSeekCredentialStore,
-                    diagnostics: adRemovalDiagnostics
+                    diagnostics: adRemovalDiagnostics,
+                    usageStore: deepSeekUsageStore
                 ),
                 diagnostics: adRemovalDiagnostics
             )
@@ -201,6 +207,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
                 deepSeekCredentialStore: deepSeekCredentialStore,
+                deepSeekUsageStore: deepSeekUsageStore,
                 episodeShowNotesService: episodeShowNotesService,
                 recoverInterruptedPlayedCleanup: true
             )

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { cloudClassifierCopy, fmtDate, fmtDuration, fmtRemaining, fmtTime, progressFraction } from "./lib";
+import {
+  cloudClassifierCopy,
+  fmtDate,
+  fmtDuration,
+  fmtRemaining,
+  fmtTime,
+  formatOptionalUSD,
+  formatUSD,
+  progressFraction,
+} from "./lib";
 
 describe("fmtTime", () => {
   it("formats minutes and hours", () => {
@@ -47,6 +56,17 @@ describe("fmtRemaining / progressFraction", () => {
     expect(progressFraction({ duration_secs: 1800, position_secs: 900 })).toBe(0.5);
     expect(progressFraction({ duration_secs: 1800, position_secs: 9999 })).toBe(1);
     expect(progressFraction({ duration_secs: null, position_secs: 10 })).toBe(0);
+  });
+});
+
+describe("formatUSD", () => {
+  it("uses cents for ordinary amounts and extra digits for fractions of a cent", () => {
+    expect(formatUSD(0)).toBe("$0.00");
+    expect(formatUSD(0.18)).toBe("$0.18");
+    expect(formatUSD(0.002)).toBe("$0.0020");
+    expect(formatUSD(0.000012)).toBe("$0.000012");
+    expect(formatOptionalUSD(null)).toBe("—");
+    expect(formatOptionalUSD(0.09)).toBe("$0.09");
   });
 });
 

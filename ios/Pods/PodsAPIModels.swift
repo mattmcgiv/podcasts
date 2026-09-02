@@ -108,6 +108,33 @@ struct AdRemovalCorrectionCountPayload: Codable, Equatable {
     let count: Int64
 }
 
+struct DeepSeekUsageMetricsPayload: Codable, Equatable {
+    let total_cost_usd: Double
+    let average_cost_per_episode_usd: Double?
+    let average_cost_per_podcast_minute_usd: Double?
+    let ad_detection_cost_usd: Double
+    let show_notes_cost_usd: Double
+    let telemetry_complete: Bool
+
+    static let empty = DeepSeekUsageMetricsPayload(
+        total_cost_usd: 0,
+        average_cost_per_episode_usd: nil,
+        average_cost_per_podcast_minute_usd: nil,
+        ad_detection_cost_usd: 0,
+        show_notes_cost_usd: 0,
+        telemetry_complete: true
+    )
+
+    static let incompleteEmpty = DeepSeekUsageMetricsPayload(
+        total_cost_usd: 0,
+        average_cost_per_episode_usd: nil,
+        average_cost_per_podcast_minute_usd: nil,
+        ad_detection_cost_usd: 0,
+        show_notes_cost_usd: 0,
+        telemetry_complete: false
+    )
+}
+
 struct AdRemovalSettingsPayload: Codable, Equatable {
     let enabled: Bool
     let enrollment_cutoff: Int64?
@@ -124,6 +151,7 @@ struct AdRemovalSettingsPayload: Codable, Equatable {
     let minimum_free_bytes: Int64
     let device_available_bytes: Int64
     let corrections: [AdRemovalCorrectionCountPayload]
+    let deepseek_usage: DeepSeekUsageMetricsPayload
 }
 
 struct FeedPreviewEpisode: Codable, Equatable {

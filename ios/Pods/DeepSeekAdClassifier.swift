@@ -94,29 +94,44 @@ final class DeepSeekAdClassifier: AdClassifier {
     private let apiKey: () throws -> String?
     private let transport: Transport
     private let diagnostics: AdRemovalDiagnostics?
+    private let usageStore: DeepSeekUsageRecording?
 
     init(
         credentialStore: DeepSeekCredentialStoring,
         transport: Transport = .live,
-        diagnostics: AdRemovalDiagnostics? = nil
+        diagnostics: AdRemovalDiagnostics? = nil,
+        usageStore: DeepSeekUsageRecording? = nil
     ) {
         apiKey = { try credentialStore.readAPIKey() }
         self.transport = transport
         self.diagnostics = diagnostics
+        self.usageStore = usageStore
     }
 
-    convenience init(apiKey: String, transport: Transport, diagnostics: AdRemovalDiagnostics? = nil) {
-        self.init(apiKey: { apiKey }, transport: transport, diagnostics: diagnostics)
+    convenience init(
+        apiKey: String,
+        transport: Transport,
+        diagnostics: AdRemovalDiagnostics? = nil,
+        usageStore: DeepSeekUsageRecording? = nil
+    ) {
+        self.init(
+            apiKey: { apiKey },
+            transport: transport,
+            diagnostics: diagnostics,
+            usageStore: usageStore
+        )
     }
 
     private init(
         apiKey: @escaping () throws -> String?,
         transport: Transport,
-        diagnostics: AdRemovalDiagnostics?
+        diagnostics: AdRemovalDiagnostics?,
+        usageStore: DeepSeekUsageRecording?
     ) {
         self.apiKey = apiKey
         self.transport = transport
         self.diagnostics = diagnostics
+        self.usageStore = usageStore
     }
 
     func classify(window: AdClassificationWindow) async throws -> String {
@@ -141,8 +156,17 @@ final class DeepSeekAdClassifier: AdClassifier {
         guard (200..<300).contains(response.statusCode) else {
             throw DeepSeekClassifierError.httpStatus(response.statusCode)
         }
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = root["choices"] as? [[String: Any]],
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw DeepSeekClassifierError.invalidResponse
+        }
+        DeepSeekUsageRecorder.recordIfPresent(
+            store: usageStore,
+            requestKind: .adDetection,
+            model: Self.modelID,
+            root: root,
+            createdAt: started
+        )
+        guard let choices = root["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String else {
             throw DeepSeekClassifierError.invalidResponse

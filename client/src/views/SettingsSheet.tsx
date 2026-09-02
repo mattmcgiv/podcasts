@@ -3,8 +3,8 @@ import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
+import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration } from "../lib";
 import type { AdRemovalSettings, CarBluetoothSettings, FeedPreview, FeedPreviewEpisode, RefreshStatus } from "../types";
-import { fmtDate, fmtDuration } from "../lib";
 
 function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
@@ -365,6 +365,29 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
               Prepared episode storage: {formatGB(adRemoval.episode_storage_bytes)} of{" "}
               {formatGB(adRemoval.episode_storage_limit_bytes)} · {formatGB(adRemoval.device_available_bytes)} free
             </p>
+            <div className="deepseek-usage" aria-labelledby="deepseek-usage-title">
+              <p className="settings-detail" id="deepseek-usage-title">DeepSeek usage</p>
+              <p className="settings-detail">
+                Total cost: {formatUSD(adRemoval.deepseek_usage.total_cost_usd)}
+              </p>
+              <p className="settings-detail">
+                Average per episode: {formatOptionalUSD(adRemoval.deepseek_usage.average_cost_per_episode_usd)}
+              </p>
+              <p className="settings-detail">
+                Average per podcast minute:{" "}
+                {formatOptionalUSD(adRemoval.deepseek_usage.average_cost_per_podcast_minute_usd)}
+              </p>
+              <p className="settings-detail">
+                Ad detection: {formatUSD(adRemoval.deepseek_usage.ad_detection_cost_usd)}
+                {" · "}
+                Show notes: {formatUSD(adRemoval.deepseek_usage.show_notes_cost_usd)}
+              </p>
+              {!adRemoval.deepseek_usage.telemetry_complete && (
+                <p className="settings-detail" role="status">
+                  Usage totals are incomplete; some billed DeepSeek requests may be missing or unpriced.
+                </p>
+              )}
+            </div>
 
             {adRemoval.corrections.length > 0 && (
               <div className="correction-list">

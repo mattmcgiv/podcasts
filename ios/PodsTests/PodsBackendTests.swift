@@ -1641,6 +1641,8 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertTrue(settings.classifier_available)
         XCTAssertNil(settings.classifier_unavailable_reason)
         XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
+        XCTAssertEqual(settings.deepseek_usage, .empty)
+        XCTAssertTrue(settings.deepseek_usage.telemetry_complete)
 
         let enabled = try await call(
             harness.backend,
@@ -1680,6 +1682,66 @@ final class PodsBackendTests: XCTestCase {
         let disabled = try await call(harness.backend, "POST", "/api/ad-removal/disable")
         XCTAssertEqual(disabled.statusCode, 200)
         XCTAssertFalse(try decode(AdRemovalSettingsPayload.self, from: disabled).enabled)
+    }
+
+    func testAdRemovalSettingsReportsDeepSeekUsageMetrics() async throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            "INSERT INTO podcasts (feed_url, title, created_at) VALUES (?, ?, ?)",
+            [.text("https://example.com/usage"), .text("Usage Show"), .int(1)]
+        )
+        let podcastID = harness.database.lastInsertRowID()
+        try harness.database.execute(
+            """
+            INSERT INTO episodes (podcast_id, guid, title, audio_url, duration_secs, published_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .int(podcastID),
+                .text("usage-1"),
+                .text("Usage 1"),
+                .text("https://example.com/usage-1.mp3"),
+                .int(3_600),
+                .int(100)
+            ]
+        )
+        let episodeID = harness.database.lastInsertRowID()
+        let store = DeepSeekUsageStore(database: harness.database)
+        let offPeak = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-17T12:00:00Z"))
+        try store.record(
+            episodeID: episodeID,
+            requestKind: .adDetection,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0),
+            createdAt: offPeak
+        )
+        try store.record(
+            episodeID: episodeID,
+            requestKind: .showNotes,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 0, cachedInputTokens: 0, outputTokens: 1_000_000),
+            createdAt: offPeak
+        )
+
+        let settings = try decode(AdRemovalSettingsPayload.self, from: try await call(
+            harness.backend,
+            "GET",
+            "/api/ad-removal/settings"
+        ))
+        XCTAssertEqual(settings.deepseek_usage.total_cost_usd, 2.64, accuracy: 0.0000000001)
+        XCTAssertEqual(
+            try XCTUnwrap(settings.deepseek_usage.average_cost_per_episode_usd),
+            2.64,
+            accuracy: 0.0000000001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(settings.deepseek_usage.average_cost_per_podcast_minute_usd),
+            0.044,
+            accuracy: 0.0000000001
+        )
+        XCTAssertEqual(settings.deepseek_usage.ad_detection_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertEqual(settings.deepseek_usage.show_notes_cost_usd, 1.98, accuracy: 0.0000000001)
+        XCTAssertTrue(settings.deepseek_usage.telemetry_complete)
     }
 
     func testAdRemovalSettingsAndEnableRequireDeepSeekAPIKey() async throws {

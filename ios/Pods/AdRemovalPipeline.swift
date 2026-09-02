@@ -231,7 +231,9 @@ final class AdRemovalPipelineExecutor: AdRemovalStageExecuting {
             try Task.checkCancellation()
             var rawOutput: String?
             do {
-                let output = try await classifier.classify(window: window)
+                let output = try await DeepSeekUsageAttribution.$episodeID.withValue(job.episodeID) {
+                    try await classifier.classify(window: window)
+                }
                 rawOutput = output
                 let requestLabels = try classifierOutputParser.parse(
                     output,

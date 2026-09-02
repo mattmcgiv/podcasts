@@ -158,6 +158,16 @@ export type ClassifierUnavailableReason =
   | "api_key_required"
   | "unknown";
 
+export interface DeepSeekUsageMetrics {
+  total_cost_usd: number;
+  average_cost_per_episode_usd: number | null;
+  average_cost_per_podcast_minute_usd: number | null;
+  ad_detection_cost_usd: number;
+  show_notes_cost_usd: number;
+  /** False when billed requests were lost, unpriced, or not yet reconciled. */
+  telemetry_complete: boolean;
+}
+
 export interface AdRemovalSettings {
   enabled: boolean;
   enrollment_cutoff: number | null;
@@ -176,6 +186,7 @@ export interface AdRemovalSettings {
   /** Minimum free device bytes required to start new ad-removal work. */
   minimum_free_bytes: number;
   corrections: AdRemovalCorrectionCount[];
+  deepseek_usage: DeepSeekUsageMetrics;
 }
 
 export interface RefreshStatus {

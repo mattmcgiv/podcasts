@@ -76,6 +76,7 @@ final class PodsBackend: PlaybackProgressRecording {
     private let adRemovalArtifactStore: AdRemovalArtifactStore?
     private let adRemovalDiagnostics: AdRemovalDiagnostics?
     private let deepSeekCredentialStore: DeepSeekCredentialStoring
+    private let deepSeekUsageStore: DeepSeekUsageStore
     private let episodeShowNotesStore: EpisodeShowNotesStore
     private let episodeShowNotesService: EpisodeShowNotesService?
     private var refreshRequestHandler: ((RefreshSource) async -> RefreshResult)?
@@ -96,6 +97,7 @@ final class PodsBackend: PlaybackProgressRecording {
         adRemovalArtifactStore: AdRemovalArtifactStore? = nil,
         adRemovalDiagnostics: AdRemovalDiagnostics? = nil,
         deepSeekCredentialStore: DeepSeekCredentialStoring = DeepSeekKeychainStore(),
+        deepSeekUsageStore: DeepSeekUsageStore? = nil,
         episodeShowNotesService: EpisodeShowNotesService? = nil,
         recoverInterruptedPlayedCleanup: Bool = false
     ) {
@@ -105,6 +107,7 @@ final class PodsBackend: PlaybackProgressRecording {
         self.adRemovalArtifactStore = adRemovalArtifactStore
         self.adRemovalDiagnostics = adRemovalDiagnostics
         self.deepSeekCredentialStore = deepSeekCredentialStore
+        self.deepSeekUsageStore = deepSeekUsageStore ?? DeepSeekUsageStore(database: database)
         self.episodeShowNotesStore = EpisodeShowNotesStore(database: database)
         self.episodeShowNotesService = episodeShowNotesService
         self.adRemovalFileCleanup = adRemovalArtifactStore.map {
@@ -981,7 +984,8 @@ final class PodsBackend: PlaybackProgressRecording {
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
             device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
-            corrections: corrections
+            corrections: corrections,
+            deepseek_usage: (try? deepSeekUsageStore.metrics()) ?? .incompleteEmpty
         )
     }
 

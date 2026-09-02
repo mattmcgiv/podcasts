@@ -21,6 +21,14 @@ const adRemovalSettings = {
   device_available_bytes: 42_000_000_000,
   minimum_free_bytes: 10_000_000_000,
   corrections: [{ podcast_id: 7, podcast_title: "Example Show", count: 3 }],
+  deepseek_usage: {
+    total_cost_usd: 0.18,
+    average_cost_per_episode_usd: 0.09,
+    average_cost_per_podcast_minute_usd: 0.002,
+    ad_detection_cost_usd: 0.12,
+    show_notes_cost_usd: 0.06,
+    telemetry_complete: true,
+  },
 };
 
 
@@ -206,6 +214,50 @@ describe("SettingsSheet", () => {
     await screen.findByText("refresh blew up");
   });
 
+  it("shows DeepSeek usage placeholders when there is no spend", async () => {
+    installApi({
+      "GET /api/ad-removal/settings": {
+        ...adRemovalSettings,
+        deepseek_usage: {
+          total_cost_usd: 0,
+          average_cost_per_episode_usd: null,
+          average_cost_per_podcast_minute_usd: null,
+          ad_detection_cost_usd: 0,
+          show_notes_cost_usd: 0,
+          telemetry_complete: true,
+        },
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByText("DeepSeek usage")).toBeInTheDocument();
+    expect(screen.getByText(/Total cost: \$0\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Average per episode: —/)).toBeInTheDocument();
+    expect(screen.getByText(/Average per podcast minute: —/)).toBeInTheDocument();
+    expect(screen.getByText(/Ad detection: \$0\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Show notes: \$0\.00/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Usage totals are incomplete/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns when DeepSeek telemetry is incomplete", async () => {
+    installApi({
+      "GET /api/ad-removal/settings": {
+        ...adRemovalSettings,
+        deepseek_usage: {
+          ...adRemovalSettings.deepseek_usage,
+          telemetry_complete: false,
+        },
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(
+      await screen.findByText(/Usage totals are incomplete; some billed DeepSeek requests may be missing or unpriced/),
+    ).toBeInTheDocument();
+  });
+
   it("does not render a close button", async () => {
     installApi({});
     render(<SettingsSheet onClose={() => {}} />);
@@ -362,6 +414,12 @@ describe("SettingsSheet", () => {
     render(<SettingsSheet onClose={() => {}} />);
 
     expect(await screen.findByText(/Prepared episode storage: 1.25 GB of 10.00 GB/)).toBeInTheDocument();
+    expect(screen.getByText("DeepSeek usage")).toBeInTheDocument();
+    expect(screen.getByText(/Total cost: \$0\.18/)).toBeInTheDocument();
+    expect(screen.getByText(/Average per episode: \$0\.09/)).toBeInTheDocument();
+    expect(screen.getByText(/Average per podcast minute: \$0\.0020/)).toBeInTheDocument();
+    expect(screen.getByText(/Ad detection: \$0\.12/)).toBeInTheDocument();
+    expect(screen.getByText(/Show notes: \$0\.06/)).toBeInTheDocument();
     expect(screen.getByText("Example Show: 3")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Reset learned corrections for Example Show" }));
     await screen.findByText("Reset learned corrections for Example Show");

@@ -248,6 +248,10 @@ final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
     struct Transport {
         let send: (URLRequest) async throws -> (Data, HTTPURLResponse)
 
+        init(_ send: @escaping (URLRequest) async throws -> (Data, HTTPURLResponse)) {
+            self.send = send
+        }
+
         static let live = Transport { request in
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -263,15 +267,18 @@ final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
     private let transport: Transport
     private let parser = EpisodeShowNotesResponseParser()
     private let diagnostics: AdRemovalDiagnostics?
+    private let usageStore: DeepSeekUsageRecording?
 
     init(
         credentialStore: DeepSeekCredentialStoring,
         transport: Transport = .live,
-        diagnostics: AdRemovalDiagnostics? = nil
+        diagnostics: AdRemovalDiagnostics? = nil,
+        usageStore: DeepSeekUsageRecording? = nil
     ) {
         self.credentialStore = credentialStore
         self.transport = transport
         self.diagnostics = diagnostics
+        self.usageStore = usageStore
     }
 
     func generate(segments: [AdTranscriptSegment]) async throws -> [EpisodeShowNoteDraft] {
@@ -309,8 +316,18 @@ final class DeepSeekEpisodeShowNotesGenerator: EpisodeShowNotesGenerating {
         guard (200..<300).contains(response.statusCode) else {
             throw DeepSeekClassifierError.httpStatus(response.statusCode)
         }
+        let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if let root {
+            DeepSeekUsageRecorder.recordIfPresent(
+                store: usageStore,
+                requestKind: .showNotes,
+                model: modelID,
+                root: root,
+                createdAt: started
+            )
+        }
         guard data.count <= Self.maximumResponseBytes,
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let root,
               let choices = root["choices"] as? [[String: Any]],
               let firstChoice = choices.first,
               firstChoice["finish_reason"] as? String == "stop",
@@ -578,7 +595,9 @@ actor EpisodeShowNotesService {
         )
         let content = Self.contentSegments(segments, excluding: ranges)
         guard !content.isEmpty else { throw EpisodeShowNotesError.noContent }
-        let drafts = try await generator.generate(segments: content)
+        let drafts = try await DeepSeekUsageAttribution.$episodeID.withValue(episodeID) {
+            try await generator.generate(segments: content)
+        }
         try Task.checkCancellation()
         return try store.replace(
             episodeID: episodeID,
