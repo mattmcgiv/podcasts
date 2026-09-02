@@ -92,6 +92,7 @@ struct DeepSeekAPIUsage: Equatable {
 
 struct DeepSeekUsageRecord: Equatable {
     let id: Int64
+    let recordID: String
     let episodeID: Int64
     let episodeKey: String
     let durationSecs: Int64?
@@ -105,6 +106,7 @@ struct DeepSeekUsageRecord: Equatable {
 }
 
 struct DeepSeekUsagePendingRecord: Codable, Equatable {
+    let record_id: String
     let episode_id: Int64
     let episode_key: String
     let duration_secs: Int64?
@@ -115,6 +117,105 @@ struct DeepSeekUsagePendingRecord: Codable, Equatable {
     let output_tokens: Int?
     let cost_usd: Double?
     let created_at: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case record_id
+        case episode_id
+        case episode_key
+        case duration_secs
+        case request_kind
+        case model
+        case input_tokens
+        case cached_input_tokens
+        case output_tokens
+        case cost_usd
+        case created_at
+    }
+
+    init(
+        record_id: String,
+        episode_id: Int64,
+        episode_key: String,
+        duration_secs: Int64?,
+        request_kind: String,
+        model: String,
+        input_tokens: Int?,
+        cached_input_tokens: Int?,
+        output_tokens: Int?,
+        cost_usd: Double?,
+        created_at: Int64
+    ) {
+        self.record_id = record_id
+        self.episode_id = episode_id
+        self.episode_key = episode_key
+        self.duration_secs = duration_secs
+        self.request_kind = request_kind
+        self.model = model
+        self.input_tokens = input_tokens
+        self.cached_input_tokens = cached_input_tokens
+        self.output_tokens = output_tokens
+        self.cost_usd = cost_usd
+        self.created_at = created_at
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        episode_id = try c.decode(Int64.self, forKey: .episode_id)
+        episode_key = try c.decode(String.self, forKey: .episode_key)
+        duration_secs = try c.decodeIfPresent(Int64.self, forKey: .duration_secs)
+        request_kind = try c.decode(String.self, forKey: .request_kind)
+        model = try c.decode(String.self, forKey: .model)
+        input_tokens = try c.decodeIfPresent(Int.self, forKey: .input_tokens)
+        cached_input_tokens = try c.decodeIfPresent(Int.self, forKey: .cached_input_tokens)
+        output_tokens = try c.decodeIfPresent(Int.self, forKey: .output_tokens)
+        cost_usd = try c.decodeIfPresent(Double.self, forKey: .cost_usd)
+        created_at = try c.decode(Int64.self, forKey: .created_at)
+        if let id = try c.decodeIfPresent(String.self, forKey: .record_id), !id.isEmpty {
+            record_id = id
+        } else {
+            // Pre-unique-id leftover lines must stay idempotent across a crash
+            // after insert: the same payload always maps to the same key.
+            record_id = DeepSeekUsagePendingRecord.legacyRecordID(
+                episode_id: episode_id,
+                episode_key: episode_key,
+                duration_secs: duration_secs,
+                request_kind: request_kind,
+                model: model,
+                input_tokens: input_tokens,
+                cached_input_tokens: cached_input_tokens,
+                output_tokens: output_tokens,
+                cost_usd: cost_usd,
+                created_at: created_at
+            )
+        }
+    }
+
+    static func legacyRecordID(
+        episode_id: Int64,
+        episode_key: String,
+        duration_secs: Int64?,
+        request_kind: String,
+        model: String,
+        input_tokens: Int?,
+        cached_input_tokens: Int?,
+        output_tokens: Int?,
+        cost_usd: Double?,
+        created_at: Int64
+    ) -> String {
+        let fields = [
+            String(episode_id),
+            episode_key,
+            duration_secs.map(String.init) ?? "",
+            request_kind,
+            model,
+            input_tokens.map(String.init) ?? "",
+            cached_input_tokens.map(String.init) ?? "",
+            output_tokens.map(String.init) ?? "",
+            cost_usd.map { String($0) } ?? "",
+            String(created_at),
+        ]
+        return "legacy-\(fields.joined(separator: "\u{1F}"))"
+    }
 }
 
 /// Published DeepSeek chat rates in effect on and after 16 August 2026.
@@ -271,10 +372,12 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
 
     private let database: PodsDatabase
     private let ledger: DeepSeekUsageLedging?
-    private let lock = NSLock()
+    private let ledgerLock = NSRecursiveLock()
 
     /// Test seam: the next `record` insert into SQLite fails once.
     var failNextInsert = false
+    /// Test seam: run after the ledger is loaded and before inserts/replace.
+    var afterLedgerLoad: (() -> Void)?
 
     init(database: PodsDatabase, ledger: DeepSeekUsageLedging? = nil) {
         self.database = database
@@ -296,8 +399,11 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
         usage: DeepSeekAPIUsage?,
         createdAt: Date = Date()
     ) throws {
+        ledgerLock.lock()
+        defer { ledgerLock.unlock() }
         let identity = resolveIdentity(episodeID: episodeID)
         let pending = DeepSeekUsagePendingRecord(
+            record_id: UUID().uuidString.lowercased(),
             episode_id: episodeID,
             episode_key: identity.episodeKey,
             duration_secs: identity.durationSecs,
@@ -323,12 +429,14 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
     }
 
     func records(episodeID: Int64? = nil) throws -> [DeepSeekUsageRecord] {
+        ledgerLock.lock()
+        defer { ledgerLock.unlock() }
         try reconcileLedger()
         let sql: String
         let values: [SQLiteValue]
         if let episodeID {
             sql = """
-                SELECT id, episode_id, episode_key, duration_secs, request_kind, model,
+                SELECT id, record_id, episode_id, episode_key, duration_secs, request_kind, model,
                        input_tokens, cached_input_tokens, output_tokens,
                        cost_usd, created_at
                 FROM deepseek_usage
@@ -338,7 +446,7 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
             values = [.int(episodeID)]
         } else {
             sql = """
-                SELECT id, episode_id, episode_key, duration_secs, request_kind, model,
+                SELECT id, record_id, episode_id, episode_key, duration_secs, request_kind, model,
                        input_tokens, cached_input_tokens, output_tokens,
                        cost_usd, created_at
                 FROM deepseek_usage
@@ -350,6 +458,8 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
     }
 
     func episodeTotalCost(episodeID: Int64) throws -> Double {
+        ledgerLock.lock()
+        defer { ledgerLock.unlock() }
         try reconcileLedger()
         let key = resolveIdentity(episodeID: episodeID).episodeKey
         return try database.query(
@@ -363,6 +473,8 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
     }
 
     func metrics() throws -> DeepSeekUsageMetricsPayload {
+        ledgerLock.lock()
+        defer { ledgerLock.unlock() }
         try reconcileLedger()
         let leftover: Int
         do {
@@ -435,8 +547,6 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
     }
 
     private func insert(_ record: DeepSeekUsagePendingRecord) throws {
-        lock.lock()
-        defer { lock.unlock() }
         if failNextInsert {
             failNextInsert = false
             throw PodsBackendError.database("deepseek usage insert failed")
@@ -444,12 +554,14 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
         try database.execute(
             """
             INSERT INTO deepseek_usage (
-                episode_id, episode_key, duration_secs, request_kind, model,
+                record_id, episode_id, episode_key, duration_secs, request_kind, model,
                 input_tokens, cached_input_tokens, output_tokens,
                 cost_usd, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_id) DO NOTHING
             """,
             [
+                .text(record.record_id),
                 .int(record.episode_id),
                 .text(record.episode_key),
                 record.duration_secs.map { .int($0) } ?? .null,
@@ -473,6 +585,7 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
             try markIncomplete()
             return
         }
+        afterLedgerLoad?()
         guard !pending.isEmpty else { return }
         var remaining: [DeepSeekUsagePendingRecord] = []
         for record in pending {
@@ -553,18 +666,19 @@ final class DeepSeekUsageStore: DeepSeekUsageRecording {
     private static func mapRecord(_ statement: OpaquePointer?) -> DeepSeekUsageRecord {
         DeepSeekUsageRecord(
             id: sqlite3_column_int64(statement, 0),
-            episodeID: sqlite3_column_int64(statement, 1),
-            episodeKey: sqliteString(statement, 2),
-            durationSecs: sqliteOptionalInt64(statement, 3),
-            requestKind: DeepSeekRequestKind(rawValue: sqliteString(statement, 4)) ?? .adDetection,
-            model: sqliteString(statement, 5),
-            inputTokens: sqliteOptionalInt64(statement, 6).map(Int.init),
-            cachedInputTokens: sqliteOptionalInt64(statement, 7).map(Int.init),
-            outputTokens: sqliteOptionalInt64(statement, 8).map(Int.init),
-            costUSD: sqlite3_column_type(statement, 9) == SQLITE_NULL
+            recordID: sqliteString(statement, 1),
+            episodeID: sqlite3_column_int64(statement, 2),
+            episodeKey: sqliteString(statement, 3),
+            durationSecs: sqliteOptionalInt64(statement, 4),
+            requestKind: DeepSeekRequestKind(rawValue: sqliteString(statement, 5)) ?? .adDetection,
+            model: sqliteString(statement, 6),
+            inputTokens: sqliteOptionalInt64(statement, 7).map(Int.init),
+            cachedInputTokens: sqliteOptionalInt64(statement, 8).map(Int.init),
+            outputTokens: sqliteOptionalInt64(statement, 9).map(Int.init),
+            costUSD: sqlite3_column_type(statement, 10) == SQLITE_NULL
                 ? nil
-                : sqlite3_column_double(statement, 9),
-            createdAt: sqlite3_column_int64(statement, 10)
+                : sqlite3_column_double(statement, 10),
+            createdAt: sqlite3_column_int64(statement, 11)
         )
     }
 }

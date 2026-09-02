@@ -48,7 +48,9 @@ final class PodsDatabase {
         try addColumnIfMissing(table: "ad_removal_jobs", column: "classified_at", definition: "INTEGER")
         try addColumnIfMissing(table: "deepseek_usage", column: "episode_key", definition: "TEXT NOT NULL DEFAULT ''")
         try addColumnIfMissing(table: "deepseek_usage", column: "duration_secs", definition: "INTEGER")
+        try addColumnIfMissing(table: "deepseek_usage", column: "record_id", definition: "TEXT NOT NULL DEFAULT ''")
         try backfillDeepSeekUsageEpisodeKeys()
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_deepseek_usage_record_id ON deepseek_usage(record_id)")
     }
 
     private func backfillDeepSeekUsageEpisodeKeys() throws {
@@ -82,6 +84,13 @@ final class PodsDatabase {
                   AND (p.feed_url || char(31) || e.guid) = deepseek_usage.episode_key
             )
             WHERE duration_secs IS NULL
+            """
+        )
+        try execute(
+            """
+            UPDATE deepseek_usage
+            SET record_id = 'legacy-' || id
+            WHERE record_id = '' OR record_id IS NULL
             """
         )
     }
@@ -458,6 +467,7 @@ final class PodsDatabase {
     -- episode_key is feed_url + guid so deleted episode IDs cannot be reused.
     CREATE TABLE IF NOT EXISTS deepseek_usage (
         id INTEGER PRIMARY KEY,
+        record_id TEXT NOT NULL UNIQUE,
         episode_id INTEGER NOT NULL,
         episode_key TEXT NOT NULL,
         duration_secs INTEGER,
@@ -474,6 +484,8 @@ final class PodsDatabase {
         ON deepseek_usage(episode_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_deepseek_usage_episode_key
         ON deepseek_usage(episode_key, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_deepseek_usage_record_id
+        ON deepseek_usage(record_id);
 
     CREATE TABLE IF NOT EXISTS ad_artifact_cleanup (
         relative_path TEXT PRIMARY KEY,

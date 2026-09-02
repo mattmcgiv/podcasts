@@ -582,6 +582,139 @@ final class DeepSeekUsageTests: XCTestCase {
         XCTAssertNil(store.records.first?.usage)
     }
 
+    func testReconcileAfterReplaceFailureDoesNotDoubleCount() throws {
+        let harness = try makeDatabase()
+        let ledger = ControllableLedger()
+        let store = DeepSeekUsageStore(database: harness.database, ledger: ledger)
+        let offPeak = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-17T12:00:00Z"))
+        store.failNextInsert = true
+        try store.record(
+            episodeID: harness.episodeID,
+            requestKind: .adDetection,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0),
+            createdAt: offPeak
+        )
+        XCTAssertEqual(try ledger.load().count, 1)
+
+        ledger.failNextReplace = true
+        _ = try store.metrics()
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM deepseek_usage"), 1)
+        XCTAssertEqual(try ledger.load().count, 1, "a replace failure must leave the line in the ledger")
+
+        let metrics = try store.metrics()
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM deepseek_usage"), 1)
+        XCTAssertEqual(metrics.total_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertTrue(try ledger.load().isEmpty)
+        XCTAssertEqual(Set(try store.records().map(\.recordID)).count, 1)
+    }
+
+    func testAppendRacingReconcileKeepsEachBilledRequestOnce() throws {
+        let harness = try makeDatabase()
+        let ledger = ControllableLedger()
+        let store = DeepSeekUsageStore(database: harness.database, ledger: ledger)
+        let offPeak = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-17T12:00:00Z"))
+        store.failNextInsert = true
+        try store.record(
+            episodeID: harness.episodeID,
+            requestKind: .adDetection,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0),
+            createdAt: offPeak
+        )
+
+        let appendFinished = expectation(description: "append waiting on reconcile finished")
+        store.afterLedgerLoad = {
+            store.afterLedgerLoad = nil
+            // Start an append that would be wiped by replace([]) if it were
+            // allowed to run between load and replace without the ledger lock.
+            DispatchQueue.global().async {
+                store.failNextInsert = true
+                try? store.record(
+                    episodeID: harness.episodeID,
+                    requestKind: .showNotes,
+                    model: "deepseek-v4-pro",
+                    usage: DeepSeekAPIUsage(inputTokens: 0, cachedInputTokens: 0, outputTokens: 1_000_000),
+                    createdAt: offPeak
+                )
+                appendFinished.fulfill()
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        _ = try store.metrics()
+        wait(for: [appendFinished], timeout: 5)
+
+        let metrics = try store.metrics()
+        let rows = try store.records()
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(Set(rows.map(\.recordID)).count, 2)
+        XCTAssertEqual(metrics.total_cost_usd, 2.64, accuracy: 0.0000000001)
+        XCTAssertEqual(metrics.ad_detection_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertEqual(metrics.show_notes_cost_usd, 1.98, accuracy: 0.0000000001)
+        XCTAssertTrue(try ledger.load().isEmpty)
+    }
+
+    func testLegacyLedgerLineWithoutRecordIDReconcilesIdempotently() throws {
+        let harness = try makeDatabase()
+        let ledger = ControllableLedger()
+        let store = DeepSeekUsageStore(database: harness.database, ledger: ledger)
+        let episodeKey = DeepSeekUsageStore.episodeKey(
+            feedURL: "https://example.com/feed",
+            guid: "episode-1"
+        )
+        let payload: [String: Any] = [
+            "episode_id": harness.episodeID,
+            "episode_key": episodeKey,
+            "duration_secs": 3600,
+            "request_kind": "ad_detection",
+            "model": "deepseek-v4-pro",
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.66,
+            "created_at": 1_755_432_000
+        ]
+        let json = try JSONSerialization.data(withJSONObject: payload)
+        let first = try JSONDecoder().decode(DeepSeekUsagePendingRecord.self, from: json)
+        let second = try JSONDecoder().decode(DeepSeekUsagePendingRecord.self, from: json)
+        XCTAssertFalse(first.record_id.isEmpty)
+        XCTAssertEqual(first.record_id, second.record_id)
+        try ledger.append(first)
+
+        ledger.failNextReplace = true
+        _ = try store.metrics()
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM deepseek_usage"), 1)
+        XCTAssertEqual(try ledger.load().count, 1)
+
+        let metrics = try store.metrics()
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM deepseek_usage"), 1)
+        XCTAssertEqual(metrics.total_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertTrue(try ledger.load().isEmpty)
+        XCTAssertEqual(try store.records().map(\.recordID), [first.record_id])
+    }
+
+    private final class ControllableLedger: DeepSeekUsageLedging {
+        private var items: [DeepSeekUsagePendingRecord] = []
+        var failNextReplace = false
+
+        func append(_ record: DeepSeekUsagePendingRecord) throws {
+            items.append(record)
+        }
+
+        func load() throws -> [DeepSeekUsagePendingRecord] {
+            items
+        }
+
+        func replace(_ records: [DeepSeekUsagePendingRecord]) throws {
+            if failNextReplace {
+                failNextReplace = false
+                throw PodsBackendError.database("ledger replace failed")
+            }
+            items = records
+        }
+    }
+
     private struct DatabaseHarness {
         let database: PodsDatabase
         let podcastID: Int64
