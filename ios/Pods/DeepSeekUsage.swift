@@ -202,16 +202,46 @@ struct DeepSeekUsagePendingRecord: Codable, Equatable {
         cost_usd: Double?,
         created_at: Int64
     ) -> String {
-        let fields = [
+        let durationField: String
+        if let duration_secs {
+            durationField = String(duration_secs)
+        } else {
+            durationField = ""
+        }
+        let inputTokensField: String
+        if let input_tokens {
+            inputTokensField = String(input_tokens)
+        } else {
+            inputTokensField = ""
+        }
+        let cachedInputTokensField: String
+        if let cached_input_tokens {
+            cachedInputTokensField = String(cached_input_tokens)
+        } else {
+            cachedInputTokensField = ""
+        }
+        let outputTokensField: String
+        if let output_tokens {
+            outputTokensField = String(output_tokens)
+        } else {
+            outputTokensField = ""
+        }
+        let costField: String
+        if let cost_usd {
+            costField = String(cost_usd)
+        } else {
+            costField = ""
+        }
+        let fields: [String] = [
             String(episode_id),
             episode_key,
-            duration_secs.map(String.init) ?? "",
+            durationField,
             request_kind,
             model,
-            input_tokens.map(String.init) ?? "",
-            cached_input_tokens.map(String.init) ?? "",
-            output_tokens.map(String.init) ?? "",
-            cost_usd.map { String($0) } ?? "",
+            inputTokensField,
+            cachedInputTokensField,
+            outputTokensField,
+            costField,
             String(created_at),
         ]
         return "legacy-\(fields.joined(separator: "\u{1F}"))"
