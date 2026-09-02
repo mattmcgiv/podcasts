@@ -6,6 +6,7 @@ import type {
   EpisodeShowNote,
   Follow,
   FollowCandidate,
+  FeedPreview,
   Page,
   PlayContext,
   RefreshStatus,
@@ -13,6 +14,7 @@ import type {
   Settings,
   Show,
   ShowDetailResponse,
+  CarBluetoothSettings,
 } from "./types";
 
 declare global {
@@ -106,6 +108,13 @@ export const Api = {
     request<Page<EpisodeItem>>(`/shows/${id}/search?q=${encodeURIComponent(q)}`),
   subscribe: (feedUrl: string) =>
     request<Show>("/shows", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
+  previewFeed: (feedUrl: string) =>
+    request<FeedPreview>("/feeds/preview", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
+  addListenEpisode: (feedUrl: string, guid: string) =>
+    request<EpisodeItem>("/listen-episodes", {
+      method: "POST",
+      body: JSON.stringify({ feed_url: feedUrl, guid }),
+    }),
   unsubscribe: (id: number) => request<void>(`/shows/${id}`, { method: "DELETE" }),
   episode: (id: number) => request<EpisodeDetail>(`/episodes/${id}`),
   generateShowNotes: (id: number) =>
@@ -151,6 +160,11 @@ export const Api = {
       method: "POST",
       body: JSON.stringify({ confirm: "DELETE_AD_REMOVAL_DATA" }),
     }),
+  carBluetoothSettings: () => request<CarBluetoothSettings>("/car-bluetooth"),
+  enrollCarBluetooth: () =>
+    request<CarBluetoothSettings>("/car-bluetooth/enroll", { method: "POST" }),
+  unenrollCarBluetooth: () =>
+    request<CarBluetoothSettings>("/car-bluetooth/unenroll", { method: "POST" }),
   settings: () => request<Settings>("/settings"),
   saveSettings: (s: Settings) =>
     request<void>("/settings", { method: "PUT", body: JSON.stringify(s) }),

@@ -78,4 +78,20 @@ describe("request wrapper", () => {
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ name: "Balaji Srinivasan", aliases: ["Balaji S Srinivasan"] });
     expect(calls[1].key).toBe("POST /api/follow-candidates/5/accept");
   });
+
+  it("previews a feed and adds one episode to Listen", async () => {
+    const { calls } = installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://one.example/rss",
+        title: "Guest Interviews",
+        image_url: "",
+        episodes: [{ guid: "g2", title: "Beta Guest", published_at: 1, duration_secs: null, image_url: "" }],
+      },
+      "POST /api/listen-episodes": episode({ title: "Beta Guest" }),
+    });
+    await Api.previewFeed("https://one.example/rss");
+    await Api.addListenEpisode("https://one.example/rss", "g2");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ feed_url: "https://one.example/rss" });
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ feed_url: "https://one.example/rss", guid: "g2" });
+  });
 });

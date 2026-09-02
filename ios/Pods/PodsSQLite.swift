@@ -278,6 +278,10 @@ final class PodsDatabase {
         PRIMARY KEY (follow_id, episode_id)
     );
 
+    CREATE TABLE IF NOT EXISTS listen_episodes (
+        episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS episode_state (
         episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
         position_secs REAL NOT NULL DEFAULT 0,

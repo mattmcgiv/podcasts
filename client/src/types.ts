@@ -83,6 +83,21 @@ export interface DirectoryPodcast {
   subscribed: boolean;
 }
 
+export interface FeedPreviewEpisode {
+  guid: string;
+  title: string;
+  published_at: number;
+  duration_secs: number | null;
+  image_url: string;
+}
+
+export interface FeedPreview {
+  feed_url: string;
+  title: string;
+  image_url: string;
+  episodes: FeedPreviewEpisode[];
+}
+
 export interface SearchResults {
   directory_configured: boolean;
   podcasts: DirectoryPodcast[];
@@ -123,6 +138,14 @@ export interface FollowCandidate {
 export interface Settings {
   speed: number;
   autoplay: boolean;
+}
+
+export interface CarBluetoothSettings {
+  enrolled: boolean;
+  enrollable: boolean;
+  current_enrolled: boolean;
+  current_device_name: string | null;
+  current_device_key: string | null;
 }
 
 export interface AdRemovalCorrectionCount {

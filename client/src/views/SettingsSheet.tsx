@@ -3,8 +3,8 @@ import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
-import { formatOptionalUSD, formatUSD } from "../lib";
-import type { AdRemovalSettings, RefreshStatus } from "../types";
+import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration } from "../lib";
+import type { AdRemovalSettings, CarBluetoothSettings, FeedPreview, FeedPreviewEpisode, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
@@ -35,8 +35,14 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<string | null>(null);
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null);
   const [adRemoval, setAdRemoval] = useState<AdRemovalSettings | null>(null);
+  const [carBluetooth, setCarBluetooth] = useState<CarBluetoothSettings | null>(null);
   const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
+  const [oneOffUrl, setOneOffUrl] = useState("");
+  const [oneOffQuery, setOneOffQuery] = useState("");
+  const [oneOffPreview, setOneOffPreview] = useState<FeedPreview | null>(null);
+  const [addedGuids, setAddedGuids] = useState<Set<string>>(new Set());
+  const [addingGuid, setAddingGuid] = useState<string | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(currentThemePreference);
   const [refreshing, setRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -56,6 +62,13 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       })
       .catch(() => {
         // Older/native-less runtimes may not expose this optional settings section.
+      });
+    void Api.carBluetoothSettings()
+      .then((settings) => {
+        if (active) setCarBluetooth(settings);
+      })
+      .catch(() => {
+        // Older/native-less runtimes may not expose car Bluetooth enrollment.
       });
     return () => {
       active = false;
@@ -80,6 +93,34 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       setFeedUrl("");
       return `Subscribed to ${show.title}`;
     });
+  }
+
+  async function lookupOneOffFeed() {
+    const url = oneOffUrl.trim();
+    if (!url) return;
+    await run("Looking up", async () => {
+      const preview = await Api.previewFeed(url);
+      setOneOffPreview(preview);
+      setOneOffQuery("");
+      setAddedGuids(new Set());
+      const count = preview.episodes.length;
+      return `Found ${count} episode${count === 1 ? "" : "s"} in ${preview.title || "this feed"}`;
+    });
+  }
+
+  async function addOneOffEpisode(guid: string) {
+    if (!oneOffPreview || addingGuid) return;
+    setAddingGuid(guid);
+    try {
+      await run("Adding episode", async () => {
+        const episode = await Api.addListenEpisode(oneOffPreview.feed_url, guid);
+        emitEpisodesChanged();
+        setAddedGuids((current) => new Set(current).add(guid));
+        return `Added ${episode.title} to Listen`;
+      });
+    } finally {
+      setAddingGuid(null);
+    }
   }
 
   async function importOpml(file: File) {
@@ -182,6 +223,20 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
+  async function enrollCarBluetooth() {
+    await run("Remembering car Bluetooth", async () => {
+      setCarBluetooth(await Api.enrollCarBluetooth());
+      return "Remembered this Bluetooth as your car";
+    });
+  }
+
+  async function unenrollCarBluetooth() {
+    await run("Forgetting car Bluetooth", async () => {
+      setCarBluetooth(await Api.unenrollCarBluetooth());
+      return "Forgot remembered car Bluetooth";
+    });
+  }
+
   async function cleanupAdRemovalData() {
     if (!window.confirm(
       "Delete the classifier model, every prepared episode, and all learned corrections? This cannot be undone.",
@@ -219,6 +274,49 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
             ))}
           </div>
         </section>
+        {carBluetooth && (
+          <section className="settings-section" aria-labelledby="car-bluetooth-title">
+            <h2 className="section-title" id="car-bluetooth-title">Car Bluetooth</h2>
+            <p className="settings-detail">
+              Remember the Bluetooth output that should auto-resume playback.
+              A Tesla that still uses its factory name works automatically.
+              A renamed car needs to be remembered once. Headphones are never remembered.
+            </p>
+            {carBluetooth.current_device_name && (
+              <p className="settings-detail">
+                Connected: {carBluetooth.current_device_name}
+              </p>
+            )}
+            {carBluetooth.current_enrolled && (
+              <p className="settings-detail" role="status">
+                {carBluetooth.current_device_name ?? "This output"} is remembered as your car.
+              </p>
+            )}
+            {carBluetooth.enrolled && !carBluetooth.current_enrolled && (
+              <p className="settings-detail" role="status">
+                A car is already remembered.
+                {carBluetooth.enrollable
+                  ? " Remembering this output replaces it."
+                  : " Connect to change it."}
+              </p>
+            )}
+            {!carBluetooth.enrolled && !carBluetooth.enrollable && (
+              <p className="settings-detail">
+                Connect to the car&apos;s Bluetooth, then remember it here.
+              </p>
+            )}
+            {carBluetooth.enrollable && !carBluetooth.current_enrolled && (
+              <button className="ghost-btn" onClick={() => void enrollCarBluetooth()}>
+                Remember this Bluetooth as my car
+              </button>
+            )}
+            {carBluetooth.enrolled && (
+              <button className="ghost-btn" onClick={() => void unenrollCarBluetooth()}>
+                Forget remembered car
+              </button>
+            )}
+          </section>
+        )}
         {adRemoval && (
           <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
@@ -338,6 +436,46 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           </div>
         </section>
 
+        <section className="settings-section" aria-labelledby="add-episode-title">
+          <h2 className="section-title" id="add-episode-title">Add one episode</h2>
+          <p className="settings-detail">
+            Paste an RSS feed URL, then pick one episode for Listen without subscribing to the show.
+          </p>
+          <div className="add-url-row">
+            <input
+              type="url"
+              placeholder="https://example.com/feed.xml"
+              value={oneOffUrl}
+              onChange={(e) => setOneOffUrl(e.target.value)}
+              aria-label="One-off feed URL"
+            />
+            <button onClick={() => void lookupOneOffFeed()} disabled={!oneOffUrl.trim()}>
+              Look up
+            </button>
+          </div>
+          {oneOffPreview && (
+            <div className="one-off-preview">
+              <p className="settings-detail" role="status">
+                {oneOffPreview.title || "Untitled feed"}
+              </p>
+              <input
+                type="search"
+                placeholder="Filter episodes"
+                value={oneOffQuery}
+                onChange={(e) => setOneOffQuery(e.target.value)}
+                aria-label="Filter episodes"
+              />
+              <OneOffEpisodeList
+                episodes={oneOffPreview.episodes}
+                query={oneOffQuery}
+                addedGuids={addedGuids}
+                addingGuid={addingGuid}
+                onAdd={(guid) => void addOneOffEpisode(guid)}
+              />
+            </div>
+          )}
+        </section>
+
         <section className="settings-section" aria-labelledby="subscriptions-title">
           <h2 className="section-title" id="subscriptions-title">Library</h2>
           <p className="settings-detail">Import, export, or refresh your subscriptions.</p>
@@ -376,5 +514,57 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
         {status && <p className="status">{status}</p>}
       </div>
     </div>
+  );
+}
+
+function OneOffEpisodeList({
+  episodes,
+  query,
+  addedGuids,
+  addingGuid,
+  onAdd,
+}: {
+  episodes: FeedPreviewEpisode[];
+  query: string;
+  addedGuids: Set<string>;
+  addingGuid: string | null;
+  onAdd: (guid: string) => void;
+}) {
+  const needle = query.trim().toLowerCase();
+  const visible = needle
+    ? episodes.filter((episode) => episode.title.toLowerCase().includes(needle))
+    : episodes;
+  if (episodes.length === 0) {
+    return <p className="muted">No episodes in this feed.</p>;
+  }
+  if (visible.length === 0) {
+    return <p className="muted">No matching episodes.</p>;
+  }
+  return (
+    <ul className="one-off-episode-list">
+      {visible.map((episode) => {
+        const added = addedGuids.has(episode.guid);
+        const busy = addingGuid === episode.guid;
+        const meta = [fmtDate(episode.published_at), fmtDuration(episode.duration_secs)]
+          .filter(Boolean)
+          .join(" · ");
+        return (
+          <li className="one-off-episode-row" key={episode.guid}>
+            <span className="row-text">
+              <span className="row-title">{episode.title}</span>
+              {meta ? <span className="row-sub">{meta}</span> : null}
+            </span>
+            <button
+              className={`subscribe-btn${added ? " done" : ""}`}
+              disabled={added || addingGuid != null}
+              aria-label={added ? `Added ${episode.title}` : `Add ${episode.title} to Listen`}
+              onClick={() => onAdd(episode.guid)}
+            >
+              {added ? "Added" : busy ? "…" : "Add"}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
