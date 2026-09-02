@@ -539,8 +539,6 @@ function OneOffEpisodeList({
             >
               {added ? "Added" : busy ? "…" : "Add"}
             </button>
-              {added ? "Added" : busy ? "…" : "Add"}
-            </button>
           </li>
         );
       })}

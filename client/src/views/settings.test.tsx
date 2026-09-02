@@ -112,6 +112,47 @@ describe("SettingsSheet", () => {
     expect(screen.getByRole("button", { name: "Added Beta Guest" })).toBeDisabled();
   });
 
+  it("filters a looked-up feed down to no matches and keeps subscribe-by-URL separate", async () => {
+    installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://empty.example/rss",
+        title: "",
+        image_url: "",
+        episodes: [
+          { guid: "g1", title: "Only Episode", published_at: 1_750_000_000, duration_secs: null, image_url: "" },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("One-off feed URL"), "https://empty.example/rss");
+    await user.click(screen.getByRole("button", { name: "Look up" }));
+    await screen.findByText("Found 1 episode in this feed");
+    expect(screen.getByText("Untitled feed")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Filter episodes"), "nope");
+    expect(screen.getByText("No matching episodes.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+  });
+
+  it("shows an empty state when the looked-up feed has no episodes", async () => {
+    installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://silent.example/rss",
+        title: "Silent Show",
+        image_url: "",
+        episodes: [],
+      },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("One-off feed URL"), "https://silent.example/rss");
+    await user.click(screen.getByRole("button", { name: "Look up" }));
+    await screen.findByText("Found 0 episodes in Silent Show");
+    expect(screen.getByText("No episodes in this feed.")).toBeInTheDocument();
+  });
+
   it("imports an OPML file and reports counts", async () => {
     installApi({ "POST /api/opml": { imported: 2, skipped: 1, failed: 0 } });
     const user = userEvent.setup();
