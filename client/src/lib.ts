@@ -48,6 +48,23 @@ export function progressFraction(item: {
   return Math.min(1, Math.max(0, item.position_secs / item.duration_secs));
 }
 
+/** Formats a USD amount with extra precision for sub-cent DeepSeek costs. */
+export function formatUSD(value: number): string {
+  if (!Number.isFinite(value) || value === 0) return "$0.00";
+  const abs = Math.abs(value);
+  const formatted = abs >= 0.01
+    ? value.toFixed(2)
+    : abs >= 0.0001
+      ? value.toFixed(4)
+      : value.toFixed(6);
+  return `$${formatted}`;
+}
+
+export function formatOptionalUSD(value: number | null): string {
+  if (value == null) return "—";
+  return formatUSD(value);
+}
+
 export function cloudClassifierCopy(settings: {
   classifier_available: boolean;
   classifier_unavailable_reason: string | null;

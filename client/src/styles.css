@@ -1397,6 +1397,11 @@ input[type="search"]::-webkit-search-cancel-button {
   font-size: 11px;
 }
 
+.deepseek-usage {
+  display: grid;
+  gap: 0;
+}
+
 .correction-list {
   margin: 14px 0;
 }

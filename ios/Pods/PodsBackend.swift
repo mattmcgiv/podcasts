@@ -863,7 +863,8 @@ final class PodsBackend: PlaybackProgressRecording {
             episode_storage_limit_bytes: AdRemovalStoragePolicy.tenGigabytes,
             minimum_free_bytes: AdRemovalStoragePolicy.tenGigabytes,
             device_available_bytes: (try adRemovalArtifactStore?.availableCapacity()) ?? 0,
-            corrections: corrections
+            corrections: corrections,
+            deepseek_usage: (try? DeepSeekUsageStore(database: database).metrics()) ?? .empty
         )
     }
 

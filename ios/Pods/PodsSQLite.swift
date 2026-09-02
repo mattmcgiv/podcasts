@@ -416,6 +416,22 @@ final class PodsDatabase {
     CREATE INDEX IF NOT EXISTS idx_ad_corrections_podcast_active
         ON ad_corrections(podcast_id, active, created_at);
 
+    -- Immutable DeepSeek billing telemetry. No prompts, transcripts, or model text.
+    CREATE TABLE IF NOT EXISTS deepseek_usage (
+        id INTEGER PRIMARY KEY,
+        episode_id INTEGER NOT NULL,
+        request_kind TEXT NOT NULL CHECK (request_kind IN ('ad_detection', 'show_notes')),
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        cached_input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cost_usd REAL NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deepseek_usage_episode
+        ON deepseek_usage(episode_id, created_at);
+
     CREATE TABLE IF NOT EXISTS ad_artifact_cleanup (
         relative_path TEXT PRIMARY KEY,
         reason TEXT NOT NULL,
