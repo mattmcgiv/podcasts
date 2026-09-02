@@ -663,6 +663,177 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertEqual(missing.statusCode, 404)
     }
 
+    func testPreviewFeedListsEpisodesWithoutStoring() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/one-off.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "One Off Show",
+            items: [
+                ("Ep1", "g1", "https://h.example/1.mp3", Self.d1),
+                ("Ep2", "g2", "https://h.example/2.mp3", Self.d2),
+                ("Ep3", "g3", "https://h.example/3.mp3", Self.d3)
+            ]
+        ).utf8)
+
+        let preview = try decode(FeedPreview.self, from: try await call(
+            harness.backend,
+            "POST",
+            "/api/feeds/preview",
+            json: ["feed_url": feedURL]
+        ))
+        XCTAssertEqual(preview.feed_url, feedURL)
+        XCTAssertEqual(preview.title, "One Off Show")
+        XCTAssertEqual(preview.episodes.map(\.guid), ["g3", "g2", "g1"])
+        XCTAssertEqual(preview.episodes.map(\.title), ["Ep3", "Ep2", "Ep1"])
+
+        let shows = try decode([Show].self, from: try await call(harness.backend, "GET", "/api/shows"))
+        XCTAssertTrue(shows.isEmpty)
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        XCTAssertTrue(recent.items.isEmpty)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM podcasts"), 0)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes"), 0)
+
+        let badURL = try await call(harness.backend, "POST", "/api/feeds/preview", json: ["feed_url": "ftp://x"])
+        XCTAssertEqual(badURL.statusCode, 422)
+    }
+
+    func testAddListenEpisodeStoresOnlyTheSelectedEpisodeUnsubscribed() async throws {
+        let harness = try makeHarness()
+        let feedURL = "https://feeds.example/one-off.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "One Off Show",
+            items: [
+                ("Ep1", "g1", "https://h.example/1.mp3", Self.d1),
+                ("Ep2", "g2", "https://h.example/2.mp3", Self.d2),
+                ("Ep3", "g3", "https://h.example/3.mp3", Self.d3)
+            ]
+        ).utf8)
+
+        let added = try await call(
+            harness.backend,
+            "POST",
+            "/api/listen-episodes",
+            json: ["feed_url": feedURL, "guid": "g2"]
+        )
+        XCTAssertEqual(added.statusCode, 201)
+        let item = try decode(EpisodeItem.self, from: added)
+        XCTAssertEqual(item.title, "Ep2")
+        XCTAssertEqual(item.podcast_title, "One Off Show")
+        XCTAssertNil(item.played_at)
+
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        XCTAssertEqual(recent.items.map(\.title), ["Ep2"])
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes"), 1)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT is_subscribed FROM podcasts"), 0)
+        let shows = try decode([Show].self, from: try await call(harness.backend, "GET", "/api/shows"))
+        XCTAssertTrue(shows.isEmpty, "one-off sources are not subscriptions")
+
+        let missing = try await call(
+            harness.backend,
+            "POST",
+            "/api/listen-episodes",
+            json: ["feed_url": feedURL, "guid": "missing"]
+        )
+        XCTAssertEqual(missing.statusCode, 422)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes"), 1)
+    }
+
+    func testAddListenEpisodeRefreshDoesNotInsertSiblingEpisodes() async throws {
+        let harness = try makeHarness()
+        let oneOffURL = "https://feeds.example/one-off.xml"
+        let subscribedURL = "https://feeds.example/subscribed.xml"
+        harness.fetcher.responses[oneOffURL] = Data(Self.rss(
+            show: "One Off Show",
+            items: [
+                ("Ep1", "g1", "https://h.example/1.mp3", Self.d1),
+                ("Ep2", "g2", "https://h.example/2.mp3", Self.d2),
+                ("Ep3", "g3", "https://h.example/3.mp3", Self.d3)
+            ]
+        ).utf8)
+        harness.fetcher.responses[subscribedURL] = Data(Self.rss(
+            show: "Subscribed Show",
+            items: [("Sub Ep", "s1", "https://h.example/s1.mp3", Self.d4)]
+        ).utf8)
+
+        _ = try await call(
+            harness.backend,
+            "POST",
+            "/api/listen-episodes",
+            json: ["feed_url": oneOffURL, "guid": "g1"]
+        )
+        _ = try await call(harness.backend, "POST", "/api/shows", json: ["feed_url": subscribedURL])
+
+        harness.fetcher.responses[oneOffURL] = Data(Self.rss(
+            show: "One Off Show",
+            items: [
+                ("Ep1", "g1", "https://h.example/1.mp3", Self.d1),
+                ("Ep2", "g2", "https://h.example/2.mp3", Self.d2),
+                ("Ep3", "g3", "https://h.example/3.mp3", Self.d3),
+                ("Ep4", "g4", "https://h.example/4.mp3", Self.d4)
+            ]
+        ).utf8)
+        let urlsBeforeRefresh = harness.fetcher.requestedURLs
+        let refreshed = try decode(RefreshResult.self, from: try await call(harness.backend, "POST", "/api/refresh"))
+        XCTAssertEqual(refreshed, RefreshResult(refreshed: 1, errors: 0))
+        let refreshURLs = harness.fetcher.requestedURLs.dropFirst(urlsBeforeRefresh.count)
+        XCTAssertFalse(refreshURLs.contains(oneOffURL))
+        XCTAssertTrue(refreshURLs.contains(subscribedURL))
+        XCTAssertEqual(
+            try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes WHERE podcast_id = (SELECT id FROM podcasts WHERE feed_url = ?)", [.text(oneOffURL)]),
+            1
+        )
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT is_subscribed FROM podcasts WHERE feed_url = ?", [.text(oneOffURL)]), 0)
+
+        let recent = try decode(Page<EpisodeItem>.self, from: try await call(harness.backend, "GET", "/api/recent"))
+        XCTAssertEqual(Set(recent.items.map(\.title)), ["Ep1", "Sub Ep"])
+
+        let subscribed = try decode(Show.self, from: try await call(
+            harness.backend,
+            "POST",
+            "/api/shows",
+            json: ["feed_url": oneOffURL]
+        ))
+        XCTAssertEqual(subscribed.title, "One Off Show")
+        XCTAssertEqual(subscribed.episode_count, 4)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT is_subscribed FROM podcasts WHERE feed_url = ?", [.text(oneOffURL)]), 1)
+        let shows = try decode([Show].self, from: try await call(harness.backend, "GET", "/api/shows"))
+        XCTAssertEqual(Set(shows.map(\.title)), ["One Off Show", "Subscribed Show"])
+    }
+
+    func testAddListenEpisodeWakesAdRemovalScheduler() async throws {
+        let harness = try makeHarness()
+        try harness.database.execute(
+            "INSERT INTO settings (key, value) VALUES ('ad_removal_enabled', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        let schedulerRequested = expectation(description: "ad-removal scheduler requested")
+        harness.backend.setAdRemovalRunRequestHandler { schedulerRequested.fulfill() }
+        let feedURL = "https://feeds.example/one-off-ad-removal.xml"
+        harness.fetcher.responses[feedURL] = Data(Self.rss(
+            show: "One Off Ad Removal",
+            items: [
+                ("Ep1", "ar1", "https://h.example/ar1.mp3", Self.d1),
+                ("Ep2", "ar2", "https://h.example/ar2.mp3", Self.d2),
+                ("Ep3", "ar3", "https://h.example/ar3.mp3", Self.d3)
+            ]
+        ).utf8)
+
+        let response = try await call(
+            harness.backend,
+            "POST",
+            "/api/listen-episodes",
+            json: ["feed_url": feedURL, "guid": "ar2"]
+        )
+        XCTAssertEqual(response.statusCode, 201)
+        await fulfillment(of: [schedulerRequested], timeout: 1)
+        let enrolledTitles = try harness.database.query(
+            "SELECT e.title FROM ad_removal_jobs j JOIN episodes e ON e.id = j.episode_id ORDER BY e.published_at",
+            map: { sqliteString($0, 0) }
+        )
+        XCTAssertEqual(enrolledTitles, ["Ep2"])
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT COUNT(*) FROM episodes"), 1)
+        XCTAssertEqual(try harness.database.scalarInt64("SELECT is_subscribed FROM podcasts"), 0)
+    }
+
     func testSubscribeEnrollsOnlyVisibleEpisodesAndWakesAdRemovalScheduler() async throws {
         let harness = try makeHarness()
         try harness.database.execute(

@@ -66,6 +66,91 @@ describe("SettingsSheet", () => {
     await screen.findByText("Subscribed to Added Show");
     const subscribeCall = calls.find((call) => call.key === "POST /api/shows");
     expect(JSON.parse(String(subscribeCall?.init.body))).toEqual({ feed_url: "https://x.example/f" });
+    expect(calls.some((call) => call.key === "POST /api/listen-episodes")).toBe(false);
+  });
+
+  it("looks up a feed and adds one selected episode without subscribing", async () => {
+    const { calls } = installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://one.example/rss",
+        title: "Guest Interviews",
+        image_url: "",
+        episodes: [
+          { guid: "g1", title: "Alpha Guest", published_at: 1_750_000_000, duration_secs: 3600, image_url: "" },
+          { guid: "g2", title: "Beta Guest", published_at: 1_740_000_000, duration_secs: 1800, image_url: "" },
+          { guid: "g3", title: "Gamma Talk", published_at: 1_730_000_000, duration_secs: null, image_url: "" },
+        ],
+      },
+      "POST /api/listen-episodes": episode({ title: "Beta Guest" }),
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("One-off feed URL"), "https://one.example/rss");
+    await user.click(screen.getByRole("button", { name: "Look up" }));
+    await screen.findByText("Found 3 episodes in Guest Interviews");
+    expect(screen.getByText("Alpha Guest")).toBeInTheDocument();
+    expect(screen.getByText("Beta Guest")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Filter episodes"), "beta");
+    expect(screen.getByText("Beta Guest")).toBeInTheDocument();
+    expect(screen.queryByText("Alpha Guest")).not.toBeInTheDocument();
+    expect(screen.queryByText("Gamma Talk")).not.toBeInTheDocument();
+
+    const changed = vi.fn();
+    window.addEventListener(EPISODES_CHANGED_EVENT, changed);
+    await user.click(screen.getByRole("button", { name: "Add Beta Guest to Listen" }));
+    await screen.findByText("Added Beta Guest to Listen");
+    const addCall = calls.find((call) => call.key === "POST /api/listen-episodes");
+    expect(JSON.parse(String(addCall?.init.body))).toEqual({
+      feed_url: "https://one.example/rss",
+      guid: "g2",
+    });
+    expect(calls.some((call) => call.key === "POST /api/shows")).toBe(false);
+    expect(changed).toHaveBeenCalled();
+    window.removeEventListener(EPISODES_CHANGED_EVENT, changed);
+    expect(screen.getByRole("button", { name: "Added Beta Guest" })).toBeDisabled();
+  });
+
+  it("filters a looked-up feed down to no matches and keeps subscribe-by-URL separate", async () => {
+    installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://empty.example/rss",
+        title: "",
+        image_url: "",
+        episodes: [
+          { guid: "g1", title: "Only Episode", published_at: 1_750_000_000, duration_secs: null, image_url: "" },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("One-off feed URL"), "https://empty.example/rss");
+    await user.click(screen.getByRole("button", { name: "Look up" }));
+    await screen.findByText("Found 1 episode in this feed");
+    expect(screen.getByText("Untitled feed")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Filter episodes"), "nope");
+    expect(screen.getByText("No matching episodes.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+  });
+
+  it("shows an empty state when the looked-up feed has no episodes", async () => {
+    installApi({
+      "POST /api/feeds/preview": {
+        feed_url: "https://silent.example/rss",
+        title: "Silent Show",
+        image_url: "",
+        episodes: [],
+      },
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("One-off feed URL"), "https://silent.example/rss");
+    await user.click(screen.getByRole("button", { name: "Look up" }));
+    await screen.findByText("Found 0 episodes in Silent Show");
+    expect(screen.getByText("No episodes in this feed.")).toBeInTheDocument();
   });
 
   it("imports an OPML file and reports counts", async () => {

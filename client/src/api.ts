@@ -6,6 +6,7 @@ import type {
   EpisodeShowNote,
   Follow,
   FollowCandidate,
+  FeedPreview,
   Page,
   PlayContext,
   RefreshStatus,
@@ -107,6 +108,13 @@ export const Api = {
     request<Page<EpisodeItem>>(`/shows/${id}/search?q=${encodeURIComponent(q)}`),
   subscribe: (feedUrl: string) =>
     request<Show>("/shows", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
+  previewFeed: (feedUrl: string) =>
+    request<FeedPreview>("/feeds/preview", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
+  addListenEpisode: (feedUrl: string, guid: string) =>
+    request<EpisodeItem>("/listen-episodes", {
+      method: "POST",
+      body: JSON.stringify({ feed_url: feedUrl, guid }),
+    }),
   unsubscribe: (id: number) => request<void>(`/shows/${id}`, { method: "DELETE" }),
   episode: (id: number) => request<EpisodeDetail>(`/episodes/${id}`),
   generateShowNotes: (id: number) =>

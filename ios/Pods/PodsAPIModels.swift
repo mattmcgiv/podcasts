@@ -126,6 +126,21 @@ struct AdRemovalSettingsPayload: Codable, Equatable {
     let corrections: [AdRemovalCorrectionCountPayload]
 }
 
+struct FeedPreviewEpisode: Codable, Equatable {
+    let guid: String
+    let title: String
+    let published_at: Int64
+    let duration_secs: Int64?
+    let image_url: String
+}
+
+struct FeedPreview: Codable, Equatable {
+    let feed_url: String
+    let title: String
+    let image_url: String
+    let episodes: [FeedPreviewEpisode]
+}
+
 struct DirectoryPodcast: Codable, Equatable {
     let title: String
     let author: String
