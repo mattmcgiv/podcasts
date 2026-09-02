@@ -83,6 +83,21 @@ export interface DirectoryPodcast {
   subscribed: boolean;
 }
 
+export interface FeedPreviewEpisode {
+  guid: string;
+  title: string;
+  published_at: number;
+  duration_secs: number | null;
+  image_url: string;
+}
+
+export interface FeedPreview {
+  feed_url: string;
+  title: string;
+  image_url: string;
+  episodes: FeedPreviewEpisode[];
+}
+
 export interface SearchResults {
   directory_configured: boolean;
   podcasts: DirectoryPodcast[];

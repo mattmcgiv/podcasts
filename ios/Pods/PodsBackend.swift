@@ -262,6 +262,23 @@ final class PodsBackend: PlaybackProgressRecording {
             if parts[3] == "accept", request.method == "POST" { try acceptFollowCandidate(id: id); return .noContent() }
             if parts[3] == "reject", request.method == "POST" { try rejectFollowCandidate(id: id); return .noContent() }
         }
+        if path == "/api/feeds/preview", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard let feedURL = body["feed_url"] as? String else {
+                throw PodsBackendError.invalid("feed_url is required")
+            }
+            return .json(try await previewFeed(feedURL: feedURL))
+        }
+        if path == "/api/listen-episodes", request.method == "POST" {
+            let body = try request.jsonObject()
+            guard let feedURL = body["feed_url"] as? String else {
+                throw PodsBackendError.invalid("feed_url is required")
+            }
+            guard let guid = body["guid"] as? String else {
+                throw PodsBackendError.invalid("guid is required")
+            }
+            return .json(try await addListenEpisode(feedURL: feedURL, guid: guid), statusCode: 201)
+        }
         if path == "/api/shows", request.method == "POST" {
             let body = try request.jsonObject()
             guard let feedURL = body["feed_url"] as? String else {
@@ -523,11 +540,82 @@ final class PodsBackend: PlaybackProgressRecording {
         return show
     }
 
-    private func subscribe(feedURL rawURL: String) async throws -> Show {
-        let feedURL = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: feedURL), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
-            throw PodsBackendError.invalid("feed_url must be an http(s) URL")
+    private func previewFeed(feedURL rawURL: String) async throws -> FeedPreview {
+        let (feedURL, feed) = try await loadFeed(from: rawURL)
+        let episodes = feed.episodes
+            .sorted { $0.publishedAt > $1.publishedAt }
+            .map { episode in
+                FeedPreviewEpisode(
+                    guid: episode.guid,
+                    title: episode.title,
+                    published_at: episode.publishedAt,
+                    duration_secs: episode.durationSecs,
+                    image_url: episode.imageURL
+                )
+            }
+        return FeedPreview(
+            feed_url: feedURL,
+            title: feed.title,
+            image_url: feed.imageURL,
+            episodes: episodes
+        )
+    }
+
+    private func addListenEpisode(feedURL rawURL: String, guid rawGUID: String) async throws -> EpisodeItem {
+        let guid = rawGUID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !guid.isEmpty else {
+            throw PodsBackendError.invalid("guid is required")
         }
+        let (feedURL, feed) = try await loadFeed(from: rawURL)
+        guard let selected = feed.episodes.first(where: { $0.guid == guid }) else {
+            throw PodsBackendError.invalid("episode was not found in that feed")
+        }
+        let episodeID = try database.withTransaction { () -> Int64 in
+            let podcastID: Int64
+            if let existingPodcastID = try database.scalarInt64(
+                "SELECT id FROM podcasts WHERE feed_url = ?",
+                [.text(feedURL)]
+            ) {
+                podcastID = existingPodcastID
+            } else {
+                try database.execute(
+                    "INSERT INTO podcasts (feed_url, is_subscribed, created_at) VALUES (?, 0, ?)",
+                    [.text(feedURL), .int(nowUnix())]
+                )
+                podcastID = database.lastInsertRowID()
+            }
+            try upsertPodcastMeta(podcastID: podcastID, feed: feed)
+            let episodeID = try upsertEpisode(podcastID: podcastID, episode: selected).id
+            try database.execute(
+                """
+                INSERT INTO episode_state (episode_id, played_at, archived_at, updated_at)
+                VALUES (?, NULL, NULL, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    played_at = NULL,
+                    archived_at = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                [.int(episodeID), .int(nowUnix())]
+            )
+            try database.execute(
+                "INSERT OR IGNORE INTO listen_episodes (episode_id) VALUES (?)",
+                [.int(episodeID)]
+            )
+            return episodeID
+        }
+        guard let item = try database.query(
+            "\(Self.episodeItemSelect) WHERE e.id = ?",
+            [.int(episodeID)],
+            map: Self.mapEpisodeItem
+        ).first else {
+            throw PodsBackendError.database("could not load added episode")
+        }
+        NotificationCenter.default.post(name: .podsFeedRefreshCompleted, object: nil)
+        return item
+    }
+
+    private func subscribe(feedURL rawURL: String) async throws -> Show {
+        let (feedURL, url) = try normalizedFeedURL(rawURL)
         let existingPodcastID = try database.scalarInt64("SELECT id FROM podcasts WHERE feed_url = ?", [.text(feedURL)])
         if let existingPodcastID,
            try database.scalarInt64("SELECT is_subscribed FROM podcasts WHERE id = ?", [.int(existingPodcastID)]) == 1 {
@@ -1438,6 +1526,23 @@ final class PodsBackend: PlaybackProgressRecording {
         }
     }
 
+    private func normalizedFeedURL(_ rawURL: String) throws -> (String, URL) {
+        let feedURL = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: feedURL), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
+            throw PodsBackendError.invalid("feed_url must be an http(s) URL")
+        }
+        return (feedURL, url)
+    }
+
+    private func loadFeed(from rawURL: String) async throws -> (String, ParsedFeed) {
+        let (feedURL, url) = try normalizedFeedURL(rawURL)
+        let fetched = try await fetchFeed(url, validators: FeedValidators())
+        guard case let .data(data, _) = fetched else {
+            throw PodsBackendError.upstream("feed returned HTTP 304")
+        }
+        return (feedURL, try RSSParser.parse(data))
+    }
+
     private func fetchFeed(_ url: URL, validators: FeedValidators) async throws -> FeedFetchResponse {
         if let conditionalFetcher = feedFetcher as? ConditionalFeedFetching {
             return try await conditionalFetcher.response(for: url, validators: validators)
@@ -1547,58 +1652,68 @@ final class PodsBackend: PlaybackProgressRecording {
     }
 
     @discardableResult
+    private func upsertEpisode(podcastID: Int64, episode: ParsedFeed.Episode) throws -> (id: Int64, inserted: Bool) {
+        let existing = try database.scalarInt64(
+            "SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?",
+            [.int(podcastID), .text(episode.guid)]
+        )
+        let episodeID: Int64
+        let inserted: Bool
+        if let existing {
+            try database.execute(
+                """
+                UPDATE episodes SET title = ?, notes_html = ?, audio_url = ?, duration_secs = ?, published_at = ?, image_url = ? WHERE id = ?
+                """,
+                [
+                    .text(episode.title),
+                    .text(episode.notesHTML),
+                    .text(episode.audioURL),
+                    episode.durationSecs.map(SQLiteValue.int) ?? .null,
+                    .int(episode.publishedAt),
+                    .text(episode.imageURL),
+                    .int(existing)
+                ]
+            )
+            episodeID = existing
+            inserted = false
+        } else {
+            try database.execute(
+                """
+                INSERT INTO episodes (podcast_id, guid, title, notes_html, audio_url, duration_secs, published_at, image_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    .int(podcastID),
+                    .text(episode.guid),
+                    .text(episode.title),
+                    .text(episode.notesHTML),
+                    .text(episode.audioURL),
+                    episode.durationSecs.map(SQLiteValue.int) ?? .null,
+                    .int(episode.publishedAt),
+                    .text(episode.imageURL)
+                ]
+            )
+            episodeID = database.lastInsertRowID()
+            inserted = true
+            if try settingValues()["ad_removal_enabled"] == "true" {
+                _ = try AdRemovalJobStore(database: database).enqueue(episodeID: episodeID)
+            }
+        }
+        try database.execute("DELETE FROM episodes_fts WHERE rowid = ?", [.int(episodeID)])
+        try database.execute(
+            "INSERT INTO episodes_fts (rowid, title, notes) VALUES (?, ?, ?)",
+            [.int(episodeID), .text(episode.title), .text(stripHTML(episode.notesHTML))]
+        )
+        return (episodeID, inserted)
+    }
+
+    @discardableResult
     private func upsertEpisodes(podcastID: Int64, feed: ParsedFeed) throws -> Int {
         var newCount = 0
         for episode in feed.episodes {
-            let existing = try database.scalarInt64(
-                "SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?",
-                [.int(podcastID), .text(episode.guid)]
-            )
-            let episodeID: Int64
-            if let existing {
-                try database.execute(
-                    """
-                    UPDATE episodes SET title = ?, notes_html = ?, audio_url = ?, duration_secs = ?, published_at = ?, image_url = ? WHERE id = ?
-                    """,
-                    [
-                        .text(episode.title),
-                        .text(episode.notesHTML),
-                        .text(episode.audioURL),
-                        episode.durationSecs.map(SQLiteValue.int) ?? .null,
-                        .int(episode.publishedAt),
-                        .text(episode.imageURL),
-                        .int(existing)
-                    ]
-                )
-                episodeID = existing
-            } else {
-                try database.execute(
-                    """
-                    INSERT INTO episodes (podcast_id, guid, title, notes_html, audio_url, duration_secs, published_at, image_url)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        .int(podcastID),
-                        .text(episode.guid),
-                        .text(episode.title),
-                        .text(episode.notesHTML),
-                        .text(episode.audioURL),
-                        episode.durationSecs.map(SQLiteValue.int) ?? .null,
-                        .int(episode.publishedAt),
-                        .text(episode.imageURL)
-                    ]
-                )
-                episodeID = database.lastInsertRowID()
+            if try upsertEpisode(podcastID: podcastID, episode: episode).inserted {
                 newCount += 1
-                if try settingValues()["ad_removal_enabled"] == "true" {
-                    _ = try AdRemovalJobStore(database: database).enqueue(episodeID: episodeID)
-                }
             }
-            try database.execute("DELETE FROM episodes_fts WHERE rowid = ?", [.int(episodeID)])
-            try database.execute(
-                "INSERT INTO episodes_fts (rowid, title, notes) VALUES (?, ?, ?)",
-                [.int(episodeID), .text(episode.title), .text(stripHTML(episode.notesHTML))]
-            )
         }
         return newCount
     }
@@ -1639,7 +1754,9 @@ final class PodsBackend: PlaybackProgressRecording {
     """
 
     private static let inListenPredicate = """
-    (p.is_subscribed = 1 OR EXISTS (SELECT 1 FROM follow_episodes fe WHERE fe.episode_id = e.id))
+    (p.is_subscribed = 1
+     OR EXISTS (SELECT 1 FROM follow_episodes fe WHERE fe.episode_id = e.id)
+     OR EXISTS (SELECT 1 FROM listen_episodes le WHERE le.episode_id = e.id))
     """
 
     private static let showSelect = """
