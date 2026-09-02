@@ -88,7 +88,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             )
             let jobStore = AdRemovalJobStore(database: database)
             _ = try cleanup.drain()
-            let deepSeekUsageStore = DeepSeekUsageStore(database: database)
+            let deepSeekUsageStore = DeepSeekUsageStore(
+                database: database,
+                fallbackURL: try DeepSeekUsageStore.applicationDefaultFallbackURL()
+            )
             let episodeShowNotesService = EpisodeShowNotesService(
                 database: database,
                 generator: DeepSeekEpisodeShowNotesGenerator(
@@ -204,6 +207,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 adRemovalArtifactStore: artifactStore,
                 adRemovalDiagnostics: adRemovalDiagnostics,
                 deepSeekCredentialStore: deepSeekCredentialStore,
+                deepSeekUsageStore: deepSeekUsageStore,
                 episodeShowNotesService: episodeShowNotesService,
                 recoverInterruptedPlayedCleanup: true
             )

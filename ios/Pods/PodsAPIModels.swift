@@ -103,13 +103,24 @@ struct DeepSeekUsageMetricsPayload: Codable, Equatable {
     let average_cost_per_podcast_minute_usd: Double?
     let ad_detection_cost_usd: Double
     let show_notes_cost_usd: Double
+    let telemetry_complete: Bool
 
     static let empty = DeepSeekUsageMetricsPayload(
         total_cost_usd: 0,
         average_cost_per_episode_usd: nil,
         average_cost_per_podcast_minute_usd: nil,
         ad_detection_cost_usd: 0,
-        show_notes_cost_usd: 0
+        show_notes_cost_usd: 0,
+        telemetry_complete: true
+    )
+
+    static let incompleteEmpty = DeepSeekUsageMetricsPayload(
+        total_cost_usd: 0,
+        average_cost_per_episode_usd: nil,
+        average_cost_per_podcast_minute_usd: nil,
+        ad_detection_cost_usd: 0,
+        show_notes_cost_usd: 0,
+        telemetry_complete: false
     )
 }
 

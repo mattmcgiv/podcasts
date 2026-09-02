@@ -27,6 +27,7 @@ const adRemovalSettings = {
     average_cost_per_podcast_minute_usd: 0.002,
     ad_detection_cost_usd: 0.12,
     show_notes_cost_usd: 0.06,
+    telemetry_complete: true,
   },
 };
 
@@ -138,6 +139,7 @@ describe("SettingsSheet", () => {
           average_cost_per_podcast_minute_usd: null,
           ad_detection_cost_usd: 0,
           show_notes_cost_usd: 0,
+          telemetry_complete: true,
         },
       },
     });
@@ -149,6 +151,26 @@ describe("SettingsSheet", () => {
     expect(screen.getByText(/Average per podcast minute: —/)).toBeInTheDocument();
     expect(screen.getByText(/Ad detection: \$0\.00/)).toBeInTheDocument();
     expect(screen.getByText(/Show notes: \$0\.00/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Usage totals are incomplete/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns when DeepSeek telemetry is incomplete", async () => {
+    installApi({
+      "GET /api/ad-removal/settings": {
+        ...adRemovalSettings,
+        deepseek_usage: {
+          ...adRemovalSettings.deepseek_usage,
+          telemetry_complete: false,
+        },
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(
+      await screen.findByText(/Usage totals are incomplete; some billed DeepSeek requests may be missing or unpriced/),
+    ).toBeInTheDocument();
   });
 
   it("does not render a close button", async () => {

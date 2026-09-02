@@ -106,6 +106,7 @@ export function adRemovalSettings(
       average_cost_per_podcast_minute_usd: null,
       ad_detection_cost_usd: 0,
       show_notes_cost_usd: 0,
+      telemetry_complete: true,
     },
     ...overrides,
   };

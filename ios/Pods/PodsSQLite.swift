@@ -46,6 +46,44 @@ final class PodsDatabase {
         try addColumnIfMissing(table: "ad_removal_jobs", column: "prompt_version", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "classifier_quantization", definition: "TEXT")
         try addColumnIfMissing(table: "ad_removal_jobs", column: "classified_at", definition: "INTEGER")
+        try addColumnIfMissing(table: "deepseek_usage", column: "episode_key", definition: "TEXT NOT NULL DEFAULT ''")
+        try addColumnIfMissing(table: "deepseek_usage", column: "duration_secs", definition: "INTEGER")
+        try backfillDeepSeekUsageEpisodeKeys()
+    }
+
+    private func backfillDeepSeekUsageEpisodeKeys() throws {
+        try execute(
+            """
+            UPDATE deepseek_usage
+            SET episode_key = COALESCE((
+                SELECT p.feed_url || char(31) || e.guid
+                FROM episodes e
+                JOIN podcasts p ON p.id = e.podcast_id
+                WHERE e.id = deepseek_usage.episode_id
+            ), episode_key)
+            WHERE episode_key = ''
+            """
+        )
+        try execute(
+            """
+            UPDATE deepseek_usage
+            SET episode_key = 'episode-id:' || episode_id
+            WHERE episode_key = '' OR episode_key IS NULL
+            """
+        )
+        try execute(
+            """
+            UPDATE deepseek_usage
+            SET duration_secs = (
+                SELECT e.duration_secs
+                FROM episodes e
+                JOIN podcasts p ON p.id = e.podcast_id
+                WHERE e.id = deepseek_usage.episode_id
+                  AND (p.feed_url || char(31) || e.guid) = deepseek_usage.episode_key
+            )
+            WHERE duration_secs IS NULL
+            """
+        )
     }
 
     func withTransaction<T>(_ body: () throws -> T) throws -> T {
@@ -417,20 +455,25 @@ final class PodsDatabase {
         ON ad_corrections(podcast_id, active, created_at);
 
     -- Immutable DeepSeek billing telemetry. No prompts, transcripts, or model text.
+    -- episode_key is feed_url + guid so deleted episode IDs cannot be reused.
     CREATE TABLE IF NOT EXISTS deepseek_usage (
         id INTEGER PRIMARY KEY,
         episode_id INTEGER NOT NULL,
+        episode_key TEXT NOT NULL,
+        duration_secs INTEGER,
         request_kind TEXT NOT NULL CHECK (request_kind IN ('ad_detection', 'show_notes')),
         model TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL,
-        cached_input_tokens INTEGER NOT NULL,
-        output_tokens INTEGER NOT NULL,
-        cost_usd REAL NOT NULL,
+        input_tokens INTEGER,
+        cached_input_tokens INTEGER,
+        output_tokens INTEGER,
+        cost_usd REAL,
         created_at INTEGER NOT NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_deepseek_usage_episode
         ON deepseek_usage(episode_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_deepseek_usage_episode_key
+        ON deepseek_usage(episode_key, created_at);
 
     CREATE TABLE IF NOT EXISTS ad_artifact_cleanup (
         relative_path TEXT PRIMARY KEY,

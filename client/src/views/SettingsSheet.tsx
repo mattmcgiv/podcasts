@@ -284,6 +284,11 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                 {" · "}
                 Show notes: {formatUSD(adRemoval.deepseek_usage.show_notes_cost_usd)}
               </p>
+              {!adRemoval.deepseek_usage.telemetry_complete && (
+                <p className="settings-detail" role="status">
+                  Usage totals are incomplete; some billed DeepSeek requests may be missing or unpriced.
+                </p>
+              )}
             </div>
 
             {adRemoval.corrections.length > 0 && (

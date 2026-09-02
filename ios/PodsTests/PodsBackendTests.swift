@@ -1315,6 +1315,7 @@ final class PodsBackendTests: XCTestCase {
         XCTAssertNil(settings.classifier_unavailable_reason)
         XCTAssertEqual(settings.minimum_free_bytes, 10_000_000_000, "settings must report the explicit 10 GB storage-policy minimum")
         XCTAssertEqual(settings.deepseek_usage, .empty)
+        XCTAssertTrue(settings.deepseek_usage.telemetry_complete)
 
         let enabled = try await call(
             harness.backend,
@@ -1413,6 +1414,7 @@ final class PodsBackendTests: XCTestCase {
         )
         XCTAssertEqual(settings.deepseek_usage.ad_detection_cost_usd, 0.66, accuracy: 0.0000000001)
         XCTAssertEqual(settings.deepseek_usage.show_notes_cost_usd, 1.98, accuracy: 0.0000000001)
+        XCTAssertTrue(settings.deepseek_usage.telemetry_complete)
     }
 
     func testAdRemovalSettingsAndEnableRequireDeepSeekAPIKey() async throws {

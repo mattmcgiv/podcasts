@@ -7,7 +7,7 @@ final class DeepSeekUsageTests: XCTestCase {
             episodeID: Int64,
             requestKind: DeepSeekRequestKind,
             model: String,
-            usage: DeepSeekAPIUsage,
+            usage: DeepSeekAPIUsage?,
             createdAt: Date
         )] = []
 
@@ -15,7 +15,7 @@ final class DeepSeekUsageTests: XCTestCase {
             episodeID: Int64,
             requestKind: DeepSeekRequestKind,
             model: String,
-            usage: DeepSeekAPIUsage,
+            usage: DeepSeekAPIUsage?,
             createdAt: Date
         ) throws {
             records.append((episodeID, requestKind, model, usage, createdAt))
@@ -27,7 +27,7 @@ final class DeepSeekUsageTests: XCTestCase {
             episodeID: Int64,
             requestKind: DeepSeekRequestKind,
             model: String,
-            usage: DeepSeekAPIUsage,
+            usage: DeepSeekAPIUsage?,
             createdAt: Date
         ) throws {
             throw DeepSeekClassifierError.invalidResponse
@@ -41,35 +41,90 @@ final class DeepSeekUsageTests: XCTestCase {
     }
 
     func testParseUsageReadsDeepSeekTokenFields() {
-        let usage = DeepSeekAPIUsage.parse(from: [
-            "usage": [
-                "prompt_tokens": 1_000,
-                "completion_tokens": 50,
-                "total_tokens": 1_050,
-                "prompt_cache_hit_tokens": 100,
-                "prompt_cache_miss_tokens": 900
-            ]
-        ])
         XCTAssertEqual(
-            usage,
-            DeepSeekAPIUsage(inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50)
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 50,
+                    "total_tokens": 1_050,
+                    "prompt_cache_hit_tokens": 100,
+                    "prompt_cache_miss_tokens": 900
+                ]
+            ]),
+            .valid(DeepSeekAPIUsage(inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50))
         )
     }
 
-    func testParseUsageReadsNestedCachedTokensAndIgnoresMissingUsage() {
-        let nested = DeepSeekAPIUsage.parse(from: [
-            "usage": [
-                "prompt_tokens": 80,
-                "completion_tokens": 10,
-                "prompt_tokens_details": ["cached_tokens": 20]
-            ]
-        ])
+    func testParseUsageReadsNestedCachedTokensAndRejectsIncompleteObjects() {
         XCTAssertEqual(
-            nested,
-            DeepSeekAPIUsage(inputTokens: 80, cachedInputTokens: 20, outputTokens: 10)
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": 80,
+                    "completion_tokens": 10,
+                    "prompt_tokens_details": ["cached_tokens": 20]
+                ]
+            ]),
+            .valid(DeepSeekAPIUsage(inputTokens: 80, cachedInputTokens: 20, outputTokens: 10))
         )
-        XCTAssertNil(DeepSeekAPIUsage.parse(from: ["choices": []]))
-        XCTAssertNil(DeepSeekAPIUsage.parse(from: ["usage": ["total_tokens": 12]]))
+        XCTAssertEqual(DeepSeekAPIUsage.parse(from: ["choices": []]), .absent)
+        XCTAssertEqual(DeepSeekAPIUsage.parse(from: ["usage": ["total_tokens": 12]]), .invalid)
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": ["prompt_tokens": 80, "completion_tokens": 10]
+            ]),
+            .invalid
+        )
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": 80.5,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 0
+                ]
+            ]),
+            .invalid
+        )
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": -1,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 0
+                ]
+            ]),
+            .invalid
+        )
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": 80,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 100
+                ]
+            ]),
+            .invalid
+        )
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": 80,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 10,
+                    "prompt_cache_miss_tokens": 20
+                ]
+            ]),
+            .invalid
+        )
+        XCTAssertEqual(
+            DeepSeekAPIUsage.parse(from: [
+                "usage": [
+                    "prompt_tokens": true,
+                    "completion_tokens": 10,
+                    "prompt_cache_hit_tokens": 0
+                ]
+            ]),
+            .invalid
+        )
     }
 
     func testCostUsesPublishedPeakAndOffPeakRates() throws {
@@ -125,8 +180,16 @@ final class DeepSeekUsageTests: XCTestCase {
         let records = try store.records(episodeID: harness.episodeID)
         XCTAssertEqual(records.count, 3)
         XCTAssertEqual(records.map(\.requestKind), [.adDetection, .adDetection, .showNotes])
-        XCTAssertEqual(try store.episodeTotalCost(episodeID: harness.episodeID), records.map(\.costUSD).reduce(0, +))
+        XCTAssertEqual(
+            try store.episodeTotalCost(episodeID: harness.episodeID),
+            records.compactMap(\.costUSD).reduce(0, +)
+        )
         XCTAssertEqual(try store.episodeTotalCost(episodeID: harness.episodeID), 0.0029084, accuracy: 0.0000000001)
+        XCTAssertTrue(try store.metrics().telemetry_complete)
+        XCTAssertEqual(
+            records.map(\.episodeKey),
+            Array(repeating: DeepSeekUsageStore.episodeKey(feedURL: "https://example.com/feed", guid: "episode-1"), count: 3)
+        )
     }
 
     func testMetricsComputeAveragesAndCostPerPodcastMinute() throws {
@@ -161,6 +224,7 @@ final class DeepSeekUsageTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(metrics.average_cost_per_podcast_minute_usd), 0.0293333333, accuracy: 0.0000001)
         XCTAssertEqual(metrics.ad_detection_cost_usd, 0.66, accuracy: 0.0000000001)
         XCTAssertEqual(metrics.show_notes_cost_usd, 1.98, accuracy: 0.0000000001)
+        XCTAssertTrue(metrics.telemetry_complete)
     }
 
     func testMetricsFallBackToTranscriptDurationAndSkipEpisodesWithoutMinutes() throws {
@@ -201,6 +265,7 @@ final class DeepSeekUsageTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(metrics.average_cost_per_episode_usd), 0.66, accuracy: 0.0000000001)
         XCTAssertEqual(try XCTUnwrap(metrics.average_cost_per_podcast_minute_usd), 0.33, accuracy: 0.0000000001)
         XCTAssertEqual(metrics.show_notes_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertTrue(metrics.telemetry_complete)
     }
 
     func testSuccessfulClassifierCallRecordsUsage() async throws {
@@ -386,6 +451,135 @@ final class DeepSeekUsageTests: XCTestCase {
         XCTAssertEqual(store.records.count, 1)
         XCTAssertEqual(store.records.first?.requestKind, .showNotes)
         XCTAssertEqual(store.records.first?.episodeID, 8)
+    }
+
+    func testInvalidUsageIsStoredUnpricedAndMarksTelemetryIncomplete() throws {
+        let harness = try makeDatabase()
+        let store = DeepSeekUsageStore(database: harness.database)
+        try DeepSeekUsageAttribution.$episodeID.withValue(harness.episodeID) {
+            DeepSeekUsageRecorder.recordIfPresent(
+                store: store,
+                requestKind: .adDetection,
+                model: "deepseek-v4-pro",
+                root: ["usage": ["prompt_tokens": 80, "completion_tokens": 10]],
+                createdAt: Date()
+            )
+        }
+
+        let records = try store.records(episodeID: harness.episodeID)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertNil(records.first?.costUSD)
+        XCTAssertNil(records.first?.inputTokens)
+        XCTAssertEqual(try store.episodeTotalCost(episodeID: harness.episodeID), 0)
+        XCTAssertFalse(try store.metrics().telemetry_complete)
+    }
+
+    func testSnapshotDurationSurvivesEpisodeIDReuse() throws {
+        let harness = try makeDatabase(durationSecs: 3_600)
+        let store = DeepSeekUsageStore(database: harness.database)
+        let offPeak = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-17T12:00:00Z"))
+        try store.record(
+            episodeID: harness.episodeID,
+            requestKind: .adDetection,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0),
+            createdAt: offPeak
+        )
+        try harness.database.execute("DELETE FROM episodes WHERE id = ?", [.int(harness.episodeID)])
+        try harness.database.execute(
+            """
+            INSERT INTO episodes (id, podcast_id, guid, title, audio_url, duration_secs, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .int(harness.episodeID),
+                .int(harness.podcastID),
+                .text("unrelated-reuse"),
+                .text("Unrelated"),
+                .text("https://example.com/unrelated.mp3"),
+                .int(60),
+                .int(200)
+            ]
+        )
+
+        let metrics = try store.metrics()
+        XCTAssertEqual(metrics.total_cost_usd, 0.66, accuracy: 0.0000000001)
+        XCTAssertEqual(try XCTUnwrap(metrics.average_cost_per_podcast_minute_usd), 0.011, accuracy: 0.0000000001)
+        let records = try store.records()
+        XCTAssertEqual(records.first?.durationSecs, 3_600)
+        XCTAssertEqual(
+            records.first?.episodeKey,
+            DeepSeekUsageStore.episodeKey(feedURL: "https://example.com/feed", guid: "episode-1")
+        )
+    }
+
+    func testFailedInsertFallsBackToLedgerAndReconciles() throws {
+        let harness = try makeDatabase()
+        let fallbackURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("deepseek-fallback-\(UUID().uuidString).jsonl")
+        let store = DeepSeekUsageStore(database: harness.database, fallbackURL: fallbackURL)
+        let offPeak = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-17T12:00:00Z"))
+        store.failNextInsert = true
+        try store.record(
+            episodeID: harness.episodeID,
+            requestKind: .showNotes,
+            model: "deepseek-v4-pro",
+            usage: DeepSeekAPIUsage(inputTokens: 0, cachedInputTokens: 0, outputTokens: 1_000_000),
+            createdAt: offPeak
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fallbackURL.path))
+        XCTAssertEqual(
+            try harness.database.scalarInt64("SELECT COUNT(*) FROM deepseek_usage") ?? 0,
+            0
+        )
+
+        let metrics = try store.metrics()
+        XCTAssertEqual(metrics.total_cost_usd, 1.98, accuracy: 0.0000000001)
+        XCTAssertTrue(metrics.telemetry_complete)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fallbackURL.path))
+        XCTAssertEqual(try store.records(episodeID: harness.episodeID).count, 1)
+    }
+
+    func testLostWriteWithoutFallbackMarksTelemetryIncomplete() throws {
+        let harness = try makeDatabase()
+        let store = DeepSeekUsageStore(database: harness.database)
+        store.failNextInsert = true
+        do {
+            try store.record(
+                episodeID: harness.episodeID,
+                requestKind: .adDetection,
+                model: "deepseek-v4-pro",
+                usage: DeepSeekAPIUsage(inputTokens: 10, cachedInputTokens: 0, outputTokens: 1),
+                createdAt: Date()
+            )
+            XCTFail("Expected the failed insert to throw after the fallback is unavailable")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("deepseek usage insert failed"))
+        }
+        let metrics = try store.metrics()
+        XCTAssertEqual(metrics.total_cost_usd, 0)
+        XCTAssertFalse(metrics.telemetry_complete)
+    }
+
+    func testInvalidClassifierUsageStillRecordsAnUnpricedRow() async throws {
+        let store = MemoryUsageStore()
+        let classifier = DeepSeekAdClassifier(
+            apiKey: "secret",
+            transport: .json(
+                Self.completionJSON(
+                    content: #"{"labels":[]}"#,
+                    usage: ["prompt_tokens": 12]
+                )
+            ),
+            usageStore: store
+        )
+
+        _ = try await DeepSeekUsageAttribution.$episodeID.withValue(4) {
+            try await classifier.classify(window: Self.window)
+        }
+
+        XCTAssertEqual(store.records.count, 1)
+        XCTAssertNil(store.records.first?.usage)
     }
 
     private struct DatabaseHarness {

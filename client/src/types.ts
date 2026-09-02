@@ -141,6 +141,8 @@ export interface DeepSeekUsageMetrics {
   average_cost_per_podcast_minute_usd: number | null;
   ad_detection_cost_usd: number;
   show_notes_cost_usd: number;
+  /** False when billed requests were lost, unpriced, or not yet reconciled. */
+  telemetry_complete: boolean;
 }
 
 export interface AdRemovalSettings {
