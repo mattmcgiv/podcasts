@@ -192,6 +192,8 @@ pub struct UsageStore<'a> {
     db: &'a Database,
     ledger: Option<PathBuf>,
     fail_next_insert: Mutex<bool>,
+    fail_next_replace: Mutex<bool>,
+    lock: Mutex<()>,
 }
 
 impl<'a> UsageStore<'a> {
@@ -200,6 +202,8 @@ impl<'a> UsageStore<'a> {
             db,
             ledger: None,
             fail_next_insert: Mutex::new(false),
+            fail_next_replace: Mutex::new(false),
+            lock: Mutex::new(()),
         }
     }
 
@@ -208,11 +212,17 @@ impl<'a> UsageStore<'a> {
             db,
             ledger: Some(ledger),
             fail_next_insert: Mutex::new(false),
+            fail_next_replace: Mutex::new(false),
+            lock: Mutex::new(()),
         }
     }
 
     pub fn fail_next_insert(&self) {
         *self.fail_next_insert.lock().unwrap() = true;
+    }
+
+    pub fn fail_next_replace(&self) {
+        *self.fail_next_replace.lock().unwrap() = true;
     }
 
     pub fn record(
@@ -223,6 +233,7 @@ impl<'a> UsageStore<'a> {
         tokens: Option<&UsageTokens>,
         created_at: i64,
     ) -> Result<UsageRecord, String> {
+        let _guard = self.lock.lock().unwrap();
         let identity = self.identity(episode_id)?;
         let priced = tokens.and_then(|t| cost_usd_model(t, model, created_at));
         let record = UsageRecord {
@@ -272,6 +283,7 @@ impl<'a> UsageStore<'a> {
     }
 
     pub fn records(&self, episode_id: i64) -> Result<Vec<UsageRecord>, String> {
+        let _guard = self.lock.lock().unwrap();
         self.reconcile()?;
         let conn = self.db.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
@@ -284,6 +296,7 @@ impl<'a> UsageStore<'a> {
     }
 
     pub fn episode_total_cost(&self, episode_id: i64) -> Result<f64, String> {
+        let _guard = self.lock.lock().unwrap();
         self.reconcile()?;
         let key = self.identity(episode_id)?.0;
         let conn = self.db.lock().map_err(|e| e.to_string())?;
@@ -298,6 +311,7 @@ impl<'a> UsageStore<'a> {
     }
 
     pub fn metrics(&self) -> Result<DeepSeekUsageMetricsPayload, String> {
+        let _guard = self.lock.lock().unwrap();
         self.reconcile()?;
         let leftover = self
             .ledger
@@ -436,6 +450,10 @@ impl<'a> UsageStore<'a> {
             }
         }
         if remaining.is_empty() {
+            if *self.fail_next_replace.lock().unwrap() {
+                *self.fail_next_replace.lock().unwrap() = false;
+                return Ok(());
+            }
             let _ = fs::remove_file(path);
         } else {
             rewrite_ledger(path, &remaining)?;

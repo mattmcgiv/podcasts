@@ -171,24 +171,7 @@ impl Diagnostics {
 
     pub fn export_bytes(&self) -> std::io::Result<Vec<u8>> {
         let mut cursor = std::io::Cursor::new(Vec::new());
-        {
-            let mut zip = zip::ZipWriter::new(&mut cursor);
-            let options = zip::write::SimpleFileOptions::default();
-            zip.start_file("manifest.json", options)?;
-            std::io::Write::write_all(&mut zip, br#"{"version":1}"#)?;
-            zip.start_file("state-summary.json", options)?;
-            std::io::Write::write_all(&mut zip, br#"{}"#)?;
-            if let Ok(logs) = self.log_names() {
-                for name in logs {
-                    let path = self.root.join("logs").join(&name);
-                    if let Ok(bytes) = fs::read(&path) {
-                        zip.start_file(format!("iphone/logs/{name}"), options)?;
-                        std::io::Write::write_all(&mut zip, &bytes)?;
-                    }
-                }
-            }
-            zip.finish()?;
-        }
+        write_archive(&mut cursor, self)?;
         Ok(cursor.into_inner())
     }
 
@@ -205,24 +188,42 @@ impl Diagnostics {
 
     pub fn export_zip(&self, dest: &Path) -> std::io::Result<()> {
         let file = fs::File::create(dest)?;
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("manifest.json", options)?;
-        std::io::Write::write_all(&mut zip, br#"{"version":1}"#)?;
-        zip.start_file("state-summary.json", options)?;
-        std::io::Write::write_all(&mut zip, br#"{}"#)?;
-        if let Ok(logs) = self.log_names() {
-            for name in logs {
-                let path = self.root.join("logs").join(&name);
-                if let Ok(bytes) = fs::read(&path) {
-                    zip.start_file(format!("iphone/logs/{name}"), options)?;
-                    std::io::Write::write_all(&mut zip, &bytes)?;
-                }
-            }
-        }
-        zip.finish()?;
-        Ok(())
+        write_archive(file, self)
     }
+}
+
+fn write_archive<W: std::io::Write + std::io::Seek>(writer: W, diagnostics: &Diagnostics) -> std::io::Result<()> {
+    let logs = diagnostics.log_names().unwrap_or_default();
+    let snapshots = diagnostics.snapshot_ids().unwrap_or_default();
+    let log_files: Vec<String> = logs.iter().map(|name| format!("iphone/logs/{name}")).collect();
+    let snapshot_files: Vec<String> = snapshots.iter().map(|id| format!("iphone/snapshots/{id}.json")).collect();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "logFiles": log_files,
+        "snapshotFiles": snapshot_files,
+    });
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file("manifest.json", options)?;
+    std::io::Write::write_all(&mut zip, manifest.to_string().as_bytes())?;
+    zip.start_file("state-summary.json", options)?;
+    std::io::Write::write_all(&mut zip, br#"{}"#)?;
+    for name in &logs {
+        let path = diagnostics.root.join("logs").join(name);
+        if let Ok(bytes) = fs::read(&path) {
+            zip.start_file(format!("iphone/logs/{name}"), options)?;
+            std::io::Write::write_all(&mut zip, &bytes)?;
+        }
+    }
+    for id in &snapshots {
+        let path = diagnostics.root.join("snapshots").join(format!("{id}.json"));
+        if let Ok(bytes) = fs::read(&path) {
+            zip.start_file(format!("iphone/snapshots/{id}.json"), options)?;
+            std::io::Write::write_all(&mut zip, &bytes)?;
+        }
+    }
+    zip.finish()?;
+    Ok(())
 }
 
 use std::io::Write;

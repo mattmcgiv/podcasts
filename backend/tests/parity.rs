@@ -24,6 +24,7 @@ use pods_backend::usage::{
 use pods_backend::{Error, DisabledDirectory};
 use rusqlite::Connection;
 use serde_json::json;
+use std::io::Read;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -1091,9 +1092,20 @@ fn test_export_archive_contains_versioned_manifest_logs_snapshots_and_state_summ
         })
         .unwrap();
     let zip_path = dir.path().join("export.zip");
+    diagnostics.save_snapshot("job-1", "{\"job\":\"one\"}", 5).unwrap();
     diagnostics.export_zip(&zip_path).unwrap();
     let bytes = std::fs::read(&zip_path).unwrap();
     assert_eq!(&bytes[..4], b"PK\x03\x04");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let names: Vec<String> = (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_string()).collect();
+    assert!(names.contains(&"manifest.json".to_string()), "{names:?}");
+    assert!(names.contains(&"state-summary.json".to_string()), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("iphone/logs/")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("iphone/snapshots/")), "{names:?}");
+    let mut manifest = String::new();
+    zip.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
+    assert!(manifest.contains("\"version\":1") || manifest.contains("\"version\": 1"), "{manifest}");
+    assert!(manifest.contains("iphone/snapshots/"));
 }
 
 #[test]
@@ -1210,17 +1222,96 @@ fn test_deep_seek_flash_classifier_sends_non_thinking_json_request() {
 
 #[test]
 fn test_episode_cleanup_deletes_artifacts_but_preserves_podcast_corrections_until_unsubscribe() {
-    test_played_cleanup_removes_episode_ad_artifacts_but_unsubscribe_owns_podcast_corrections();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 100)", []).unwrap();
+    db.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    let job = store.enqueue(1).unwrap();
+    for stage in [JobStage::Downloading, JobStage::Downloaded, JobStage::Transcribing, JobStage::Classifying] {
+        store.transition(&job.id, stage).unwrap();
+    }
+    store.replace_transcript_segments(1, &[segment("segment-0", 0, 10.0, 20.0, "Buy this product")]).unwrap();
+    store.replace_skip_ranges(1, &[range("range-0", "segment-0", "segment-0", 10.0, 20.0, false)]).unwrap();
+    store.add_correction(1, 1, "Buy this product", "host-read", "qwen-test", "prompt-1").unwrap();
+    store.delete_episode_ad_data(1).unwrap();
+    assert!(store.job_for_episode(1).unwrap().is_none());
+    assert!(store.skip_ranges(1).unwrap().is_empty());
+    assert!(store.transcript_segments(1).unwrap().is_empty());
+    assert_eq!(store.corrections(1).unwrap().len(), 1);
+    store.delete_podcast_corrections(1).unwrap();
+    assert!(store.corrections(1).unwrap().is_empty());
 }
 
 #[test]
 fn test_mark_played_persists_before_show_notes_cancellation_and_defers_metadata_cleanup() {
-    test_mark_played_is_immediately_durable_while_cleanup_continues_in_background();
+    let (backend, fetcher) = harness();
+    let _ = seed_show(&backend, &fetcher, "https://feeds.example/show-notes-cancellation.xml", "Show Notes Cancellation", &[("Episode", "show-notes-cancel-1", "https://h.example/cancel.mp3", D1), ("Keep", "keep", "https://h.example/k.mp3", D2)]);
+    let id = backend.db.scalar_i64("SELECT id FROM episodes WHERE guid = 'show-notes-cancel-1'", []).unwrap().unwrap();
+    let store = JobStore::with_now(&backend.db, || 1_000);
+    let job = store.enqueue(id).unwrap();
+    store.replace_transcript_segments(id, &[segment("segment-opening", 0, 12.5, 30.0, "Episode content")]).unwrap();
+    for stage in [JobStage::Downloading, JobStage::Downloaded, JobStage::Transcribing, JobStage::Classifying, JobStage::Ready] {
+        store.transition(&job.id, stage).unwrap();
+    }
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_flag = release.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (observed_tx, observed_rx) = mpsc::channel();
+    thread::scope(|s| {
+        s.spawn(|| {
+            let _ = backend.show_notes.generate(id, || {
+                let _ = started_tx.send(());
+                while !backend.show_notes.observe_cancel(id) && !release_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let _ = observed_tx.send(());
+                while !release_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(pods_backend::show_notes::ShowNotesError::Cancelled)
+            });
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mark = s.spawn(|| call(&backend, "POST", &format!("/api/episodes/{id}/played"), None).status_code);
+        observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let recent: Page<EpisodeItem> = decode(&call(&backend, "GET", "/api/recent", None));
+        assert!(!recent.items.iter().any(|e| e.id == id));
+        let played_at = backend
+            .db
+            .scalar_i64(&format!("SELECT played_at FROM episode_state WHERE episode_id = {id}"), [])
+            .unwrap();
+        assert!(played_at.is_some());
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(mark.join().unwrap(), 204);
+    });
 }
 
 #[test]
 fn test_feature_cleanup_disables_show_notes_before_awaiting_runtime_shutdown() {
-    test_feature_cleanup_waits_for_pipeline_termination_before_deleting_late_writes();
+    let (backend, _) = harness();
+    put_key(&backend);
+    assert_eq!(call(&backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0}))).status_code, 202);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
+    let go_rx = Mutex::new(go_rx);
+    backend.set_ad_removal_cancel(move || {
+        let _ = entered_tx.send(());
+        let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(2));
+    });
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::scope(|s| {
+        s.spawn(|| {
+            let response = call(&backend, "POST", "/api/ad-removal/cleanup", Some(json!({"confirm": "DELETE_AD_REMOVAL_DATA"})));
+            let _ = done_tx.send(response.status_code);
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let enabled = backend.db.scalar_string("SELECT value FROM settings WHERE key = 'ad_removal_enabled'", []).unwrap();
+        assert_eq!(enabled.as_deref(), Some("false"));
+        assert!(backend.show_notes.writes_closed());
+        let _ = go_tx.send(());
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 200);
+    });
 }
 
 #[test]
@@ -1302,7 +1393,34 @@ fn test_scheduler_runs_show_notes_queue_only_after_ad_removal_work_is_idle() {
 
 #[test]
 fn test_concurrent_run_until_idle_reports_busy_while_owner_completes_successfully() {
-    test_coordinator_runs_only_one_episode_stage_at_a_time();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 100)", []).unwrap();
+    db.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    store.enqueue(1).unwrap();
+    let coordinator = Coordinator::new(&store);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(Some(release_rx));
+    thread::scope(|s| {
+        s.spawn(|| {
+            let mut execute = |_stage: JobStage, _job: &pods_backend::jobs::Job| {
+                let _ = entered_tx.send(());
+                if let Some(rx) = release_rx.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+                Ok(())
+            };
+            coordinator.run_until_idle(&mut execute).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut idle = |_stage: JobStage, _job: &pods_backend::jobs::Job| panic!("second owner must not execute");
+        let steps = coordinator.run_until_idle(&mut idle).unwrap();
+        assert_eq!(steps, 0);
+        let _ = release_tx.send(());
+    });
+    assert_eq!(store.job_for_episode(1).unwrap().unwrap().stage, JobStage::Ready);
 }
 
 #[test]
@@ -1361,7 +1479,41 @@ fn test_retries_create_separate_usage_records() {
 
 #[test]
 fn test_rejected_model_output_still_records_usage() {
-    test_successful_classifier_call_records_usage();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, notes_html, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 'hello', 100)", []).unwrap();
+    db.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    let job = store.enqueue(1).unwrap();
+    store.replace_transcript_segments(1, &[segment("segment-0", 0, 0.0, 10.0, "hello")]).unwrap();
+    for stage in [JobStage::Downloading, JobStage::Downloaded, JobStage::Transcribing, JobStage::Classifying] {
+        store.transition(&job.id, stage).unwrap();
+    }
+    let classifier = pods_backend::pipeline::ScriptedClassifier {
+        responses: Mutex::new(vec![pods_backend::pipeline::ClassifyOutcome {
+            content: None,
+            raw: json!({"usage":{"prompt_tokens":80,"completion_tokens":10,"prompt_cache_hit_tokens":0}}),
+        }]),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = ArtifactStore::open(dir.path().to_path_buf()).unwrap();
+    let err = pods_backend::pipeline::execute_stage(
+        &store,
+        &artifacts,
+        &pods_backend::pipeline::MockDownloader::default(),
+        &pods_backend::pipeline::NotesTranscriber,
+        &classifier,
+        "secret",
+        JobStage::Classifying,
+        &store.job(&job.id).unwrap().unwrap(),
+        "https://a",
+        "hello",
+        Some(10),
+        Some(&db),
+    )
+    .unwrap_err();
+    assert_eq!(err, "invalid DeepSeek response");
+    assert_eq!(UsageStore::new(&db).records(1).unwrap().len(), 1);
 }
 
 #[test]
@@ -1390,7 +1542,10 @@ fn test_missing_usage_data_does_not_create_a_record() {
 #[test]
 fn test_usage_store_failure_does_not_break_model_calls() {
     let classifier = pods_backend::pipeline::ScriptedClassifier {
-        responses: Mutex::new(vec![r#"{"labels":[{"segment_id":"s0","label":"content","reason":"ok"}]}"#.into()]),
+        responses: Mutex::new(vec![pods_backend::pipeline::ClassifyOutcome {
+            content: Some(r#"{"labels":[{"segment_id":"s0","label":"content","reason":"ok"}]}"#.into()),
+            raw: json!({"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_cache_hit_tokens":0}}),
+        }]),
     };
     let content = classifier.classify_window("prompt", "test-api-key").expect("classifier output");
     let db = Database::open_in_memory().unwrap();
@@ -1406,7 +1561,7 @@ fn test_usage_store_failure_does_not_break_model_calls() {
         1,
     );
     assert!(recorded.is_err());
-    assert!(content.contains("content"));
+    assert!(content.content.unwrap().contains("content"));
 }
 
 #[test]
@@ -1455,17 +1610,105 @@ fn test_lost_write_without_fallback_marks_telemetry_incomplete() {
 
 #[test]
 fn test_invalid_classifier_usage_still_records_an_unpriced_row() {
-    test_invalid_usage_is_stored_unpriced_and_marks_telemetry_incomplete();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, notes_html, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 'hello', 100)", []).unwrap();
+    db.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    let job = store.enqueue(1).unwrap();
+    store.replace_transcript_segments(1, &[segment("segment-0", 0, 0.0, 10.0, "hello")]).unwrap();
+    for stage in [JobStage::Downloading, JobStage::Downloaded, JobStage::Transcribing, JobStage::Classifying] {
+        store.transition(&job.id, stage).unwrap();
+    }
+    let labels = r#"{"labels":[{"segment_id":"segment-0","label":"content","reason":"ok"}]}"#;
+    let classifier = pods_backend::pipeline::ScriptedClassifier {
+        responses: Mutex::new(vec![pods_backend::pipeline::ClassifyOutcome {
+            content: Some(labels.into()),
+            raw: json!({"usage":{"prompt_tokens":12}}),
+        }]),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = ArtifactStore::open(dir.path().to_path_buf()).unwrap();
+    pods_backend::pipeline::execute_stage(
+        &store,
+        &artifacts,
+        &pods_backend::pipeline::MockDownloader::default(),
+        &pods_backend::pipeline::NotesTranscriber,
+        &classifier,
+        "secret",
+        JobStage::Classifying,
+        &store.job(&job.id).unwrap().unwrap(),
+        "https://a",
+        "hello",
+        Some(10),
+        Some(&db),
+    )
+    .unwrap();
+    let records = UsageStore::new(&db).records(1).unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].cost_usd.is_none());
+    assert!(records[0].input_tokens.is_none());
 }
 
 #[test]
 fn test_reconcile_after_replace_failure_does_not_double_count() {
-    test_legacy_ledger_line_without_record_id_reconciles_idempotently();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (feed_url, title, created_at) VALUES ('https://example.com/feed', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'episode-1', 'E', 'https://a', 100)", []).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("ledger.jsonl");
+    let store = UsageStore::with_ledger(&db, ledger.clone());
+    let off_peak = 1_787_227_200;
+    store.fail_next_insert();
+    store
+        .record(1, "ad_detection", "deepseek-v4-pro", Some(&UsageTokens { input_tokens: Some(1_000_000), cached_input_tokens: Some(0), output_tokens: Some(0) }), off_peak)
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+    store.fail_next_replace();
+    let _ = store.metrics().unwrap();
+    assert_eq!(db.scalar_i64("SELECT COUNT(*) FROM deepseek_usage", []).unwrap().unwrap(), 1);
+    assert!(ledger.exists());
+    let metrics = store.metrics().unwrap();
+    assert_eq!(db.scalar_i64("SELECT COUNT(*) FROM deepseek_usage", []).unwrap().unwrap(), 1);
+    assert!((metrics.total_cost_usd - 0.66).abs() < 0.0001);
+    assert!(!ledger.exists());
+    assert_eq!(store.records(1).unwrap().len(), 1);
 }
 
 #[test]
 fn test_append_racing_reconcile_keeps_each_billed_request_once() {
-    test_retries_create_separate_usage_records();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (feed_url, title, created_at) VALUES ('https://example.com/feed', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'episode-1', 'E', 'https://a', 100)", []).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("race.jsonl");
+    let store = UsageStore::with_ledger(&db, ledger.clone());
+    let off_peak = 1_787_227_200;
+    store.fail_next_insert();
+    store
+        .record(1, "ad_detection", "deepseek-v4-pro", Some(&UsageTokens { input_tokens: Some(1_000_000), cached_input_tokens: Some(0), output_tokens: Some(0) }), off_peak)
+        .unwrap();
+    thread::scope(|s| {
+        s.spawn(|| {
+            store.fail_next_insert();
+            let _ = store.record(
+                1,
+                "show_notes",
+                "deepseek-v4-pro",
+                Some(&UsageTokens { input_tokens: Some(0), cached_input_tokens: Some(0), output_tokens: Some(1_000_000) }),
+                off_peak,
+            );
+        });
+        let _ = store.metrics();
+    });
+    let metrics = store.metrics().unwrap();
+    let rows = store.records(1).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.iter().map(|r| r.record_id.as_str()).collect::<std::collections::HashSet<_>>().len(), 2);
+    assert!((metrics.total_cost_usd - 2.64).abs() < 0.0001);
+    assert!((metrics.ad_detection_cost_usd - 0.66).abs() < 0.0001);
+    assert!((metrics.show_notes_cost_usd - 1.98).abs() < 0.0001);
+    assert!(!ledger.exists());
 }
 
 #[test]
@@ -1514,17 +1757,110 @@ fn test_show_notes_service_does_not_send_transcript_when_feature_is_disabled() {
 
 #[test]
 fn test_show_notes_service_coalesces_concurrent_generation_for_one_episode() {
-    test_coordinator_runs_only_one_episode_stage_at_a_time();
+    let service = pods_backend::show_notes::ShowNotesService::default();
+    let calls = std::sync::atomic::AtomicI32::new(0);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let release = std::sync::atomic::AtomicBool::new(false);
+    let note = ShowNoteRecord {
+        segment_id: "segment-opening".into(),
+        start_time: 12.5,
+        title: "Opening".into(),
+        summary: "The episode begins.".into(),
+        model_id: "m".into(),
+        prompt_version: "p".into(),
+        created_at: 1,
+    };
+    thread::scope(|s| {
+        let first = s.spawn(|| {
+            service.generate(1, || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = entered_tx.send(());
+                while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(vec![note.clone()])
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = s.spawn(|| service.generate(1, || panic!("second generate must join the first")));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        let a = first.join().unwrap().unwrap();
+        let b = second.join().unwrap().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    });
 }
 
 #[test]
 fn test_show_notes_cancel_episode_waits_until_captured_generation_observes_cancellation() {
-    test_feature_disable_waits_for_pipeline_termination_before_responding();
+    let service = pods_backend::show_notes::ShowNotesService::default();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(Some(release_rx));
+    thread::scope(|s| {
+        let generation = s.spawn(|| {
+            service.generate(9, || {
+                let _ = entered_tx.send(());
+                while !service.observe_cancel(9) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if let Some(rx) = release_rx.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+                Err(pods_backend::show_notes::ShowNotesError::Cancelled)
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let cancel = s.spawn(|| service.cancel(9));
+        cancel.join().unwrap();
+        let blocked = service.generate(9, || panic!("replacement must be blocked"));
+        assert_eq!(blocked, Err(pods_backend::show_notes::ShowNotesError::SourceChanged));
+        let _ = release_tx.send(());
+        assert_eq!(generation.join().unwrap(), Err(pods_backend::show_notes::ShowNotesError::Cancelled));
+    });
 }
 
 #[test]
 fn test_show_notes_cancel_all_blocks_replacement_until_captured_generation_terminates() {
-    test_feature_cleanup_waits_for_pipeline_termination_before_deleting_late_writes();
+    let service = pods_backend::show_notes::ShowNotesService::default();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(Some(release_rx));
+    thread::scope(|s| {
+        let old = s.spawn(|| {
+            service.generate(3, || {
+                let _ = entered_tx.send(());
+                while !service.observe_cancel(3) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                if let Some(rx) = release_rx.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+                Err(pods_backend::show_notes::ShowNotesError::Cancelled)
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let cancel = s.spawn(|| service.cancel_all());
+        thread::sleep(Duration::from_millis(30));
+        let blocked = service.generate(3, || panic!("replacement must be blocked"));
+        assert_eq!(blocked, Err(pods_backend::show_notes::ShowNotesError::FeatureDisabled));
+        let _ = release_tx.send(());
+        cancel.join().unwrap();
+        assert_eq!(old.join().unwrap(), Err(pods_backend::show_notes::ShowNotesError::Cancelled));
+        let note = ShowNoteRecord {
+            segment_id: "s0".into(),
+            start_time: 0.0,
+            title: "t".into(),
+            summary: "s".into(),
+            model_id: "m".into(),
+            prompt_version: "p".into(),
+            created_at: 1,
+        };
+        let replacement = service.generate(3, || Ok(vec![note.clone()]));
+        assert_eq!(replacement.unwrap()[0].title, "t");
+    });
 }
 
 #[test]
@@ -1553,12 +1889,98 @@ fn test_episode_metadata_cleanup_retains_persisted_show_notes_for_played_archive
 
 #[test]
 fn test_show_notes_generation_cannot_write_after_episode_metadata_cleanup() {
-    test_episode_metadata_cleanup_retains_persisted_show_notes_for_played_archive();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 100)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    store
+        .replace_show_notes(1, &[ShowNoteRecord { segment_id: "s0".into(), start_time: 0.0, title: "Intro".into(), summary: "s".into(), model_id: "m".into(), prompt_version: "p".into(), created_at: 1 }])
+        .unwrap();
+    let service = pods_backend::show_notes::ShowNotesService::default();
+    store.delete_episode_ad_data(1).unwrap();
+    service.close_writes();
+    let err = service.generate(1, || panic!("must not generate after cleanup"));
+    assert_eq!(err, Err(pods_backend::show_notes::ShowNotesError::Closed));
+    assert_eq!(store.show_notes(1).unwrap().len(), 1);
 }
 
 #[test]
 fn test_classification_pipeline_resumes_largest_compatible_checkpointed_run() {
-    test_classification_pipeline_persists_evidence_and_deterministic_manifest();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (id, feed_url, title, created_at) VALUES (1, 'https://x', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, notes_html, published_at) VALUES (1, 1, 'g', 'E', 'https://a', 'notes', 100)", []).unwrap();
+    db.execute("INSERT INTO episode_state (episode_id, updated_at) VALUES (1, 1)", []).unwrap();
+    let store = JobStore::with_now(&db, || 1_000);
+    let job = store.enqueue(1).unwrap();
+    let mut segs = Vec::new();
+    for i in 0..70 {
+        segs.push(segment(&format!("segment-canonical-{i}"), i as i32, i as f64, i as f64 + 1.0, "text"));
+    }
+    store.replace_transcript_segments(1, &segs).unwrap();
+    for stage in [JobStage::Downloading, JobStage::Downloaded, JobStage::Transcribing, JobStage::Classifying] {
+        store.transition(&job.id, stage).unwrap();
+    }
+    let first_ids: Vec<String> = (0..64).map(|i| format!("segment-canonical-{i}")).collect();
+    let first_labels: Vec<(String, String, String)> = first_ids
+        .iter()
+        .map(|id| (id.clone(), "content".into(), "editorial".into()))
+        .collect();
+    store
+        .record_classification_evidence(
+            &job.id,
+            &ClassificationEvidence {
+                run_id: "checkpointed-run".into(),
+                window_index: 0,
+                segment_ids: first_ids,
+                correction_ids: vec![],
+                prompt: "first".into(),
+                raw_output: "{}".into(),
+                schema_valid: true,
+                validation_error: None,
+                labels_json: serde_json::to_string(&first_labels).unwrap(),
+                model_id: "deepseek-v4-pro".into(),
+                model_revision: "api".into(),
+                quantization: "cloud".into(),
+                prompt_version: "ad-classifier-v2".into(),
+                max_context_tokens: 8192,
+                max_output_tokens: 1024,
+                temperature: 0.0,
+                top_p: 1.0,
+                created_at: 900,
+            },
+        )
+        .unwrap();
+    let second_labels: Vec<serde_json::Value> = (0..10)
+        .map(|i| json!({"segment_id": format!("s{i}"), "label": if i == 0 { "ad" } else { "content" }, "reason": "ok"}))
+        .collect();
+    let response = json!({"labels": second_labels}).to_string();
+    let classifier = pods_backend::pipeline::ScriptedClassifier {
+        responses: Mutex::new(vec![pods_backend::pipeline::ClassifyOutcome {
+            content: Some(response),
+            raw: json!({"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_cache_hit_tokens":0}}),
+        }]),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = ArtifactStore::open(dir.path().to_path_buf()).unwrap();
+    pods_backend::pipeline::execute_stage(
+        &store,
+        &artifacts,
+        &pods_backend::pipeline::MockDownloader::default(),
+        &pods_backend::pipeline::NotesTranscriber,
+        &classifier,
+        "secret",
+        JobStage::Classifying,
+        &store.job(&job.id).unwrap().unwrap(),
+        "https://a",
+        "notes",
+        Some(70),
+        Some(&db),
+    )
+    .unwrap();
+    let job = store.job(&job.id).unwrap().unwrap();
+    assert_eq!(job.classification_run_id.as_deref(), Some("checkpointed-run"));
+    assert!(classifier.responses.lock().unwrap().is_empty());
+    assert!(!store.skip_ranges(1).unwrap().is_empty());
 }
 
 #[test]

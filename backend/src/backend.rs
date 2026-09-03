@@ -6,6 +6,7 @@ use crate::http::{HttpRequest, HttpResponse};
 use crate::jobs::{JobStage, JobStore};
 use crate::models::*;
 use crate::pipeline::{self, AudioDownloader, CloudClassifier, NotesTranscriber, Transcriber, UreqDownloader};
+use crate::show_notes::ShowNotesService;
 use crate::storage::ArtifactStore;
 use crate::usage::UsageStore;
 use rusqlite::{params, OptionalExtension};
@@ -107,6 +108,7 @@ pub struct Backend {
     credentials: CredentialStore,
     pub diagnostics: Diagnostics,
     pub artifacts: ArtifactStore,
+    pub show_notes: ShowNotesService,
     downloader: Mutex<Arc<dyn AudioDownloader>>,
     transcriber: Mutex<Arc<dyn Transcriber>>,
     classifier: Mutex<Arc<dyn CloudClassifier>>,
@@ -147,6 +149,7 @@ impl Backend {
             credentials: CredentialStore::new(stored_key),
             diagnostics,
             artifacts,
+            show_notes: ShowNotesService::default(),
             downloader: Mutex::new(Arc::new(UreqDownloader)),
             transcriber: Mutex::new(Arc::new(NotesTranscriber)),
             classifier: Mutex::new(Arc::new(pipeline::DeepSeekClassifier)),
@@ -427,9 +430,13 @@ impl Backend {
             if body.get("confirm").and_then(Value::as_str) != Some("DELETE_AD_REMOVAL_DATA") {
                 return Err(Error::Invalid("destructive cleanup confirmation does not match".into()));
             }
-            self.wait_for_pipeline();
             let conn = self.db.lock()?;
             db::set_setting(&conn, "ad_removal_enabled", "false")?;
+            drop(conn);
+            self.show_notes.close_writes();
+            self.show_notes.cancel_all();
+            self.wait_for_pipeline();
+            let conn = self.db.lock()?;
             let _ = conn.execute("DELETE FROM ad_removal_jobs", []);
             let _ = conn.execute("DELETE FROM ad_skip_ranges", []);
             let _ = conn.execute("DELETE FROM ad_transcript_segments", []);
@@ -917,6 +924,7 @@ impl Backend {
             "INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at",
             params![id, now, now],
         )?;
+        self.show_notes.cancel(id);
         let store = JobStore::new(&self.db);
         if let Some(job) = store.job_for_episode(id).ok().flatten() {
             let _ = store.cancel(&job.id);
@@ -1337,6 +1345,7 @@ impl Backend {
                 &audio_url,
                 &notes,
                 duration,
+                Some(&self.db),
             )
         })?;
         Ok(ran.is_some())

@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod range;
 pub mod refresh;
+pub mod show_notes;
 pub mod server;
 pub mod skip;
 pub mod storage;

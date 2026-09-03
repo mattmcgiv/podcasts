@@ -90,14 +90,20 @@ impl Transcriber for NotesTranscriber {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ClassifyOutcome {
+    pub content: Option<String>,
+    pub raw: serde_json::Value,
+}
+
 pub trait CloudClassifier: Send + Sync {
-    fn classify_window(&self, prompt: &str, api_key: &str) -> Result<String, String>;
+    fn classify_window(&self, prompt: &str, api_key: &str) -> Result<ClassifyOutcome, String>;
 }
 
 pub struct DeepSeekClassifier;
 
 impl CloudClassifier for DeepSeekClassifier {
-    fn classify_window(&self, prompt: &str, api_key: &str) -> Result<String, String> {
+    fn classify_window(&self, prompt: &str, api_key: &str) -> Result<ClassifyOutcome, String> {
         if api_key.trim().is_empty() {
             return Err("pause:model_required".into());
         }
@@ -117,20 +123,21 @@ impl CloudClassifier for DeepSeekClassifier {
         if !(200..300).contains(&status) {
             return Err(format!("http {status}"));
         }
-        let root: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        root.pointer("/choices/0/message/content")
+        let raw: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let content = raw
+            .pointer("/choices/0/message/content")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "invalid DeepSeek response".into())
+            .map(str::to_string);
+        Ok(ClassifyOutcome { content, raw })
     }
 }
 
 pub struct ScriptedClassifier {
-    pub responses: Mutex<Vec<String>>,
+    pub responses: Mutex<Vec<ClassifyOutcome>>,
 }
 
 impl CloudClassifier for ScriptedClassifier {
-    fn classify_window(&self, _prompt: &str, api_key: &str) -> Result<String, String> {
+    fn classify_window(&self, _prompt: &str, api_key: &str) -> Result<ClassifyOutcome, String> {
         if api_key.trim().is_empty() {
             return Err("pause:model_required".into());
         }
@@ -154,6 +161,7 @@ pub fn execute_stage(
     audio_url: &str,
     notes_html: &str,
     duration_secs: Option<i64>,
+    usage_db: Option<&crate::db::Database>,
 ) -> Result<(), String> {
     match stage {
         JobStage::Downloading => {
@@ -192,23 +200,68 @@ pub fn execute_stage(
             }
             let ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
             let windows = production_windows(&ids);
+            let existing = store.classification_evidence(job.episode_id).unwrap_or_default();
+            let (run_id, resume_from) = largest_compatible_checkpoint(&existing, windows.len());
             let mut labels = Vec::new();
-            let run_id = uuid::Uuid::new_v4().to_string().to_lowercase();
-            for (index, window) in windows.iter().enumerate() {
+            for evidence in existing.iter().filter(|e| e.run_id == run_id && (e.window_index as usize) < resume_from && e.schema_valid) {
+                if let Ok(saved) = serde_json::from_str::<Vec<(String, String, String)>>(&evidence.labels_json) {
+                    labels.extend(saved);
+                }
+            }
+            for (index, window) in windows.iter().enumerate().skip(resume_from) {
                 let short = short_request_ids(window.len());
                 let prompt = classification_prompt(window, &[]);
-                let raw = classifier.classify_window(&prompt, api_key)?;
+                let outcome = classifier.classify_window(&prompt, api_key)?;
+                if let Some(db) = usage_db {
+                    let _ = crate::usage::UsageStore::new(db).record_parsed(
+                        job.episode_id,
+                        "ad_detection",
+                        "deepseek-v4-pro",
+                        &outcome.raw,
+                        crate::db::now_unix(),
+                    );
+                }
+                let Some(raw) = outcome.content else {
+                    return Err("invalid DeepSeek response".into());
+                };
                 let parsed = parse_structured_labels(&raw, &short).or_else(|_| parse_structured_labels(&raw, window));
                 match parsed {
                     Ok(window_labels) => {
+                        let mut saved = Vec::new();
                         for label in window_labels {
                             let canonical = if let Ok(idx) = label.segment_id.trim_start_matches('s').parse::<usize>() {
                                 window.get(idx).cloned().unwrap_or(label.segment_id)
                             } else {
                                 label.segment_id
                             };
+                            saved.push((canonical.clone(), label.label.clone(), label.reason.clone()));
                             labels.push((canonical, label.label, label.reason));
                         }
+                        store
+                            .record_classification_evidence(
+                                &job.id,
+                                &crate::jobs::ClassificationEvidence {
+                                    run_id: run_id.clone(),
+                                    window_index: index as i64,
+                                    segment_ids: window.clone(),
+                                    correction_ids: vec![],
+                                    prompt: prompt.clone(),
+                                    raw_output: raw,
+                                    schema_valid: true,
+                                    validation_error: None,
+                                    labels_json: serde_json::to_string(&saved).unwrap_or_else(|_| "[]".into()),
+                                    model_id: "deepseek-v4-pro".into(),
+                                    model_revision: "api".into(),
+                                    quantization: "cloud".into(),
+                                    prompt_version: "ad-classifier-v2".into(),
+                                    max_context_tokens: 1_000_000,
+                                    max_output_tokens: 8192,
+                                    temperature: 0.0,
+                                    top_p: 1.0,
+                                    created_at: crate::db::now_unix(),
+                                },
+                            )
+                            .map_err(|e| e.to_string())?;
                     }
                     Err(err) => {
                         store
@@ -275,6 +328,36 @@ pub fn execute_stage(
         }
         _ => Ok(()),
     }
+}
+
+pub fn largest_compatible_checkpoint(
+    existing: &[crate::jobs::ClassificationEvidence],
+    window_count: usize,
+) -> (String, usize) {
+    let mut by_run: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    for evidence in existing {
+        if evidence.schema_valid {
+            by_run.entry(evidence.run_id.clone()).or_default().push(evidence.window_index);
+        }
+    }
+    let mut best_run = uuid::Uuid::new_v4().to_string().to_lowercase();
+    let mut best_len = 0usize;
+    for (run_id, mut indexes) in by_run {
+        indexes.sort_unstable();
+        let mut prefix = 0usize;
+        for expected in 0..window_count {
+            if indexes.contains(&(expected as i64)) {
+                prefix += 1;
+            } else {
+                break;
+            }
+        }
+        if prefix > best_len {
+            best_len = prefix;
+            best_run = run_id;
+        }
+    }
+    (best_run, best_len)
 }
 
 fn strip_html(html: &str) -> String {
