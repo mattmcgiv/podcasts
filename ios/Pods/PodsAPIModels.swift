@@ -247,7 +247,7 @@ struct OPMLImportResult: Codable, Equatable {
     let failed: Int
 }
 
-enum PodsBackendError: Error, CustomStringConvertible {
+enum PodsHTTPError: Error, CustomStringConvertible {
     case invalid(String)
     case forbidden(String)
     case notFound

@@ -1,6 +1,6 @@
 # Pods
 
-A single-user, mobile-first podcast app for iPhone. The app bundles a React UI and runs a native Swift backend in-process on `127.0.0.1:18180`.
+A single-user, mobile-first podcast app for iPhone. The app bundles a React UI and runs a Rust library/API backend on `127.0.0.1:18180`.
 
 No discovery feed. No recommendations. Your subscriptions, unplayed episodes first (oldest by default), with mark-played archive.
 

@@ -49,7 +49,7 @@ final class PodsLocalServer {
     private static let identityValue = "1"
     private static let restartStartupTimeout: DispatchTimeInterval = .seconds(3)
     private static let maximumRequestBytes = 5_000_000
-    private let backend: PodsBackend
+    private let backend: PodsRequestHandling
     private let staticAssets: PodsStaticAssets?
     private let port: UInt16
     private let queue = DispatchQueue(label: "dev.mcgiv.pods.local-server")
@@ -57,7 +57,7 @@ final class PodsLocalServer {
     private var listener: NWListener?
     private var pendingStartupCompletion: ((Result<Void, Error>) -> Void)?
 
-    init(backend: PodsBackend, staticAssets: PodsStaticAssets? = .bundled(), port: UInt16 = 18180) {
+    init(backend: PodsRequestHandling, staticAssets: PodsStaticAssets? = .bundled(), port: UInt16 = 18180) {
         self.backend = backend
         self.staticAssets = staticAssets
         self.port = port
@@ -250,10 +250,10 @@ final class PodsLocalServer {
                 }
             case .invalid(let message):
                 PodsLog("Pods local server rejected invalid request: \(message)")
-                self.send(.error(.invalid(message)), on: connection)
+                self.send(.error(message), on: connection)
             case .incomplete where nextBuffer.count > Self.maximumRequestBytes:
                 PodsLog("Pods local server rejected oversized request")
-                self.send(.error(.invalid("request too large")), on: connection)
+                self.send(.error("request too large"), on: connection)
             case .incomplete:
                 self.readRequest(from: connection, buffer: nextBuffer)
             }

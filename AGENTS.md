@@ -21,9 +21,9 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 ## Default app/runtime
 
 - The iPhone app is the default app now.
-- The active iPhone runtime uses the native Swift backend in `ios/Pods/PodsBackend.swift`, served by `ios/Pods/PodsLocalServer.swift` on `127.0.0.1:18180`.
+- The library/API backend is the Rust crate in `backend/` (`PodsBackend.handle` equivalent: `Backend::handle`). The iPhone shell serves it on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `PodsRustBackend`.
 - The bundled React app points at that backend through `window.PODS_API_BASE` in `ios/Pods/PodsWebView.swift`.
-- For user-facing app behavior, implement backend changes in Swift.
+- For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.
 - There is no active Hetzner remote dev host for this project.
 
 ## Product rules

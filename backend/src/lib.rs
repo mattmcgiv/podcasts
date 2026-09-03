@@ -1,0 +1,33 @@
+pub mod backend;
+pub mod bootstrap;
+pub mod classify;
+pub mod coordinator;
+pub mod db;
+pub mod diagnostics;
+pub mod error;
+pub mod feeds;
+pub mod http;
+pub mod jobs;
+pub mod models;
+pub mod opml;
+pub mod progress;
+pub mod range;
+pub mod refresh;
+pub mod server;
+pub mod skip;
+pub mod storage;
+pub mod transcribe;
+pub mod usage;
+
+pub use backend::{Backend, DirectorySearcher, DisabledDirectory};
+pub use db::Database;
+pub use error::Error;
+pub use feeds::{FeedFetcher, MockFeedFetcher};
+pub use http::{HttpRequest, HttpResponse};
+
+#[cfg(test)]
+mod ffi_unused {
+    // FFI is compiled in the library via optional module below.
+}
+
+pub mod ffi;
