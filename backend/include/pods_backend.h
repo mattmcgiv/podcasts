@@ -10,6 +10,7 @@ typedef struct PodsHandle PodsHandle;
 
 int pods_backend_prepare(const char *live_path, const char *seed_path);
 PodsHandle *pods_backend_open(const char *db_path);
+int pods_backend_configure(PodsHandle *handle, const char *json);
 void pods_backend_close(PodsHandle *handle);
 uint8_t *pods_backend_handle(
     PodsHandle *handle,

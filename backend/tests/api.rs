@@ -32,6 +32,7 @@ fn harness() -> Harness {
     let db = Database::open_in_memory().expect("db");
     let fetcher = Arc::new(MockFeedFetcher::default());
     let backend = Backend::new(db, fetcher.clone(), Arc::new(pods_backend::DisabledDirectory));
+    let _ = call(&backend, "PUT", "/api/ad-removal/deepseek-key", Some(json!({"api_key": "test-api-key"})));
     Harness { backend, fetcher }
 }
 
@@ -171,12 +172,37 @@ fn test_first_follow_check_excludes_appearances_older_than_thirty_days() {
 #[test]
 fn test_show_notes_endpoint_rejects_cross_origin_browser_requests_before_generation() {
     let h = harness();
-    let req = HttpRequest::new("POST", "/api/episodes/1/show-notes")
-        .with_json(&json!({}))
-        .with_header("origin", "https://evil.example")
-        .with_header("content-type", "application/json");
-    let response = h.backend.handle(req);
-    assert_eq!(response.status_code, 403);
+    let target = "/api/episodes/1/show-notes";
+    let preflight = h.backend.handle(
+        HttpRequest::new("OPTIONS", target)
+            .with_header("origin", "https://attacker.example")
+            .with_header("content-type", "application/json"),
+    );
+    assert_eq!(preflight.status_code, 403);
+    let post = h.backend.handle(
+        HttpRequest::new("POST", target)
+            .with_json(&json!({}))
+            .with_header("origin", "https://attacker.example")
+            .with_header("content-type", "application/json"),
+    );
+    assert_eq!(post.status_code, 403);
+    let missing_origin_preflight = h.backend.handle(
+        HttpRequest::new("OPTIONS", target).with_header("content-type", "application/json"),
+    );
+    assert_eq!(missing_origin_preflight.status_code, 403);
+    let missing_origin_post = h.backend.handle(
+        HttpRequest::new("POST", target)
+            .with_json(&json!({}))
+            .with_header("content-type", "application/json"),
+    );
+    assert_eq!(missing_origin_post.status_code, 403);
+    let trusted = h.backend.handle(
+        HttpRequest::new("POST", target)
+            .with_json(&json!({}))
+            .with_header("origin", "http://127.0.0.1:18180")
+            .with_header("content-type", "application/json"),
+    );
+    assert_eq!(trusted.status_code, 404);
 }
 
 #[test]
@@ -411,6 +437,15 @@ fn test_ad_removal_enable_consent_cutoff_and_new_episode_enrollment() {
     let settings: AdRemovalSettingsPayload = decode(&enable);
     assert!(settings.enabled);
     assert!(settings.enrollment_cutoff.is_some());
+}
+
+#[test]
+fn test_backend_starts_without_a_deepseek_key() {
+    let db = Database::open_in_memory().unwrap();
+    let backend = Backend::new(db, Arc::new(MockFeedFetcher::default()), Arc::new(pods_backend::DisabledDirectory));
+    let settings: AdRemovalSettingsPayload = decode(&call(&backend, "GET", "/api/ad-removal/settings", None));
+    assert!(!settings.cloud_classifier_configured);
+    assert_eq!(call(&backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0}))).status_code, 422);
 }
 
 #[test]

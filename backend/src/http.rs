@@ -113,12 +113,16 @@ impl HttpResponse {
     }
 
     pub fn text(value: impl Into<String>, status_code: u16, content_type: &str) -> Self {
+        Self::binary(value.into().into_bytes(), status_code, content_type)
+    }
+
+    pub fn binary(body: Vec<u8>, status_code: u16, content_type: &str) -> Self {
         let mut headers = HashMap::new();
         headers.insert("content-type".into(), content_type.into());
         Self {
             status_code,
             headers,
-            body: value.into().into_bytes(),
+            body,
         }
     }
 

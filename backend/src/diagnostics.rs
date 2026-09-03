@@ -147,6 +147,51 @@ impl Diagnostics {
             .collect())
     }
 
+    pub fn read_persisted_events(&self) -> std::io::Result<Vec<DiagnosticEvent>> {
+        let mut events = Vec::new();
+        let dir = self.root.join("logs");
+        if !dir.exists() {
+            return Ok(events);
+        }
+        let mut files: Vec<_> = fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .collect();
+        files.sort_by_key(|e| e.file_name());
+        for file in files {
+            let text = fs::read_to_string(file.path())?;
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                if let Ok(event) = serde_json::from_str::<DiagnosticEvent>(line) {
+                    events.push(event);
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    pub fn export_bytes(&self) -> std::io::Result<Vec<u8>> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("manifest.json", options)?;
+            std::io::Write::write_all(&mut zip, br#"{"version":1}"#)?;
+            zip.start_file("state-summary.json", options)?;
+            std::io::Write::write_all(&mut zip, br#"{}"#)?;
+            if let Ok(logs) = self.log_names() {
+                for name in logs {
+                    let path = self.root.join("logs").join(&name);
+                    if let Ok(bytes) = fs::read(&path) {
+                        zip.start_file(format!("iphone/logs/{name}"), options)?;
+                        std::io::Write::write_all(&mut zip, &bytes)?;
+                    }
+                }
+            }
+            zip.finish()?;
+        }
+        Ok(cursor.into_inner())
+    }
+
     pub fn clear(&self) -> std::io::Result<()> {
         for dir in ["logs", "snapshots"] {
             let path = self.root.join(dir);

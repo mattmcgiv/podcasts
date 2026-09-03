@@ -6,6 +6,9 @@ private func pods_backend_prepare(_ live: UnsafePointer<CChar>, _ seed: UnsafePo
 @_silgen_name("pods_backend_open")
 private func pods_backend_open(_ path: UnsafePointer<CChar>) -> OpaquePointer?
 
+@_silgen_name("pods_backend_configure")
+private func pods_backend_configure(_ handle: OpaquePointer?, _ json: UnsafePointer<CChar>) -> Int32
+
 @_silgen_name("pods_backend_close")
 private func pods_backend_close(_ handle: OpaquePointer?)
 
@@ -52,6 +55,34 @@ final class RustBackend: PodsRequestHandling, PlaybackProgressRecording {
             throw RustBackendError.openFailed
         }
         self.handle = handle
+        if let config = Self.podcastIndexConfigJSON() {
+            _ = config.withCString { pods_backend_configure(handle, $0) }
+        }
+    }
+
+    private static func podcastIndexConfigJSON() -> String? {
+        guard let url = Bundle.main.url(forResource: "PodcastIndexCredentials", withExtension: "plist"),
+              let data = try? Data(contentsOf: url),
+              let values = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+            return nil
+        }
+        let key = (values["PODCASTINDEX_KEY"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let secret = (values["PODCASTINDEX_SECRET"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = (values["PODCASTINDEX_BASE_URL"] as? String ?? "https://api.podcastindex.org/api/1.0")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !secret.isEmpty else {
+            return nil
+        }
+        let payload: [String: String] = [
+            "podcastindex_key": key,
+            "podcastindex_secret": secret,
+            "podcastindex_base_url": base
+        ]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: encoded, encoding: .utf8) else {
+            return nil
+        }
+        return json
     }
 
     deinit {

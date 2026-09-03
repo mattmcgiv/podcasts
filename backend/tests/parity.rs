@@ -1,4 +1,5 @@
 use pods_backend::backend::{Backend, CredentialStore};
+use pods_backend::pipeline::CloudClassifier;
 use pods_backend::classify::{
     classification_prompt, parse_structured_labels, production_windows, select_corrections, short_request_ids,
     total_windows, CorrectionExample, PRODUCTION_BATCH, SHOW_NOTES_CHAPTER_BASELINE,
@@ -47,6 +48,10 @@ fn harness() -> (Backend, Arc<MockFeedFetcher>) {
     let fetcher = Arc::new(MockFeedFetcher::default());
     let backend = Backend::new(db, fetcher.clone(), Arc::new(DisabledDirectory));
     (backend, fetcher)
+}
+
+fn put_key(backend: &Backend) {
+    let _ = call(backend, "PUT", "/api/ad-removal/deepseek-key", Some(json!({"api_key": "test-api-key"})));
 }
 
 fn call(backend: &Backend, method: &str, target: &str, body: Option<serde_json::Value>) -> pods_backend::HttpResponse {
@@ -207,11 +212,26 @@ fn test_ad_removal_settings_can_reset_corrections_export_diagnostics_and_delete_
     store.add_correction(show.id, episode_id, "Editorial segment", "false positive", "test", "test").unwrap();
     let settings: AdRemovalSettingsPayload = decode(&call(&backend, "GET", "/api/ad-removal/settings", None));
     assert_eq!(settings.corrections[0].count, 1);
+    backend
+        .diagnostics
+        .record(pods_backend::diagnostics::DiagnosticEvent {
+            event_name: "export_probe".into(),
+            severity: "notice".into(),
+            message: "probe".into(),
+            job_id: None,
+            episode_id: None,
+            playback_session_id: None,
+        })
+        .unwrap();
     let reset = call(&backend, "POST", &format!("/api/ad-removal/corrections/{}/reset", show.id), None);
     assert_eq!(reset.status_code, 200);
     let exported = call(&backend, "GET", "/api/ad-removal/diagnostics/export", None);
     assert_eq!(exported.status_code, 200);
-    assert_eq!(call(&backend, "POST", "/api/ad-removal/diagnostics/clear", None).status_code, 204);
+    assert_eq!(exported.headers.get("content-type").map(String::as_str), Some("application/zip"));
+    assert_eq!(&exported.body[..4], &[0x50, 0x4b, 0x03, 0x04]);
+    let cleared = call(&backend, "POST", "/api/ad-removal/diagnostics/clear", None);
+    assert_eq!(cleared.status_code, 204);
+    assert!(backend.diagnostics.read_persisted_events().unwrap().is_empty());
     let cleanup = call(&backend, "POST", "/api/ad-removal/cleanup", Some(json!({"confirm": "DELETE_AD_REMOVAL_DATA"})));
     assert_eq!(cleanup.status_code, 200);
     let jobs = backend.db.scalar_i64("SELECT COUNT(*) FROM ad_removal_jobs", []).unwrap().unwrap();
@@ -334,6 +354,7 @@ fn test_feature_disable_waits_for_pipeline_termination_before_responding() {
     });
     let handle = {
         // enable first so disable has work
+        put_key(&backend);
         let _ = call(&backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0})));
         backend
     };
@@ -1126,6 +1147,7 @@ fn test_ad_removal_lifecycle_handlers_wake_and_stop_runtime_work() {
     let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = woke.clone();
     backend.set_ad_removal_wake(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+    put_key(&backend);
     assert_eq!(call(&backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0}))).status_code, 202);
     assert!(woke.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(call(&backend, "POST", "/api/ad-removal/disable", None).status_code, 200);
@@ -1285,7 +1307,32 @@ fn test_concurrent_run_until_idle_reports_busy_while_owner_completes_successfull
 
 #[test]
 fn test_pipeline_executor_downloads_and_validates_exact_episode_audio_before_advancing() {
-    test_download_finalizer_persists_artifact_and_advances_durable_stage();
+    let (backend, fetcher) = harness();
+    put_key(&backend);
+    let _ = seed_show(
+        &backend,
+        &fetcher,
+        "https://feeds.example/dl.xml",
+        "DL",
+        &[("Ep", "dl-1", "https://h.example/dl.mp3", D1), ("Keep", "keep", "https://h.example/k.mp3", D2)],
+    );
+    let id = backend.db.scalar_i64("SELECT id FROM episodes WHERE guid = 'dl-1'", []).unwrap().unwrap();
+    let downloader = std::sync::Arc::new(pods_backend::pipeline::MockDownloader::default());
+    downloader.set(
+        "https://h.example/dl.mp3",
+        pods_backend::storage::DownloadResult {
+            bytes: b"exact downloaded audio".to_vec(),
+            content_type: "audio/mpeg".into(),
+            status: 200,
+        },
+    );
+    backend.set_downloader(downloader);
+    assert_eq!(call(&backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0}))).status_code, 202);
+    assert_eq!(call(&backend, "POST", &format!("/api/episodes/{id}/ad-removal/prepare"), None).status_code, 202);
+    assert!(backend.run_pipeline_step().unwrap());
+    let job = JobStore::new(&backend.db).job_for_episode(id).unwrap().unwrap();
+    assert_eq!(job.stage, JobStage::Downloaded);
+    assert_eq!(job.audio_artifact.unwrap().byte_count, 22);
 }
 
 #[test]
@@ -1342,19 +1389,45 @@ fn test_missing_usage_data_does_not_create_a_record() {
 
 #[test]
 fn test_usage_store_failure_does_not_break_model_calls() {
+    let classifier = pods_backend::pipeline::ScriptedClassifier {
+        responses: Mutex::new(vec![r#"{"labels":[{"segment_id":"s0","label":"content","reason":"ok"}]}"#.into()]),
+    };
+    let content = classifier.classify_window("prompt", "test-api-key").expect("classifier output");
     let db = Database::open_in_memory().unwrap();
     db.execute("INSERT INTO podcasts (feed_url, title, created_at) VALUES ('https://example.com/feed', 'S', 1)", []).unwrap();
     db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'episode-1', 'E', 'https://a', 100)", []).unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let store = UsageStore::with_ledger(&db, dir.path().join("missing-parent-really/ledger.jsonl"));
+    let store = UsageStore::new(&db);
     store.fail_next_insert();
-    let result = store.record(1, "ad_detection", "deepseek-v4-pro", Some(&UsageTokens { input_tokens: Some(1), cached_input_tokens: Some(0), output_tokens: Some(1) }), 1);
-    assert!(result.is_ok() || result.is_err());
+    let recorded = store.record(
+        1,
+        "ad_detection",
+        "deepseek-v4-pro",
+        Some(&UsageTokens { input_tokens: Some(1), cached_input_tokens: Some(0), output_tokens: Some(1) }),
+        1,
+    );
+    assert!(recorded.is_err());
+    assert!(content.contains("content"));
 }
 
 #[test]
 fn test_successful_show_notes_call_records_usage() {
-    test_rejected_show_notes_still_record_usage();
+    let db = Database::open_in_memory().unwrap();
+    db.execute("INSERT INTO podcasts (feed_url, title, created_at) VALUES ('https://example.com/feed', 'S', 1)", []).unwrap();
+    db.execute("INSERT INTO episodes (id, podcast_id, guid, title, audio_url, published_at) VALUES (1, 1, 'episode-1', 'E', 'https://a', 100)", []).unwrap();
+    let store = UsageStore::new(&db);
+    let recorded = store
+        .record_parsed(
+            1,
+            "show_notes",
+            "deepseek-v4-pro",
+            &json!({"usage":{"prompt_tokens":80,"completion_tokens":10,"prompt_cache_hit_tokens":0}}),
+            1_787_227_200,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.request_kind, "show_notes");
+    assert!(recorded.cost_usd.unwrap() > 0.0);
+    assert_eq!(store.records(1).unwrap().len(), 1);
 }
 
 #[test]
@@ -1522,4 +1595,12 @@ fn test_malformed_classification_persists_invalid_evidence_but_never_manifest() 
     store.record_classification_evidence(&job.id, &evidence).unwrap();
     assert_eq!(store.classification_evidence(1).unwrap()[0].schema_valid, false);
     assert!(store.skip_ranges(1).unwrap().is_empty());
+}
+
+#[test]
+fn test_podcast_index_auth_header_is_sha1_of_key_secret_and_timestamp() {
+    assert_eq!(
+        pods_backend::directory::PodcastIndexClient::auth_header("k", "s", 100),
+        "8ab71769858acd0275361cbcc8d5052c0de6cc85"
+    );
 }

@@ -1,13 +1,18 @@
 use crate::db::{self, Database};
+use crate::diagnostics::Diagnostics;
 use crate::error::Error;
 use crate::feeds::{self, FeedFetchResponse, FeedFetcher, FeedValidators, ParsedFeed};
 use crate::http::{HttpRequest, HttpResponse};
 use crate::jobs::{JobStage, JobStore};
 use crate::models::*;
+use crate::pipeline::{self, AudioDownloader, CloudClassifier, NotesTranscriber, Transcriber, UreqDownloader};
+use crate::storage::ArtifactStore;
 use crate::usage::UsageStore;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 pub trait DirectorySearcher: Send + Sync {
     fn is_configured(&self) -> bool;
@@ -85,7 +90,10 @@ impl CredentialStore {
         }
     }
     pub fn has_key(&self) -> bool {
-        self.inner.lock().unwrap().as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+        self.read().map(|s| !s.is_empty()).unwrap_or(false)
+    }
+    pub fn read(&self) -> Option<String> {
+        self.inner.lock().unwrap().clone().filter(|s| !s.is_empty())
     }
     pub fn save(&self, key: String) {
         *self.inner.lock().unwrap() = Some(key);
@@ -95,27 +103,60 @@ impl CredentialStore {
 pub struct Backend {
     pub db: Database,
     fetcher: Arc<dyn FeedFetcher>,
-    directory: Arc<dyn DirectorySearcher>,
+    directory: Mutex<Arc<dyn DirectorySearcher>>,
     credentials: CredentialStore,
+    pub diagnostics: Diagnostics,
+    pub artifacts: ArtifactStore,
+    downloader: Mutex<Arc<dyn AudioDownloader>>,
+    transcriber: Mutex<Arc<dyn Transcriber>>,
+    classifier: Mutex<Arc<dyn CloudClassifier>>,
     ad_removal_wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     ad_removal_cancel: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     car_routes: Mutex<Vec<BluetoothRoute>>,
     car_keys: Mutex<Vec<String>>,
     refreshing: Mutex<bool>,
+    runtime_stop: Arc<AtomicBool>,
+    runtime: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Backend {
     pub fn new(db: Database, fetcher: Arc<dyn FeedFetcher>, directory: Arc<dyn DirectorySearcher>) -> Self {
+        Self::with_data_root(db, fetcher, directory, None)
+    }
+
+    pub fn with_data_root(
+        db: Database,
+        fetcher: Arc<dyn FeedFetcher>,
+        directory: Arc<dyn DirectorySearcher>,
+        data_root: Option<std::path::PathBuf>,
+    ) -> Self {
+        let root = data_root.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("pods-ad-{}", uuid::Uuid::new_v4()))
+        });
+        let diagnostics = Diagnostics::open(root.join("Diagnostics")).expect("diagnostics");
+        let artifacts = ArtifactStore::open(root.join("AdRemoval")).expect("artifacts");
+        let stored_key = db
+            .scalar_string("SELECT value FROM settings WHERE key = 'deepseek_api_key'", [])
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty());
         let backend = Self {
             db,
             fetcher,
-            directory,
-            credentials: CredentialStore::new(Some("test-api-key".into())),
+            directory: Mutex::new(directory),
+            credentials: CredentialStore::new(stored_key),
+            diagnostics,
+            artifacts,
+            downloader: Mutex::new(Arc::new(UreqDownloader)),
+            transcriber: Mutex::new(Arc::new(NotesTranscriber)),
+            classifier: Mutex::new(Arc::new(pipeline::DeepSeekClassifier)),
             ad_removal_wake: Mutex::new(None),
             ad_removal_cancel: Mutex::new(None),
             car_routes: Mutex::new(Vec::new()),
             car_keys: Mutex::new(Vec::new()),
             refreshing: Mutex::new(false),
+            runtime_stop: Arc::new(AtomicBool::new(false)),
+            runtime: Mutex::new(None),
         };
         let _ = backend.recover_interrupted_state();
         backend
@@ -123,6 +164,26 @@ impl Backend {
 
     pub fn set_credentials(&mut self, store: CredentialStore) {
         self.credentials = store;
+    }
+
+    pub fn set_directory(&self, directory: Arc<dyn DirectorySearcher>) {
+        *self.directory.lock().unwrap() = directory;
+    }
+
+    pub fn set_downloader(&self, downloader: Arc<dyn AudioDownloader>) {
+        *self.downloader.lock().unwrap() = downloader;
+    }
+
+    pub fn set_transcriber(&self, transcriber: Arc<dyn Transcriber>) {
+        *self.transcriber.lock().unwrap() = transcriber;
+    }
+
+    pub fn set_classifier(&self, classifier: Arc<dyn CloudClassifier>) {
+        *self.classifier.lock().unwrap() = classifier;
+    }
+
+    fn directory(&self) -> Arc<dyn DirectorySearcher> {
+        self.directory.lock().unwrap().clone()
     }
 
     pub fn set_ad_removal_wake<F: Fn() + Send + Sync + 'static>(&self, f: F) {
@@ -270,9 +331,15 @@ impl Backend {
             let id: i64 = parts[2].parse().map_err(|_| Error::NotFound)?;
             return Ok(HttpResponse::json(self.episode_detail(id)?, 200));
         }
-        if parts.len() == 4 && parts[0] == "api" && parts[1] == "episodes" && parts[3] == "show-notes" && method == "POST" {
+        if parts.len() == 4 && parts[0] == "api" && parts[1] == "episodes" && parts[3] == "show-notes" {
             if request.header("origin") != Some("http://127.0.0.1:18180") {
                 return Err(Error::Forbidden("untrusted request origin".into()));
+            }
+            if method == "OPTIONS" {
+                return Ok(HttpResponse::no_content());
+            }
+            if method != "POST" {
+                return Err(Error::NotFound);
             }
             let ct = request.header("content-type").unwrap_or("");
             if !ct.to_lowercase().starts_with("application/json") {
@@ -316,7 +383,7 @@ impl Backend {
         if path == "/api/ad-removal/deepseek-key" && method == "PUT" {
             let body = request.json_object()?;
             let key = body.get("api_key").and_then(Value::as_str).ok_or_else(|| Error::Invalid("api_key is required".into()))?;
-            self.credentials.save(key.to_string());
+            self.save_deepseek_key(key)?;
             return Ok(HttpResponse::json(self.ad_removal_settings()?, 200));
         }
         if path == "/api/ad-removal/statuses" && method == "GET" {
@@ -348,9 +415,11 @@ impl Backend {
             return Ok(HttpResponse::json(self.ad_removal_settings()?, 200));
         }
         if path == "/api/ad-removal/diagnostics/export" && method == "GET" {
-            return Ok(HttpResponse::text("PK", 200, "application/zip"));
+            let bytes = self.diagnostics.export_bytes().map_err(|e| Error::Database(e.to_string()))?;
+            return Ok(HttpResponse::binary(bytes, 200, "application/zip"));
         }
         if path == "/api/ad-removal/diagnostics/clear" && method == "POST" {
+            self.diagnostics.clear().map_err(|e| Error::Database(e.to_string()))?;
             return Ok(HttpResponse::no_content());
         }
         if path == "/api/ad-removal/cleanup" && method == "POST" {
@@ -673,7 +742,7 @@ impl Backend {
         if name.len() < 2 {
             return Err(Error::Invalid("name must be at least 2 characters".into()));
         }
-        let appearances = self.directory.search_appearances(name)?;
+        let appearances = self.directory().search_appearances(name)?;
         let aliases_json = serde_json::to_string(&aliases).unwrap_or_else(|_| "[]".into());
         let id = self.db.with_transaction(|tx| {
             if tx.query_row("SELECT id FROM follows WHERE name = ?", params![name], |r| r.get::<_, i64>(0)).optional()?.is_some() {
@@ -688,7 +757,7 @@ impl Backend {
 
     fn refresh_follow(&self, id: i64) -> Result<Follow, Error> {
         let follow = self.follows()?.into_iter().find(|f| f.id == id).ok_or(Error::NotFound)?;
-        let appearances = self.directory.search_appearances(&follow.name)?;
+        let appearances = self.directory().search_appearances(&follow.name)?;
         self.ingest_appearances(id, &follow.name, &appearances)?;
         self.follows()?.into_iter().find(|f| f.id == id).ok_or(Error::NotFound)
     }
@@ -1043,8 +1112,9 @@ impl Backend {
     }
 
     fn search(&self, query: &str) -> Result<SearchResults, Error> {
-        let podcasts = if self.directory.is_configured() {
-            let mut pods = self.directory.search(query)?;
+        let directory = self.directory();
+        let podcasts = if directory.is_configured() {
+            let mut pods = directory.search(query)?;
             let conn = self.db.lock()?;
             for p in &mut pods {
                 let sub: Option<i64> = conn
@@ -1065,7 +1135,7 @@ impl Backend {
             .and_then(|mut stmt| stmt.query_map(params![expr, PAGE_SIZE], map_episode).ok().map(|m| m.filter_map(|r| r.ok()).collect()))
             .unwrap_or_default();
         Ok(SearchResults {
-            directory_configured: self.directory.is_configured(),
+            directory_configured: directory.is_configured(),
             podcasts,
             episodes,
         })
@@ -1208,6 +1278,77 @@ impl Backend {
 
     pub fn record_playback_progress(&self, episode_id: i64, seconds: f64) {
         let _ = self.set_position(episode_id, seconds);
+    }
+
+    fn save_deepseek_key(&self, key: &str) -> Result<(), Error> {
+        self.credentials.save(key.to_string());
+        let conn = self.db.lock()?;
+        db::set_setting(&conn, "deepseek_api_key", key)?;
+        Ok(())
+    }
+
+    pub fn start_runtime(self: &Arc<Self>) {
+        let mut slot = self.runtime.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        self.runtime_stop.store(false, Ordering::SeqCst);
+        let backend = self.clone();
+        let stop = self.runtime_stop.clone();
+        *slot = Some(std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let _ = backend.run_pipeline_step();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }));
+    }
+
+    pub fn stop_runtime(&self) {
+        self.runtime_stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.runtime.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+    }
+
+    pub fn run_pipeline_step(&self) -> Result<bool, Error> {
+        if self.setting("ad_removal_enabled").as_deref() != Some("true") {
+            return Ok(false);
+        }
+        let store = JobStore::new(&self.db);
+        let coordinator = crate::coordinator::Coordinator::new(&store);
+        let downloader = self.downloader.lock().unwrap().clone();
+        let transcriber = self.transcriber.lock().unwrap().clone();
+        let classifier = self.classifier.lock().unwrap().clone();
+        let api_key = self.credentials.read().unwrap_or_default();
+        let artifacts = &self.artifacts;
+        let ran = coordinator.run_next_stage(|stage, job| {
+            let (audio_url, notes, duration) = self
+                .episode_pipeline_meta(job.episode_id)
+                .unwrap_or_else(|_| (String::new(), String::new(), None));
+            pipeline::execute_stage(
+                &store,
+                artifacts,
+                downloader.as_ref(),
+                transcriber.as_ref(),
+                classifier.as_ref(),
+                &api_key,
+                stage,
+                job,
+                &audio_url,
+                &notes,
+                duration,
+            )
+        })?;
+        Ok(ran.is_some())
+    }
+
+    fn episode_pipeline_meta(&self, episode_id: i64) -> Result<(String, String, Option<i64>), Error> {
+        let conn = self.db.lock()?;
+        Ok(conn.query_row(
+            "SELECT audio_url, notes_html, duration_secs FROM episodes WHERE id = ?",
+            params![episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
     }
 }
 

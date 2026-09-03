@@ -1,5 +1,6 @@
-use crate::backend::{Backend, DisabledDirectory};
+use crate::backend::Backend;
 use crate::db::Database;
+use crate::directory::PodcastIndexClient;
 use crate::feeds::UreqFetcher;
 use crate::http::HttpRequest;
 use std::ffi::{CStr, CString};
@@ -9,7 +10,17 @@ use std::ptr;
 use std::sync::Arc;
 
 pub struct Handle {
-    backend: Backend,
+    backend: Arc<Backend>,
+}
+
+fn open_backend(path: PathBuf) -> Option<Handle> {
+    let db = Database::open(&path).ok()?;
+    let data_root = path.parent().map(|p| p.join("AdRemovalData"));
+    let directory: Arc<dyn crate::backend::DirectorySearcher> = crate::directory::configured_directory();
+    let backend = Backend::with_data_root(db, Arc::new(UreqFetcher::default()), directory, data_root);
+    let backend = Arc::new(backend);
+    backend.start_runtime();
+    Some(Handle { backend })
 }
 
 #[no_mangle]
@@ -34,18 +45,45 @@ pub extern "C" fn pods_backend_open(path: *const c_char) -> *mut Handle {
     if path.is_null() {
         return ptr::null_mut();
     }
-    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned();
-    let Ok(db) = Database::open(&PathBuf::from(path)) else {
-        return ptr::null_mut();
+    let path = PathBuf::from(unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned());
+    match open_backend(path) {
+        Some(handle) => Box::into_raw(Box::new(handle)),
+        None => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn pods_backend_configure(handle: *mut Handle, json: *const c_char) -> c_int {
+    if handle.is_null() || json.is_null() {
+        return 1;
+    }
+    let handle = unsafe { &*handle };
+    let raw = unsafe { CStr::from_ptr(json) }.to_string_lossy();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return 1;
     };
-    let backend = Backend::new(db, Arc::new(UreqFetcher::default()), Arc::new(DisabledDirectory));
-    Box::into_raw(Box::new(Handle { backend }))
+    let key = value.get("podcastindex_key").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let secret = value.get("podcastindex_secret").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let base = value
+        .get("podcastindex_base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://api.podcastindex.org/api/1.0");
+    if key.is_empty() || secret.is_empty() {
+        return 0;
+    }
+    handle
+        .backend
+        .set_directory(Arc::new(PodcastIndexClient::new(key, secret, base)));
+    0
 }
 
 #[no_mangle]
 pub extern "C" fn pods_backend_close(handle: *mut Handle) {
     if !handle.is_null() {
-        unsafe { drop(Box::from_raw(handle)) };
+        unsafe {
+            let boxed = Box::from_raw(handle);
+            boxed.backend.stop_runtime();
+        }
     }
 }
 
