@@ -4,6 +4,7 @@ use crate::feeds::{self, FeedFetchResponse, FeedFetcher, FeedValidators, ParsedF
 use crate::http::{HttpRequest, HttpResponse};
 use crate::jobs::{JobStage, JobStore};
 use crate::models::*;
+use crate::usage::UsageStore;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -97,21 +98,27 @@ pub struct Backend {
     directory: Arc<dyn DirectorySearcher>,
     credentials: CredentialStore,
     ad_removal_wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    ad_removal_cancel: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     car_routes: Mutex<Vec<BluetoothRoute>>,
     car_keys: Mutex<Vec<String>>,
+    refreshing: Mutex<bool>,
 }
 
 impl Backend {
     pub fn new(db: Database, fetcher: Arc<dyn FeedFetcher>, directory: Arc<dyn DirectorySearcher>) -> Self {
-        Self {
+        let backend = Self {
             db,
             fetcher,
             directory,
             credentials: CredentialStore::new(Some("test-api-key".into())),
             ad_removal_wake: Mutex::new(None),
+            ad_removal_cancel: Mutex::new(None),
             car_routes: Mutex::new(Vec::new()),
             car_keys: Mutex::new(Vec::new()),
-        }
+            refreshing: Mutex::new(false),
+        };
+        let _ = backend.recover_interrupted_state();
+        backend
     }
 
     pub fn set_credentials(&mut self, store: CredentialStore) {
@@ -120,6 +127,43 @@ impl Backend {
 
     pub fn set_ad_removal_wake<F: Fn() + Send + Sync + 'static>(&self, f: F) {
         *self.ad_removal_wake.lock().unwrap() = Some(Arc::new(f));
+    }
+
+    pub fn set_ad_removal_cancel<F: Fn() + Send + Sync + 'static>(&self, f: F) {
+        *self.ad_removal_cancel.lock().unwrap() = Some(Arc::new(f));
+    }
+
+    fn wait_for_pipeline(&self) {
+        if let Some(cb) = self.ad_removal_cancel.lock().unwrap().clone() {
+            cb();
+        }
+    }
+
+    fn recover_interrupted_state(&self) -> Result<(), Error> {
+        self.recover_refresh_attempts()?;
+        JobStore::new(&self.db)
+            .recover_played_cleanup()
+            .map_err(|e| Error::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn recover_refresh_attempts(&self) -> Result<(), Error> {
+        let now = db::now_unix();
+        self.db.execute(
+            "UPDATE feed_refresh_attempts SET finished_at = ?, refreshed = 0, errors = 1, outcome = 'interrupted' WHERE outcome = 'running'",
+            params![now],
+        )?;
+        let interrupted: i64 = self
+            .db
+            .scalar_i64("SELECT COUNT(*) FROM feed_refresh_attempts WHERE outcome = 'interrupted'", [])?
+            .unwrap_or(0);
+        if interrupted > 0 {
+            self.db.execute(
+                "INSERT INTO feed_refresh_state (id, last_attempt_at, last_success_at, last_source, last_refreshed, last_errors) VALUES (1, ?, NULL, 'foreground', 0, 1) ON CONFLICT(id) DO UPDATE SET last_errors = 1",
+                params![now],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn set_car_routes(&self, routes: Vec<BluetoothRoute>) {
@@ -295,6 +339,7 @@ impl Backend {
             let conn = self.db.lock()?;
             db::set_setting(&conn, "ad_removal_enabled", "false")?;
             drop(conn);
+            self.wait_for_pipeline();
             return Ok(HttpResponse::json(self.ad_removal_settings()?, 200));
         }
         if parts.len() == 5 && parts[0] == "api" && parts[1] == "ad-removal" && parts[2] == "corrections" && parts[4] == "reset" && method == "POST" {
@@ -313,8 +358,13 @@ impl Backend {
             if body.get("confirm").and_then(Value::as_str) != Some("DELETE_AD_REMOVAL_DATA") {
                 return Err(Error::Invalid("destructive cleanup confirmation does not match".into()));
             }
+            self.wait_for_pipeline();
             let conn = self.db.lock()?;
             db::set_setting(&conn, "ad_removal_enabled", "false")?;
+            let _ = conn.execute("DELETE FROM ad_removal_jobs", []);
+            let _ = conn.execute("DELETE FROM ad_skip_ranges", []);
+            let _ = conn.execute("DELETE FROM ad_transcript_segments", []);
+            let _ = conn.execute("DELETE FROM ad_classification_windows", []);
             drop(conn);
             return Ok(HttpResponse::json(self.ad_removal_settings()?, 200));
         }
@@ -588,6 +638,7 @@ impl Backend {
 
     fn unsubscribe(&self, id: i64) -> Result<(), Error> {
         let _ = self.fetch_show(id)?;
+        let _ = JobStore::new(&self.db).delete_podcast_corrections(id);
         self.db.with_transaction(|tx| {
             tx.execute("DELETE FROM episodes_fts WHERE rowid IN (SELECT id FROM episodes WHERE podcast_id = ?)", params![id])?;
             tx.execute("DELETE FROM podcasts WHERE id = ?", params![id])?;
@@ -766,8 +817,9 @@ impl Backend {
             })
         }).optional()?.ok_or(Error::NotFound)?;
         drop(conn);
+        let store = JobStore::new(&self.db);
         if detail.ad_removal_stage.as_deref() == Some("ready") {
-            detail.ad_markers = JobStore::new(&self.db)
+            detail.ad_markers = store
                 .skip_ranges(id)
                 .unwrap_or_default()
                 .into_iter()
@@ -775,15 +827,32 @@ impl Backend {
                 .map(|r| EpisodeAdMarker { id: r.id, start_time: r.start_time })
                 .collect();
         }
+        detail.show_notes = store
+            .show_notes(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| EpisodeShowNote {
+                id: n.segment_id,
+                start_time: n.start_time,
+                title: n.title,
+                summary: n.summary,
+            })
+            .collect();
         Ok(detail)
     }
 
     fn set_played(&self, id: i64) -> Result<(), Error> {
         self.require_episode(id)?;
+        let now = db::now_unix();
         self.db.execute(
             "INSERT INTO episode_state (episode_id, played_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(episode_id) DO UPDATE SET played_at = excluded.played_at, updated_at = excluded.updated_at",
-            params![id, db::now_unix(), db::now_unix()],
+            params![id, now, now],
         )?;
+        let store = JobStore::new(&self.db);
+        if let Some(job) = store.job_for_episode(id).ok().flatten() {
+            let _ = store.cancel(&job.id);
+        }
+        let _ = store.delete_episode_ad_data(id);
         Ok(())
     }
 
@@ -859,7 +928,7 @@ impl Backend {
 
     fn refresh_status(&self) -> Result<RefreshStatus, Error> {
         let conn = self.db.lock()?;
-        Ok(conn
+        let mut status = conn
             .query_row(
                 "SELECT last_attempt_at, last_success_at, last_source, last_refreshed, last_errors FROM feed_refresh_state WHERE id = 1",
                 [],
@@ -875,10 +944,39 @@ impl Backend {
                 },
             )
             .optional()?
-            .unwrap_or_default())
+            .unwrap_or_default();
+        status.is_refreshing = Some(*self.refreshing.lock().unwrap());
+        Ok(status)
     }
 
     fn refresh(&self, source: &str) -> Result<RefreshResult, Error> {
+        *self.refreshing.lock().unwrap() = true;
+        let started = db::now_unix();
+        let _ = self.db.execute(
+            "INSERT INTO feed_refresh_attempts (source, started_at, outcome) VALUES (?, ?, 'running')",
+            params![source, started],
+        );
+        let result = self.refresh_inner(source);
+        *self.refreshing.lock().unwrap() = false;
+        let finished = db::now_unix();
+        match &result {
+            Ok(done) => {
+                let _ = self.db.execute(
+                    "UPDATE feed_refresh_attempts SET finished_at = ?, refreshed = ?, errors = ?, outcome = 'ok' WHERE outcome = 'running'",
+                    params![finished, done.refreshed, done.errors],
+                );
+            }
+            Err(_) => {
+                let _ = self.db.execute(
+                    "UPDATE feed_refresh_attempts SET finished_at = ?, refreshed = 0, errors = 1, outcome = 'error' WHERE outcome = 'running'",
+                    params![finished],
+                );
+            }
+        }
+        result
+    }
+
+    fn refresh_inner(&self, source: &str) -> Result<RefreshResult, Error> {
         let ids: Vec<(i64, String)> = {
             let conn = self.db.lock()?;
             let mut stmt = conn.prepare("SELECT id, feed_url FROM podcasts WHERE is_subscribed = 1")?;
@@ -1026,6 +1124,22 @@ impl Backend {
     fn ad_removal_settings(&self) -> Result<AdRemovalSettingsPayload, Error> {
         let enabled = self.setting("ad_removal_enabled").as_deref() == Some("true");
         let cutoff = self.setting("ad_removal_enrollment_cutoff").and_then(|v| v.parse().ok());
+        let deepseek_usage = UsageStore::new(&self.db).metrics().unwrap_or_else(|_| DeepSeekUsageMetricsPayload::empty(true));
+        let conn = self.db.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.podcast_id, p.title, COUNT(*) FROM ad_corrections c JOIN podcasts p ON p.id = c.podcast_id WHERE c.active = 1 GROUP BY c.podcast_id ORDER BY p.title COLLATE NOCASE",
+        )?;
+        let corrections = stmt
+            .query_map([], |row| {
+                Ok(AdRemovalCorrectionCountPayload {
+                    podcast_id: row.get(0)?,
+                    podcast_title: row.get(1)?,
+                    count: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        drop(conn);
         Ok(AdRemovalSettingsPayload {
             enabled,
             enrollment_cutoff: cutoff,
@@ -1041,8 +1155,8 @@ impl Backend {
             episode_storage_limit_bytes: 10_000_000_000,
             minimum_free_bytes: 10_000_000_000,
             device_available_bytes: 20_000_000_000,
-            corrections: vec![],
-            deepseek_usage: DeepSeekUsageMetricsPayload::empty(true),
+            corrections,
+            deepseek_usage,
         })
     }
 

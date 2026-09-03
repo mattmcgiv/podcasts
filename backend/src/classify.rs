@@ -63,6 +63,15 @@ fn unwrap_json_fence(raw: &str) -> String {
 
 pub const SHOW_NOTES_CHAPTER_BASELINE: usize = 12;
 
+pub fn deepseek_chat_body(model: &str, prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "thinking": {"type": "disabled"},
+        "response_format": {"type": "json_object"}
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShowNoteDraft {
     pub segment_id: String,
@@ -92,6 +101,9 @@ pub fn parse_show_notes(raw: &str, known_ids: &[String]) -> Result<Vec<ShowNoteD
     Ok(out)
 }
 
+pub const PRODUCTION_BATCH: usize = 64;
+pub const PRODUCTION_OVERLAP: usize = 4;
+
 pub fn windows(segment_ids: &[String], batch: usize, overlap: usize) -> Vec<Vec<String>> {
     if segment_ids.is_empty() || batch == 0 {
         return vec![];
@@ -107,4 +119,69 @@ pub fn windows(segment_ids: &[String], batch: usize, overlap: usize) -> Vec<Vec<
         start = end.saturating_sub(overlap).max(start + 1);
     }
     out
+}
+
+pub fn production_windows(segment_ids: &[String]) -> Vec<Vec<String>> {
+    windows(segment_ids, PRODUCTION_BATCH, PRODUCTION_OVERLAP)
+}
+
+pub fn short_request_ids(count: usize) -> Vec<String> {
+    (0..count).map(|i| format!("s{i}")).collect()
+}
+
+pub fn total_windows(segment_count: usize) -> usize {
+    if segment_count == 0 {
+        return 0;
+    }
+    if segment_count <= PRODUCTION_BATCH {
+        return 1;
+    }
+    let step = PRODUCTION_BATCH - PRODUCTION_OVERLAP;
+    1 + (segment_count - PRODUCTION_BATCH + step - 1) / step
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorrectionExample {
+    pub id: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
+pub fn select_corrections(segment_text: &str, corrections: &[CorrectionExample], token_budget: usize) -> Vec<CorrectionExample> {
+    let haystack = segment_text.to_lowercase();
+    let mut ranked: Vec<&CorrectionExample> = corrections
+        .iter()
+        .filter(|c| {
+            c.text
+                .split_whitespace()
+                .filter(|w| w.len() > 4)
+                .any(|w| haystack.contains(&w.to_lowercase()))
+        })
+        .collect();
+    ranked.sort_by_key(|c| std::cmp::Reverse(c.created_at));
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for item in ranked {
+        let cost = item.text.split_whitespace().count();
+        if used + cost > token_budget && !out.is_empty() {
+            break;
+        }
+        if cost > token_budget && out.is_empty() {
+            continue;
+        }
+        used += cost;
+        out.push(item.clone());
+    }
+    out
+}
+
+pub fn classification_prompt(segment_ids: &[String], corrections: &[CorrectionExample]) -> String {
+    let mut prompt = String::from("Classify each segment as \"ad\" or \"content\" with a reason containing 1 to 240 characters.\n");
+    for (index, id) in segment_ids.iter().enumerate() {
+        prompt.push_str(&format!("SEGMENT s{index} ({id})\n"));
+    }
+    for correction in corrections {
+        prompt.push_str(&format!("correction {} {}\n", correction.id, correction.text));
+    }
+    prompt
 }

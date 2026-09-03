@@ -40,6 +40,45 @@ pub fn from_finalized(
     Ok(out)
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResultAccumulator {
+    pub language: String,
+    pub segments: Vec<TranscriptSegment>,
+    pub observed_final_result_count: i32,
+    pub rejected_final_result_count: i32,
+}
+
+impl ResultAccumulator {
+    pub fn new(language: impl Into<String>) -> Self {
+        Self {
+            language: language.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn consume(&mut self, is_final: bool, start_time: f64, end_time: f64, text: impl Into<String>) {
+        if !is_final {
+            return;
+        }
+        self.observed_final_result_count += 1;
+        let text = text.into();
+        if !start_time.is_finite() || !end_time.is_finite() || end_time <= start_time || text.trim().is_empty() {
+            self.rejected_final_result_count += 1;
+            return;
+        }
+        let index = self.segments.len() as i32;
+        let start_ms = (start_time * 1000.0).round() as i64;
+        self.segments.push(TranscriptSegment {
+            id: format!("acc-{index}-{start_ms}"),
+            index,
+            language: self.language.clone(),
+            start_time,
+            end_time,
+            text,
+        });
+    }
+}
+
 pub fn error_code(kind: &str) -> &'static str {
     match kind {
         "canceled" => "transcription.canceled",

@@ -94,6 +94,71 @@ fn test_mac_automatic_skip_timeout_retries_without_a_clock_and_rejects_stale_cal
     }
 }
 
+fn auth() -> StreamAuthorization {
+    StreamAuthorization {
+        episode_id: 42,
+        file_path: "/tmp/episode.mp3".into(),
+        byte_count: 100,
+        token: "secret-token".into(),
+        playback_session_id: "playback-session".into(),
+    }
+}
+
+#[test]
+fn test_only_authorized_active_episode_can_be_read() {
+    let empty = HashMap::new();
+    let authorization = auth();
+    assert_eq!(plan("GET", "/episode/42?token=wrong", &empty, Some(&authorization)).status_code, 401);
+    assert_eq!(plan("GET", "/episode/41?token=secret-token", &empty, Some(&authorization)).status_code, 404);
+    assert_eq!(plan("GET", "/episode/42?token=secret-token", &empty, None).status_code, 401);
+}
+
+#[test]
+fn test_full_get_and_head_expose_length_and_range_support() {
+    let empty = HashMap::new();
+    let authorization = auth();
+    let get = plan("GET", "/episode/42?token=secret-token", &empty, Some(&authorization));
+    assert_eq!(get.status_code, 200);
+    assert_eq!(get.body_range, Some(0..100));
+    assert_eq!(get.headers.get("Accept-Ranges").unwrap(), "bytes");
+    let head = plan("HEAD", "/episode/42?token=secret-token", &empty, Some(&authorization));
+    assert_eq!(head.status_code, 200);
+    assert!(head.body_range.is_none());
+}
+
+#[test]
+fn test_closed_open_and_suffix_ranges_use_rfc_byte_semantics() {
+    let authorization = auth();
+    let mut headers = HashMap::new();
+    headers.insert("Range".into(), "bytes=10-19".into());
+    assert_eq!(plan("GET", "/episode/42?token=secret-token", &headers, Some(&authorization)).body_range, Some(10..20));
+    headers.insert("Range".into(), "bytes=90-".into());
+    assert_eq!(plan("GET", "/episode/42?token=secret-token", &headers, Some(&authorization)).body_range, Some(90..100));
+    headers.insert("Range".into(), "bytes=-10".into());
+    assert_eq!(plan("GET", "/episode/42?token=secret-token", &headers, Some(&authorization)).body_range, Some(90..100));
+}
+
+#[test]
+fn test_invalid_or_multiple_range_is_rejected_without_body() {
+    let authorization = auth();
+    let mut headers = HashMap::new();
+    for value in ["items=0-1", "bytes=100-101", "bytes=20-10", "bytes=0-1,3-4"] {
+        headers.insert("Range".into(), value.into());
+        let response = plan("GET", "/episode/42?token=secret-token", &headers, Some(&authorization));
+        assert_eq!(response.status_code, 416, "{value}");
+        assert_eq!(response.headers.get("Content-Range").unwrap(), "bytes */100");
+        assert!(response.body_range.is_none());
+    }
+}
+
+#[test]
+fn test_unsupported_method_is_rejected() {
+    let empty = HashMap::new();
+    let post = plan("POST", "/episode/42?token=secret-token", &empty, Some(&auth()));
+    assert_eq!(post.status_code, 405);
+    assert_eq!(post.headers.get("Allow").unwrap(), "GET, HEAD");
+}
+
 #[test]
 fn test_range_planner_contracts() {
     let auth = StreamAuthorization {

@@ -122,12 +122,12 @@ fn test_parse_usage_reads_deepseek_token_fields() {
 #[test]
 fn test_cost_uses_published_peak_and_off_peak_rates() {
     let tokens = UsageTokens { input_tokens: Some(1_000_000), cached_input_tokens: Some(0), output_tokens: Some(1_000_000) };
-    let peak = 2 * 3600; // 02:00 UTC is peak
+    let peak = 2 * 3600; // 02:00 UTC Thursday 1970 is peak
     let off = 20 * 3600; // 20:00 UTC off-peak
     let peak_cost = cost_usd(&tokens, peak).unwrap();
     let off_cost = cost_usd(&tokens, off).unwrap();
-    assert!((peak_cost - (0.55 + 2.19)).abs() < 0.0001);
-    assert!((off_cost - (0.135 + 0.55)).abs() < 0.0001);
+    assert!((peak_cost - (1.32 + 3.96)).abs() < 0.0001);
+    assert!((off_cost - (0.66 + 1.98)).abs() < 0.0001);
 }
 
 #[test]

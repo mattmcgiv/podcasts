@@ -51,6 +51,42 @@ impl ArtifactStore {
     pub fn url(&self, relative_path: &str) -> PathBuf {
         self.root.join(relative_path)
     }
+
+    pub fn write_resume(&self, job_id: &str, bytes: &[u8]) -> std::io::Result<String> {
+        let relative = format!("resume/{job_id}.resume");
+        self.install(&relative, bytes)?;
+        Ok(relative)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DownloadResult {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+    pub status: u16,
+}
+
+pub fn finalize_download(
+    store: &ArtifactStore,
+    job_store: &crate::jobs::JobStore<'_>,
+    job_id: &str,
+    episode_id: i64,
+    download: &DownloadResult,
+) -> Result<crate::jobs::Job, String> {
+    if download.status != 200 || !is_mp3_or_octet(&download.content_type) || download.bytes.is_empty() {
+        return Err("download failed".into());
+    }
+    let relative = format!("episodes/{episode_id}/audio.mp3");
+    let sha = store.install(&relative, &download.bytes).map_err(|e| e.to_string())?;
+    let artifact = crate::jobs::AudioArtifact {
+        relative_path: relative,
+        sha256: sha,
+        byte_count: download.bytes.len() as i64,
+    };
+    let recorded = job_store.record_audio_artifact(job_id, &artifact).map_err(|e| e.to_string())?;
+    job_store
+        .transition(&recorded.id, crate::jobs::JobStage::Downloaded)
+        .map_err(|e| e.to_string())
 }
 
 pub fn storage_allows(episode_bytes: i64, limit: i64, available: i64, minimum_free: i64, incoming: i64) -> bool {

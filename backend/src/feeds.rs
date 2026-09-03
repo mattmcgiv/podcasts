@@ -203,23 +203,36 @@ pub struct UreqFetcher {
 impl Default for UreqFetcher {
     fn default() -> Self {
         Self {
-            timeout: std::time::Duration::from_secs(15),
+            timeout: std::time::Duration::from_secs(12),
+        }
+    }
+}
+
+impl UreqFetcher {
+    pub fn request_timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
+}
+
+pub fn fetch_with_https_fallback<F>(url: &str, mut fetch_once: F) -> Result<FeedFetchResponse, Error>
+where
+    F: FnMut(&str) -> Result<FeedFetchResponse, Error>,
+{
+    match fetch_once(url) {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            if let Some(upgraded) = https_equivalent(url) {
+                fetch_once(&upgraded)
+            } else {
+                Err(err)
+            }
         }
     }
 }
 
 impl FeedFetcher for UreqFetcher {
     fn fetch(&self, url: &str, validators: &FeedValidators) -> Result<FeedFetchResponse, Error> {
-        match self.fetch_once(url, validators) {
-            Ok(response) => Ok(response),
-            Err(err) => {
-                if let Some(upgraded) = https_equivalent(url) {
-                    self.fetch_once(&upgraded, validators)
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        fetch_with_https_fallback(url, |candidate| self.fetch_once(candidate, validators))
     }
 }
 

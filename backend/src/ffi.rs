@@ -13,7 +13,6 @@ pub struct Handle {
 }
 
 #[no_mangle]
-#[no_mangle]
 pub extern "C" fn pods_backend_prepare(live_path: *const c_char, seed_path: *const c_char) -> c_int {
     if live_path.is_null() {
         return 1;
