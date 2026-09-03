@@ -313,4 +313,62 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.queryByRole("status", { name: "Ad skip notification" })).not.toBeInTheDocument();
     vi.useRealTimers();
   });
+
+  it("selects iPhone and Mac playback outputs", async () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    await user.click(screen.getByRole("button", { name: "iPhone" }));
+    act(() => {
+      window.PodsAudioBridge?.emit({
+        type: "cast",
+        available: true,
+        connected: false,
+        name: "Matt’s Mac",
+        output: "local",
+      });
+    });
+    await user.click(screen.getByRole("button", { name: "Mac" }));
+    delete window.webkit;
+    delete window.PodsAudioBridge;
+  });
+
+  it("formats a next-chapter delta over one hour", async () => {
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/1": {
+        ...episode({ id: 1, title: "Sheet Episode" }),
+        notes_html: "",
+        show_notes: [
+          {
+            id: "segment-late",
+            start_time: 4000,
+            title: "Hour two",
+            summary: "A late chapter.",
+          },
+        ],
+        ad_markers: [],
+        archived_at: null,
+      },
+      "PUT /api/episodes/1/position": null,
+    });
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <Starter />
+        <PlayerSheet />
+      </PlayerProvider>,
+    );
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    expect(screen.getByRole("button", { name: "Next: Hour two (+1 hr 7 mins)" })).toBeInTheDocument();
+  });
 });

@@ -70,4 +70,48 @@ describe("App", () => {
     fireEvent.touchEnd(playedView, { changedTouches: [{ clientX: 275, clientY: 246 }] });
     await screen.findByText("Fresh Episode");
   });
+
+  it("ignores swipes that start on text inputs or use more than one finger", async () => {
+    installApi({
+      ...shellRoutes,
+      "GET /api/refresh-status": {
+        last_attempt_at: null,
+        last_success_at: null,
+        last_source: null,
+        last_refreshed: 0,
+        last_errors: 0,
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fresh Episode");
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    const feedUrl = await screen.findByRole("textbox", { name: "Feed URL" });
+
+    fireEvent.touchStart(feedUrl, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(feedUrl, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, {
+      touches: [
+        { clientX: 280, clientY: 240 },
+        { clientX: 200, clientY: 240 },
+      ],
+    });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("animates a completed tab swipe", async () => {
+    installApi(shellRoutes);
+    render(<App />);
+    await screen.findByText("Fresh Episode");
+
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(document.querySelector(".tab-swipe-forward")).toBeTruthy();
+    await screen.findByRole("heading", { name: "Played" });
+  });
 });

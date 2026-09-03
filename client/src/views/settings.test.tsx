@@ -317,7 +317,7 @@ describe("SettingsSheet", () => {
   });
 
   it("keeps disable available and explains a pause when already enabled", async () => {
-    installApi({
+    const { calls } = installApi({
       "GET /api/ad-removal/settings": {
         ...adRemovalSettings,
         enabled: true,
@@ -325,7 +325,9 @@ describe("SettingsSheet", () => {
         classifier_available: false,
         classifier_unavailable_reason: "api_key_required",
       },
+      "POST /api/ad-removal/disable": { ...adRemovalSettings, enabled: false },
     });
+    const user = userEvent.setup();
     render(<SettingsSheet onClose={() => {}} />);
 
     expect(await screen.findByRole("button", { name: "Disable ad removal" })).toBeEnabled();
@@ -334,6 +336,36 @@ describe("SettingsSheet", () => {
       screen.getByText(/classification is paused until a DeepSeek API key is saved/),
     ).toBeInTheDocument();
     expect(screen.getByText(/API key required/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Disable ad removal" }));
+    await screen.findByText("Ad removal disabled; existing data retained");
+    expect(calls.some((call) => call.key === "POST /api/ad-removal/disable")).toBe(true);
+  });
+
+  it("shows an in-progress refresh status", async () => {
+    installApi({
+      "GET /api/refresh-status": {
+        last_attempt_at: 1_784_071_800,
+        last_success_at: 1_784_071_800,
+        last_source: "manual",
+        last_refreshed: 2,
+        last_errors: 0,
+        is_refreshing: true,
+      },
+    });
+    render(<SettingsSheet onClose={() => {}} />);
+    expect(await screen.findByText("Refreshing feeds…")).toBeInTheDocument();
+  });
+
+  it("does not delete ad-removal data when the confirm dialog is cancelled", async () => {
+    const { calls } = installApi({
+      "GET /api/ad-removal/settings": { ...adRemovalSettings, enabled: true },
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+    await screen.findByRole("button", { name: "Delete all ad-removal data" });
+    await user.click(screen.getByRole("button", { name: "Delete all ad-removal data" }));
+    expect(calls.some((call) => call.key === "POST /api/ad-removal/cleanup")).toBe(false);
   });
 
   it("hides car Bluetooth until the native enrollment API is available", async () => {

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAudioEngine, hasNativeAudioBridge } from "./audioEngine";
+import { createAudioEngine, hasNativeAudioBridge, type AudioEngine, type CastInfo } from "./audioEngine";
+
+function nativeCast(audio: AudioEngine): CastInfo {
+  return (audio as AudioEngine & { cast: CastInfo }).cast;
+}
 
 describe("native audio bridge", () => {
   afterEach(() => {
@@ -205,5 +209,101 @@ describe("native audio bridge", () => {
         output: "mac",
       }),
     );
+  });
+
+  it("reloads, stops, undoes ad skips, and applies native rate and skip events", async () => {
+    const messages: unknown[] = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+
+    const audio = createAudioEngine();
+    const skips: unknown[] = [];
+    const undone: string[] = [];
+    audio.addEventListener("adSkip", ((e: Event) => skips.push((e as CustomEvent).detail)) as EventListener);
+    audio.addEventListener("adSkipUndone", () => undone.push("undone"));
+    audio.addEventListener("state", () => undone.push("state"));
+
+    audio.load();
+    expect(messages.some((m) => (m as { command: string }).command === "load")).toBe(false);
+
+    audio.src = "https://h.example/one.mp3";
+    expect(audio.src).toBe("https://h.example/one.mp3");
+    audio.load();
+    expect(messages).toContainEqual(
+      expect.objectContaining({ command: "load", src: "https://h.example/one.mp3" }),
+    );
+
+    audio.currentTime = Number.NaN;
+    expect(audio.currentTime).toBe(0);
+    audio.playbackRate = 0;
+    expect(audio.playbackRate).toBe(1);
+    audio.setPlaybackRate?.(Number.NaN, "bad-rate");
+    expect(audio.playbackRate).toBe(1);
+
+    audio.requestCastStatus?.();
+    audio.undoAdSkip?.();
+    expect(messages).toContainEqual(expect.objectContaining({ command: "castStatus" }));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "undoAdSkip" }));
+    expect(nativeCast(audio)).toEqual({ available: false, connected: false, output: "local" });
+
+    window.PodsAudioBridge?.emit({ type: "timeupdate", playbackRate: 1.5, position: 8 });
+    expect(audio.playbackRate).toBe(1.5);
+    window.PodsAudioBridge?.emit({ type: "adSkip", rangeStart: 1, rangeEnd: 12, skippedDuration: 11 });
+    expect(skips).toEqual([]);
+    window.PodsAudioBridge?.emit({
+      type: "adSkip",
+      rangeId: "ad-1",
+      rangeStart: 1,
+      rangeEnd: 12,
+      skippedDuration: 11,
+    });
+    expect(skips).toEqual([
+      { rangeId: "ad-1", rangeStart: 1, rangeEnd: 12, skippedDuration: 11 },
+    ]);
+    window.PodsAudioBridge?.emit({ type: "adSkipUndone" });
+    expect(undone).toEqual(["undone"]);
+    window.PodsAudioBridge?.emit({ type: "state", paused: true });
+    expect(undone).toEqual(["undone"]);
+
+    const otherId = (messages[0] as { id: number }).id + 99;
+    window.PodsAudioBridge?.emit({ id: otherId, type: "timeupdate", position: 99 });
+    expect(audio.currentTime).toBe(8);
+
+    audio.removeAttribute("preload");
+    expect(audio.src).toBe("https://h.example/one.mp3");
+    audio.removeAttribute("src");
+    expect(audio.src).toBe("");
+    expect(audio.paused).toBe(true);
+    expect(Number.isNaN(audio.duration)).toBe(true);
+    expect(messages).toContainEqual(expect.objectContaining({ command: "stop" }));
+  });
+
+  it("uses a nested cast payload when native sends one", () => {
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage() {},
+        },
+      },
+    };
+    const audio = createAudioEngine();
+    window.PodsAudioBridge?.emit({
+      type: "cast",
+      cast: { available: true, connected: false, name: "Kitchen", output: "mac", error: "busy" },
+    });
+    expect(nativeCast(audio)).toEqual({
+      available: true,
+      connected: false,
+      name: "Kitchen",
+      error: "busy",
+      output: "mac",
+    });
   });
 });

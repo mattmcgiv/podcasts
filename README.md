@@ -54,7 +54,7 @@ All client toolchain work runs **inside an isolated VM** (Apple `container` CLI,
 ```sh
 dev/up.sh        # build image + start the long-lived dev container
 dev/sh.sh        # shell into it
-dev/check.sh     # frontend test + coverage gate (≥80% lines)
+dev/check.sh     # frontend test + coverage gate (≥90% lines, statements, functions)
 ```
 
 The Vite dev server publishes to http://127.0.0.1:5173. The user-facing backend is the Swift backend inside the iOS app.

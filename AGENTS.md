@@ -15,7 +15,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 
 - `dev/up.sh` — build the image and start the long-lived `pods-dev` container (mounts, ports, resources).
 - `dev/sh.sh [cmd...]` — exec into the container (interactive shell if no args).
-- `dev/check.sh` — the merge gate: frontend Vitest coverage (≥80% lines, enforced in `vite.config.ts`).
+- `dev/check.sh` — the merge gate: frontend Vitest coverage (≥90% lines, statements, and functions, enforced in `vite.config.ts`).
 - Vite dev server: `:5173`.
 
 ## Default app/runtime

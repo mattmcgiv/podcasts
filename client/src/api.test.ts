@@ -71,12 +71,69 @@ describe("request wrapper", () => {
   it("posts and reviews person follows", async () => {
     const { calls } = installApi({
       "POST /api/follows": { id: 1, name: "Balaji Srinivasan", aliases: [], last_checked_at: null, pending_count: 0, accepted_count: 0 },
+      "POST /api/follows/1": { id: 1, name: "Balaji Srinivasan", aliases: [], last_checked_at: 9, pending_count: 0, accepted_count: 0 },
       "POST /api/follow-candidates/5/accept": null,
+      "POST /api/follow-candidates/5/reject": null,
     });
     await Api.addFollow("Balaji Srinivasan", ["Balaji S Srinivasan"]);
+    await Api.refreshFollow(1);
     await Api.acceptFollowCandidate(5);
+    await Api.rejectFollowCandidate(5);
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ name: "Balaji Srinivasan", aliases: ["Balaji S Srinivasan"] });
-    expect(calls[1].key).toBe("POST /api/follow-candidates/5/accept");
+    expect(calls[1].key).toBe("POST /api/follows/1");
+    expect(calls[2].key).toBe("POST /api/follow-candidates/5/accept");
+    expect(calls[3].key).toBe("POST /api/follow-candidates/5/reject");
+  });
+
+  it("disables ad removal", async () => {
+    const { calls } = installApi({
+      "POST /api/ad-removal/disable": { enabled: false },
+    });
+    await Api.disableAdRemoval();
+    expect(calls[0].key).toBe("POST /api/ad-removal/disable");
+  });
+
+  it("downloads ad-removal diagnostics as a blob", async () => {
+    installApi({
+      "GET /api/ad-removal/diagnostics/export": new Blob(["zip"], { type: "application/zip" }),
+    });
+    const blob = await Api.exportAdRemovalDiagnostics();
+    expect(blob.size).toBe(3);
+  });
+
+  it("logs blob transport failures with method and target", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("Load failed"));
+
+    await expect(Api.exportAdRemovalDiagnostics()).rejects.toThrow("Load failed");
+    expect(warning).toHaveBeenCalledWith(
+      "api_fetch_failed method=GET target=/api/ad-removal/diagnostics/export error=TypeError: Load failed",
+    );
+    warning.mockRestore();
+  });
+
+  it("surfaces blob server error messages", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    installApi({
+      "GET /api/ad-removal/diagnostics/export": new HttpError(500, { error: "zip failed" }),
+    });
+    await expect(Api.exportAdRemovalDiagnostics()).rejects.toThrow("zip failed");
+    expect(warning).toHaveBeenCalledWith(
+      "api_http_failed method=GET target=/api/ad-removal/diagnostics/export status=500 message=zip failed",
+    );
+    warning.mockRestore();
+  });
+
+  it("falls back to status text when a blob error body is not json", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response("nope", { status: 502, statusText: "Bad Gateway" }),
+    );
+    await expect(Api.exportAdRemovalDiagnostics()).rejects.toThrow("Bad Gateway");
+    expect(warning).toHaveBeenCalledWith(
+      "api_http_failed method=GET target=/api/ad-removal/diagnostics/export status=502 message=Bad Gateway",
+    );
+    warning.mockRestore();
   });
 
   it("previews a feed and adds one episode to Listen", async () => {

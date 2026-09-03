@@ -6,6 +6,7 @@ import {
   adRemovalStatusItem,
   adRemovalStatuses,
   episode,
+  HttpError,
   installApi,
   type MockRoutes,
 } from "./test/mockApi";
@@ -47,12 +48,15 @@ function Probe() {
       </button>
       <button onClick={p.toggle}>toggle</button>
       <button onClick={() => p.setSpeed(3)}>speed3</button>
+      <button onClick={() => p.setSpeed(2.5, "speed-test")}>speed-corr</button>
       <button onClick={() => p.setAutoplay(false)}>autoplay-off</button>
       <button onClick={() => void p.markPlayedAndClose()}>done</button>
       <button onClick={p.skipForward}>fwd</button>
       <button onClick={p.skipBack}>back</button>
       <button onClick={() => p.setExpanded(false)}>collapse</button>
       <button onClick={p.retryShowNotes}>retry-notes</button>
+      <button onClick={() => p.setCastOutput("local")}>cast-local</button>
+      <button onClick={p.undoAdSkip}>undo-skip</button>
       <span data-testid="state">
         {p.current
           ? `${p.current.id}:${p.playing ? "playing" : "paused"}:${p.speed}:${p.autoplay ? "auto" : "manual"}`
@@ -948,5 +952,163 @@ describe("PlayerProvider", () => {
       expect(sync.length).toBeGreaterThan(0);
       expect(JSON.parse(String(sync.at(-1)?.init.body))).toEqual({ seconds: 42 });
     });
+  });
+
+  it("keeps the player paused when play() fails", async () => {
+    FakeAudio.failNextPlay = true;
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+  });
+
+  it("shows a show-notes error that retry can clear", async () => {
+    const { user } = await setup({
+      "GET /api/episodes/1": {
+        ...episode({ id: 1, position_secs: 30, ad_removal_state: "ad-free", ad_removal_stage: "ready" }),
+        notes_html: "",
+        show_notes: [],
+        archived_at: null,
+      },
+      "POST /api/episodes/1/show-notes": () => {
+        throw new Error("notes failed");
+      },
+    });
+    await user.click(screen.getByText("play1"));
+    await waitFor(() =>
+      expect(screen.getByTestId("show-notes-status")).toHaveTextContent(
+        "Show notes could not be generated. Please try again.",
+      ),
+    );
+  });
+
+  it("continues playback when mark-played or next fails on ended", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { user } = await setup({
+      "POST /api/episodes/1/played": new HttpError(500, { error: "offline" }),
+      "GET /api/next": () => {
+        throw new Error("next failed");
+      },
+    });
+    await user.click(screen.getByText("play1"));
+    await act(async () => FakeAudio.last().emitEnded());
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("none"));
+    expect(warning).toHaveBeenCalled();
+    warning.mockRestore();
+  });
+
+  it("wires lock-screen media session actions and metadata", async () => {
+    const handlers = new Map<string, ((details?: { seekTime?: number }) => void) | null>();
+    const setPositionState = vi.fn();
+    Object.defineProperty(navigator, "mediaSession", {
+      configurable: true,
+      value: {
+        metadata: null,
+        setActionHandler(name: string, handler: ((details?: { seekTime?: number }) => void) | null) {
+          handlers.set(name, handler);
+        },
+        setPositionState,
+      },
+    });
+    vi.stubGlobal(
+      "MediaMetadata",
+      class {
+        title: string;
+        artist: string;
+        artwork: unknown;
+        constructor(init: { title: string; artist: string; artwork?: unknown }) {
+          this.title = init.title;
+          this.artist = init.artist;
+          this.artwork = init.artwork;
+        }
+      },
+    );
+    const intervals: Array<() => void> = [];
+    vi.spyOn(window, "setInterval").mockImplementation((fn) => {
+      intervals.push(fn as () => void);
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    vi.spyOn(window, "clearInterval").mockImplementation(() => {});
+
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    const audio = FakeAudio.last();
+    act(() => audio.emitLoadedMetadata(1800));
+    act(() => audio.emitTime(40));
+
+    expect(handlers.get("play")).toEqual(expect.any(Function));
+    handlers.get("pause")?.();
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("paused"));
+    handlers.get("play")?.();
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("playing"));
+    handlers.get("seekforward")?.();
+    expect(audio.currentTime).toBe(70);
+    handlers.get("seekbackward")?.();
+    expect(audio.currentTime).toBe(55);
+    handlers.get("seekto")?.({ seekTime: 12 });
+    expect(audio.currentTime).toBe(12);
+
+    act(() => {
+      for (const tick of intervals) tick();
+    });
+    expect(setPositionState).toHaveBeenCalled();
+  });
+
+  it("sends a correlated native speed change and can undo an ad skip", async () => {
+    const messages: unknown[] = [];
+    window.webkit = {
+      messageHandlers: {
+        podsAudio: {
+          postMessage(message) {
+            messages.push(message);
+          },
+        },
+      },
+    };
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await user.click(screen.getByText("speed-corr"));
+    expect(messages).toContainEqual(
+      expect.objectContaining({ command: "rate", rate: 2.5, correlationId: "speed-test" }),
+    );
+    await user.click(screen.getByText("undo-skip"));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "undoAdSkip" }));
+    await user.click(screen.getByText("cast-local"));
+    expect(messages).toContainEqual(expect.objectContaining({ command: "castDisconnect" }));
+  });
+
+  it("keeps a malformed artwork url as-is for now-playing metadata", async () => {
+    function BadArtProbe() {
+      const p = usePlayer();
+      return (
+        <button
+          onClick={() =>
+            p.playEpisode(
+              episode({ id: 1, image_url: "http://[bad", podcast_image: "", title: "Bad Art" }),
+              "recent",
+            )
+          }
+        >
+          play-bad-art
+        </button>
+      );
+    }
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/1": {
+        ...episode({ id: 1, image_url: "http://[bad" }),
+        notes_html: "",
+        archived_at: null,
+      },
+      "PUT /api/episodes/1/position": null,
+    });
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <BadArtProbe />
+      </PlayerProvider>,
+    );
+    await user.click(screen.getByText("play-bad-art"));
+    expect(FakeAudio.last().src).toBe("https://h.example/ep.mp3");
   });
 });

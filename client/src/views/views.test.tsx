@@ -144,6 +144,24 @@ describe("RecentView", () => {
     await waitFor(() => expect(recentCalls).toBeGreaterThanOrEqual(3)); // initial + loadMore + reload
   });
 
+  it("reloads Listen when mark-played fails", async () => {
+    let loads = 0;
+    installApi({
+      ...settings,
+      "GET /api/recent": () => {
+        loads += 1;
+        return page([episode({ id: 1, title: "Sticky Ep" })]);
+      },
+      "POST /api/episodes/1/played": new HttpError(500, { error: "nope" }),
+    });
+    const user = userEvent.setup();
+    wrap(<RecentView />);
+    await screen.findByText("Sticky Ep");
+    await user.click(screen.getByRole("button", { name: "Mark played" }));
+    await waitFor(() => expect(loads).toBeGreaterThan(1));
+    expect(screen.getByText("Sticky Ep")).toBeInTheDocument();
+  });
+
   it("does not mark the newly exposed row played during the same rapid interaction", async () => {
     const first = episode({ id: 1, title: "First" });
     const exposed = episode({ id: 2, title: "Exposed after removal" });
@@ -1307,6 +1325,79 @@ describe("RecentView", () => {
 });
 
 describe("FollowsView", () => {
+  it("checks, removes, skips, and records aliases", async () => {
+    let follows = [
+      { id: 1, name: "Elon Musk", aliases: [] as string[], last_checked_at: null as number | null, pending_count: 1, accepted_count: 0 },
+    ];
+    let candidates = [{
+      id: 9,
+      follow_id: 1,
+      appearance: {
+        source_episode_key: "candidate-9",
+        feed_url: "https://feeds.example/interviews",
+        feed_title: "Interviews",
+        feed_image_url: "",
+        guid: "guest-9",
+        title: "Elon Musk interview",
+        description: "",
+        audio_url: "https://audio.example/guest-9.mp3",
+        duration_secs: null,
+        published_at: 1_750_000_000,
+        image_url: "",
+        evidence: "name in title",
+        confidence: "review" as const,
+      },
+    }];
+    const { calls } = installApi({
+      "GET /api/follows": () => follows,
+      "GET /api/follow-candidates": () => candidates,
+      "POST /api/follows/1": () => {
+        follows = [{ ...follows[0], last_checked_at: 9 }];
+        return follows[0];
+      },
+      "DELETE /api/follows/1": () => {
+        follows = [];
+        return null;
+      },
+      "POST /api/follow-candidates/9/reject": () => {
+        candidates = [];
+        return null;
+      },
+      "POST /api/follows": { id: 2, name: "Ada Lovelace", aliases: ["Ada"], last_checked_at: null, pending_count: 0, accepted_count: 0 },
+    });
+    const user = userEvent.setup();
+    render(<FollowsView />);
+    expect(await screen.findByText("Elon Musk interview")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/follows/1")).toBe(true));
+    await user.click(screen.getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(screen.queryByText("Elon Musk interview")).not.toBeInTheDocument());
+    await user.type(screen.getByRole("textbox", { name: "Person to follow" }), "Ada Lovelace");
+    await user.type(screen.getByRole("textbox", { name: "Aliases" }), "Ada");
+    await user.click(screen.getByRole("button", { name: "Follow" }));
+    await waitFor(() => expect(calls.some((call) => call.key === "POST /api/follows")).toBe(true));
+    expect(JSON.parse(String(calls.find((call) => call.key === "POST /api/follows")?.init.body))).toEqual({
+      name: "Ada Lovelace",
+      aliases: ["Ada"],
+    });
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(calls.some((call) => call.key === "DELETE /api/follows/1")).toBe(true));
+  });
+
+  it("surfaces follow action errors", async () => {
+    installApi({
+      "GET /api/follows": [],
+      "GET /api/follow-candidates": [],
+      "POST /api/follows": new HttpError(500, { error: "follow failed" }),
+    });
+    const user = userEvent.setup();
+    render(<FollowsView />);
+    await screen.findByText("No people followed yet.");
+    await user.type(screen.getByRole("textbox", { name: "Person to follow" }), "Ada");
+    await user.click(screen.getByRole("button", { name: "Follow" }));
+    expect(await screen.findByText("follow failed")).toBeInTheDocument();
+  });
+
   it("adds a person, exposes the bounded-lookback explanation, and accepts reviewed appearances", async () => {
     let candidates = [{
       id: 9,
@@ -1423,6 +1514,25 @@ describe("PlayedView", () => {
     wrap(<PlayedView />);
     await screen.findByText(/Episodes you mark played/);
   });
+
+  it("reloads when unmark fails and can start playback", async () => {
+    let loads = 0;
+    installApi({
+      ...settings,
+      "GET /api/played": () => {
+        loads += 1;
+        return page([episode({ id: 4, title: "Old One", played_at: 1_750_000_100 })]);
+      },
+      "DELETE /api/episodes/4/played": new HttpError(500, { error: "nope" }),
+    });
+    const user = userEvent.setup();
+    wrap(<PlayedView />);
+    await screen.findByText("Old One");
+    await user.click(screen.getByRole("button", { name: "Mark unplayed" }));
+    await waitFor(() => expect(loads).toBeGreaterThan(1));
+    await user.click(screen.getByText("Old One"));
+    expect(FakeAudio.last().src).toBe("https://h.example/ep.mp3");
+  });
 });
 
 describe("ShowsView search", () => {
@@ -1438,6 +1548,7 @@ describe("ShowsView search", () => {
         episodes: [episode({ id: 8, title: "Matching Episode" })],
       },
       "POST /api/shows": show({ title: "Found Pod" }),
+      "POST /api/episodes/8/played": null,
     });
     const user = userEvent.setup();
     wrap(<ShowsView />);
@@ -1447,6 +1558,8 @@ describe("ShowsView search", () => {
     await screen.findByText("Found Pod");
     expect(screen.getByText("Matching Episode")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Subscribed" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Mark played" }));
+    await waitFor(() => expect(calls.some((c) => c.key === "POST /api/episodes/8/played")).toBe(true));
     expect(calls.find((c) => c.key === "GET /api/search")?.url.searchParams.get("q")).toBe("found");
 
     // subscribe the unsubscribed one
@@ -1665,5 +1778,60 @@ describe("ShowDetailView", () => {
     // The old action button is gone, preventing duplicate submission.
     expect(within(row).queryByRole("button", { name: "Prepare ad-free" })).not.toBeInTheDocument();
     expect(calls.filter((c) => c.key === "POST /api/episodes/17/ad-removal/prepare").length).toBe(1);
+  });
+
+  it("maps returned prepare stages onto user-facing ad-removal labels", async () => {
+    installApi({
+      ...settings,
+      "GET /api/shows/5": {
+        show: show(),
+        episodes: page([
+          episode({ id: 21, title: "Ready Ep", ad_removal_action: "prepare", ad_removal_stage: null }),
+          episode({ id: 22, title: "Failed Ep", ad_removal_action: "prepare", ad_removal_stage: null }),
+          episode({ id: 23, title: "Cancelled Ep", ad_removal_action: "prepare", ad_removal_stage: null }),
+        ]),
+      },
+      "POST /api/episodes/21/ad-removal/prepare": { stage: "ready" },
+      "POST /api/episodes/22/ad-removal/prepare": { stage: "failed" },
+      "POST /api/episodes/23/ad-removal/prepare": { stage: "cancelled" },
+    });
+    const user = userEvent.setup();
+    wrap(<ShowDetailView showId={5} />);
+    await screen.findByText("Ready Ep");
+    await user.click(within(screen.getByText("Ready Ep").closest("li")!).getByRole("button", { name: "Prepare ad-free" }));
+    expect(within(screen.getByText("Ready Ep").closest("li")!).getByText("Ad-free")).toBeInTheDocument();
+    await user.click(within(screen.getByText("Failed Ep").closest("li")!).getByRole("button", { name: "Prepare ad-free" }));
+    expect(within(screen.getByText("Failed Ep").closest("li")!).getByText("Failed")).toBeInTheDocument();
+    await user.click(within(screen.getByText("Cancelled Ep").closest("li")!).getByRole("button", { name: "Prepare ad-free" }));
+    expect(within(screen.getByText("Cancelled Ep").closest("li")!).getByText("Unfiltered")).toBeInTheDocument();
+  });
+
+  it("goes back, plays an episode, loads more, and clears show search", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/shows/5": (url: URL) => ({
+        show: show(),
+        episodes: url.searchParams.get("offset") === "50"
+          ? page([episode({ id: 12, title: "Later Ep" })])
+          : page([episode({ id: 11, title: "Catalog Ep" })], 50),
+      }),
+      "GET /api/shows/5/search": page([episode({ id: 13, title: "Quantum Episode" })]),
+    });
+    const user = userEvent.setup();
+    wrap(<ShowDetailView showId={5} />);
+    await screen.findByText("Catalog Ep");
+    await user.click(screen.getByText("Catalog Ep"));
+    expect(FakeAudio.last().src).toBe("https://h.example/ep.mp3");
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByText("Later Ep");
+    const search = screen.getByRole("searchbox", { name: "Search this show" });
+    await user.type(search, "quant");
+    await screen.findByText("Quantum Episode");
+    await user.click(screen.getByRole("button", { name: "Clear show search" }));
+    await screen.findByText("Catalog Ep");
+    fireEvent.submit(search.closest("form")!);
+    await user.click(screen.getByRole("button", { name: "Back to shows" }));
+    expect(window.location.hash).toBe("#/shows");
+    expect(calls.some((c) => c.key === "GET /api/shows/5")).toBe(true);
   });
 });

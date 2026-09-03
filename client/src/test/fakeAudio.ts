@@ -1,6 +1,7 @@
 /** Stand-in for HTMLAudioElement: jsdom provides the class but no playback. */
 export class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
+  static failNextPlay = false;
 
   src = "";
   currentTime = 0;
@@ -16,6 +17,7 @@ export class FakeAudio extends EventTarget {
 
   static reset(): void {
     FakeAudio.instances = [];
+    FakeAudio.failNextPlay = false;
   }
 
   static last(): FakeAudio {
@@ -25,6 +27,10 @@ export class FakeAudio extends EventTarget {
   }
 
   play(): Promise<void> {
+    if (FakeAudio.failNextPlay) {
+      FakeAudio.failNextPlay = false;
+      return Promise.reject(new Error("play failed"));
+    }
     this.paused = false;
     this.dispatchEvent(new Event("play"));
     return Promise.resolve();
