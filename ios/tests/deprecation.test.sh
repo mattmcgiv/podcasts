@@ -24,24 +24,39 @@ assert_contains "$ROOT/ios/DEPRECATED.md" "$DATE"
 assert_contains "$ROOT/ios/DEPRECATED.md" "Do not review"
 assert_contains "$ROOT/AGENTS.md" "deprecated as of $DATE"
 assert_contains "$ROOT/README.md" "Deprecated as of $DATE"
+assert_contains "$ROOT/README.md" "Active library/API"
 assert_contains "$ROOT/ios/README.md" "DEPRECATED as of $DATE"
+assert_contains "$ROOT/ios/README.md" "This directory is not the active backend"
+
+if grep -Fq 'Backend behavior for the app lives in `ios/Pods/`' "$ROOT/README.md"; then
+  fail "README.md still steers backend work at ios/Pods/"
+fi
+if grep -Fq 'The user-facing backend is the Swift backend inside the iOS app' "$ROOT/README.md"; then
+  fail "README.md still describes the Swift iOS shell as the active backend"
+fi
+if grep -Fq 'The old Rust backend has been removed' "$ROOT/ios/README.md"; then
+  fail "ios/README.md still claims the Rust backend was removed"
+fi
+
+ios_source_count=0
+ios_source_missing=0
+while IFS= read -r file; do
+  ios_source_count=$((ios_source_count + 1))
+  if ! grep -Fq -- "$MARKER" "$file"; then
+    echo "FAIL: $file does not contain: $MARKER" >&2
+    ios_source_missing=1
+  fi
+done <<EOF
+$(find "$ROOT/ios" -type f \( -name '*.swift' -o -name '*.sh' \) | sort)
+EOF
+[ "$ios_source_count" -ge 38 ] || fail "expected at least 38 iOS Swift/shell files, found $ios_source_count"
+[ "$ios_source_missing" -eq 0 ] || fail "one or more iOS Swift/shell files are missing the deprecation banner"
 
 for file in \
-  "$ROOT/ios/Pods/PodsApp.swift" \
-  "$ROOT/ios/Pods/PodsLocalServer.swift" \
-  "$ROOT/ios/Pods/PodsRustBackend.swift" \
-  "$ROOT/ios/Pods/PodsWebView.swift" \
   "$ROOT/backend/src/ffi.rs" \
   "$ROOT/backend/src/lib.rs" \
   "$ROOT/backend/include/pods_backend.h" \
   "$ROOT/backend/build-ios.sh" \
-  "$ROOT/ios/refresh-device.sh" \
-  "$ROOT/ios/install-refresh-agent.sh" \
-  "$ROOT/ios/refresh-if-due.sh" \
-  "$ROOT/ios/signing-alert.sh" \
-  "$ROOT/ios/update-signing-reminders.sh" \
-  "$ROOT/ios/check-xcode.sh" \
-  "$ROOT/ios/write-podcastindex-credentials.sh" \
   "$ROOT/ios/Pods.xcodeproj/project.pbxproj" \
   "$ROOT/ios/Pods/Info.plist" \
   "$ROOT/ios/dev.mcgiv.pods.refresh.plist.template"

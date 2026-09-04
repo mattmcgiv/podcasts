@@ -23,7 +23,8 @@ People-following / guest appearances exist in the codebase but stay off by defau
 | Path | Role |
 |------|------|
 | `client/` | React UI (runtime deps: `react` + `react-dom` only) |
-| `ios/` | **Deprecated 1 October 2026.** Private iPhone target, in-app backend shell, reinstall automation. See `ios/DEPRECATED.md`. |
+| `backend/` | Active library/API (`Backend::handle`). Implement backend changes here. |
+| `ios/` | **Deprecated 1 October 2026.** Frozen iPhone shell and signing/install tooling. See `ios/DEPRECATED.md`. |
 | `mac/` | Optional **Pods Speaker** menu-bar companion |
 | `docs/` | Design notes (for example ad removal) |
 | `dev/` | Isolated Apple `container` workflow for frontend tooling |
@@ -31,17 +32,21 @@ People-following / guest appearances exist in the codebase but stay off by defau
 
 ## Architecture
 
+The active library/API is the Rust crate in `backend/` (`Backend::handle`).
+New backend behavior belongs there, covered by `cargo test`.
+
+The iPhone app diagram below is **archived**. That shell is deprecated as of
+1 October 2026 and must not be extended. See `ios/DEPRECATED.md`.
+
 ```
-iPhone (Pods.app)
+iPhone (Pods.app) — deprecated 1 October 2026
 ├── WKWebView  →  bundled React client
-└── Swift backend  →  loopback HTTP on 127.0.0.1:18180
-    ├── SQLite library (Application Support)
-    ├── RSS refresh + Podcast Index search
-    ├── Audio / ad-removal pipeline
-    └── Cast control channel → Mac Pods Speaker (optional)
+└── Swift loopback shell  →  127.0.0.1:18180
+    └── Rust backend via FFI (`backend/src/ffi.rs`)
 ```
 
-The React client talks to the Swift backend through `window.PODS_API_BASE`. Backend behavior for the app lives in `ios/Pods/`, not in a remote server.
+The React client talks to a backend through `window.PODS_API_BASE`. Do not
+add library/API behavior in `ios/Pods/`.
 
 ## Renaming the app
 
@@ -57,7 +62,9 @@ dev/sh.sh        # shell into it
 dev/check.sh     # frontend test + coverage gate (≥90% lines, statements, functions)
 ```
 
-The Vite dev server publishes to http://127.0.0.1:5173. The user-facing backend is the Swift backend inside the iOS app.
+The Vite dev server publishes to http://127.0.0.1:5173. The user-facing
+library/API backend is the Rust crate in `backend/`. The iPhone Swift shell
+that can serve it on loopback is deprecated; do not extend it.
 
 ### Troubleshooting the container runtime
 

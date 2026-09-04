@@ -132,9 +132,16 @@ Do not uninstall the app during this test. Uninstalling removes the app containe
 
 ## Backend Status
 
-The iOS app runs a native Swift backend inside the app process. It opens the reinstall-safe SQLite database in Application Support, listens on `127.0.0.1:18180`, and serves the same no-auth `/api` contract used by the React client. The bundled web app points at that loopback backend through `window.PODS_API_BASE`.
+**Archived.** This directory is not the active backend. The Swift
+`PodsBackend` implementation has been replaced; do not look for
+`ios/Pods/PodsBackend.swift` and do not append library/API behavior here.
 
-The old Rust backend has been removed. Backend behavior for the app belongs in `ios/Pods/PodsBackend.swift` and adjacent Swift files.
+The still-present iPhone app hosts a loopback HTTP server
+(`PodsLocalServer`) that calls the Rust crate in [`backend/`](../backend/)
+through `RustBackend` and `backend/src/ffi.rs`. Implement backend changes in
+`backend/` (`Backend::handle`) and cover them with `cargo test`.
+
+See [`DEPRECATED.md`](./DEPRECATED.md).
 
 ## Feed refresh
 
