@@ -1,5 +1,10 @@
+// DEPRECATED as of 1 October 2026. Do not review, extend, or append to this file.
+// See ios/DEPRECATED.md.
+
 import Foundation
 import Network
+
+#warning("The iPhone in-app backend (PodsLocalServer) is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 
 private actor PodsLocalServerEnsureGate {
     private var current: Task<Bool, Error>?
@@ -38,6 +43,7 @@ private enum PodsLocalServerLifecycleError: LocalizedError {
     }
 }
 
+@available(*, deprecated, message: "The iPhone in-app backend is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 final class PodsLocalServer {
     enum RequestParseResult {
         case incomplete

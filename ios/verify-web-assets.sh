@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Refuse to package an iOS app whose generated React bundle is absent or incomplete.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WEB_DIR="${WEB_ASSETS_DIR:-$ROOT/ios/Pods/Web}"

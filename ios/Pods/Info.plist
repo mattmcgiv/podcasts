@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- DEPRECATED as of 1 October 2026. Do not extend the iPhone app. See ios/DEPRECATED.md. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>

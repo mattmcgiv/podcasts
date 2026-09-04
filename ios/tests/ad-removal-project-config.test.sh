@@ -1,5 +1,8 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 project="$repo_root/ios/Pods.xcodeproj/project.pbxproj"

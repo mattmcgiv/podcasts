@@ -1,4 +1,5 @@
 // !$*UTF8*$!
+// DEPRECATED as of 1 October 2026. Do not extend this iPhone Xcode project. See ios/DEPRECATED.md.
 {
 	archiveVersion = 1;
 	classes = {

@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Keep two iCloud-synced safety reminders aligned with the verified profile.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 PROFILE_UUID="${1:-}"
 PROFILE_EXPIRATION_EPOCH="${2:-}"

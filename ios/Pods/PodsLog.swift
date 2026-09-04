@@ -1,3 +1,6 @@
+// DEPRECATED as of 1 October 2026. Do not review, extend, or append to this file.
+// See ios/DEPRECATED.md.
+
 import Foundation
 import OSLog
 
