@@ -34,4 +34,9 @@ mod ffi_unused {
     // FFI is compiled in the library via optional module below.
 }
 
+// DEPRECATED as of 1 October 2026. iPhone FFI only. Do not extend. See ios/DEPRECATED.md.
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
 pub mod ffi;

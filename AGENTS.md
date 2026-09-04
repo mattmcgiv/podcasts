@@ -9,7 +9,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 3. Git runs on the host only. The guest holds no GitHub/SSH credentials.
 4. `node_modules/` lives in a guest-only volume — untrusted packages never land on host disk.
 5. npm runs with `ignore-scripts=true` and `save-exact=true` (enforced by `client/.npmrc`). Lockfiles are committed.
-6. Podcast Index credentials stay in the host-only credential store: `~/.config/podcasts/credentials.env`. Xcode injects them into the signed iOS app bundle at build time.
+6. Podcast Index credentials stay in the host-only credential store: `~/.config/podcasts/credentials.env`. The deprecated iPhone Xcode build still injects them into the signed app bundle at build time.
 
 ## Dev workflow
 
@@ -20,10 +20,10 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 
 ## Default app/runtime
 
-- The iPhone app is the default app now.
-- The library/API backend is the Rust crate in `backend/` (`PodsBackend.handle` equivalent: `Backend::handle`). The iPhone shell serves it on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `PodsRustBackend`.
-- The bundled React app points at that backend through `window.PODS_API_BASE` in `ios/Pods/PodsWebView.swift`.
-- For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.
+- The library/API backend is the Rust crate in `backend/` (`Backend::handle`). For user-facing library/API behavior, implement changes there and cover them with `cargo test`.
+- The iPhone client app (Swift), the in-app iPhone "backend" (loopback server + Rust FFI shell), and all iPhone signing/install tooling are **deprecated as of 1 October 2026**. Do not review, extend, or append to `ios/`, `backend/src/ffi.rs`, `backend/include/pods_backend.h`, or `backend/build-ios.sh`. See `ios/DEPRECATED.md`. The code is kept until removal.
+- The still-present iPhone shell serves the Rust backend on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `RustBackend`.
+- The bundled React app can point at that loopback backend through `window.PODS_API_BASE` in `ios/Pods/PodsWebView.swift`.
 - There is no active Hetzner remote dev host for this project.
 
 ## Product rules

@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Decode the identity and lifetime of an Apple provisioning profile.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 PROFILE_PATH="${1:-}"
 SECURITY_BIN="${IOS_SECURITY_BIN:-/usr/bin/security}"

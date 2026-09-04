@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Emit each Pods signing warning once per provisioning profile and severity.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 LEVEL="${1:-}"
 PROFILE_UUID="${2:-}"

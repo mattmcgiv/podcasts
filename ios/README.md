@@ -1,5 +1,10 @@
 # Pods iOS
 
+> **DEPRECATED as of 1 October 2026.** Do not review, extend, or append to
+> this directory. The iPhone client, in-app backend shell, and
+> signing/install tooling are frozen until removal. See
+> [`DEPRECATED.md`](./DEPRECATED.md).
+
 This directory contains the private iPhone app target and the refresh automation for a free Xcode Personal Team install.
 
 ## Play on Mac (Pods Speaker)

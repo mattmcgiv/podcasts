@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Verify the host has the Xcode pieces needed for iPhone install/refresh.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 fail() {
   echo "error: $*" >&2

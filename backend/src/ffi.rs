@@ -1,3 +1,7 @@
+//! DEPRECATED as of 1 October 2026. iPhone FFI embedding. Do not review, extend, or append.
+//! See ios/DEPRECATED.md.
+//! iPhone-only C ABI used by the deprecated Swift shell. Do not extend.
+
 use crate::backend::Backend;
 use crate::db::Database;
 use crate::directory::PodcastIndexClient;
@@ -9,10 +13,23 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::Arc;
 
+/// Deprecated as of 1 October 2026. Do not extend the iPhone FFI.
+#[allow(dead_code)]
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
+pub const IPHONE_FFI_DEPRECATION_DATE: &str = "1 October 2026";
+
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
 pub struct Handle {
     backend: Arc<Backend>,
 }
 
+#[allow(deprecated)]
 fn open_backend(path: PathBuf) -> Option<Handle> {
     let db = Database::open(&path).ok()?;
     let data_root = path.parent().map(|p| p.join("AdRemovalData"));
@@ -23,6 +40,10 @@ fn open_backend(path: PathBuf) -> Option<Handle> {
     Some(Handle { backend })
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
 #[no_mangle]
 pub extern "C" fn pods_backend_prepare(live_path: *const c_char, seed_path: *const c_char) -> c_int {
     if live_path.is_null() {
@@ -40,6 +61,11 @@ pub extern "C" fn pods_backend_prepare(live_path: *const c_char, seed_path: *con
     }
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
+#[allow(deprecated)]
 #[no_mangle]
 pub extern "C" fn pods_backend_open(path: *const c_char) -> *mut Handle {
     if path.is_null() {
@@ -52,6 +78,11 @@ pub extern "C" fn pods_backend_open(path: *const c_char) -> *mut Handle {
     }
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
+#[allow(deprecated)]
 #[no_mangle]
 pub extern "C" fn pods_backend_configure(handle: *mut Handle, json: *const c_char) -> c_int {
     if handle.is_null() || json.is_null() {
@@ -77,6 +108,11 @@ pub extern "C" fn pods_backend_configure(handle: *mut Handle, json: *const c_cha
     0
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
+#[allow(deprecated)]
 #[no_mangle]
 pub extern "C" fn pods_backend_close(handle: *mut Handle) {
     if !handle.is_null() {
@@ -87,6 +123,11 @@ pub extern "C" fn pods_backend_close(handle: *mut Handle) {
     }
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
+#[allow(deprecated)]
 #[no_mangle]
 pub extern "C" fn pods_backend_handle(
     handle: *mut Handle,
@@ -134,6 +175,10 @@ pub extern "C" fn pods_backend_handle(
     ptr
 }
 
+#[deprecated(
+    since = "2026-10-01",
+    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
+)]
 #[no_mangle]
 pub extern "C" fn pods_backend_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() {

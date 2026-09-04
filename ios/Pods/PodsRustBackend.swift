@@ -1,4 +1,9 @@
+// DEPRECATED as of 1 October 2026. Do not review, extend, or append to this file.
+// See ios/DEPRECATED.md.
+
 import Foundation
+
+#warning("The iPhone Rust FFI backend shell is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 
 @_silgen_name("pods_backend_prepare")
 private func pods_backend_prepare(_ live: UnsafePointer<CChar>, _ seed: UnsafePointer<CChar>?) -> Int32
@@ -27,11 +32,13 @@ private func pods_backend_handle(
 @_silgen_name("pods_backend_free")
 private func pods_backend_free(_ ptr: UnsafeMutablePointer<UInt8>?, _ len: Int)
 
+@available(*, deprecated, message: "The iPhone Rust FFI backend shell is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 enum RustBackendError: Error {
     case openFailed
     case prepareFailed
 }
 
+@available(*, deprecated, message: "The iPhone Rust FFI backend shell is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 final class RustBackend: PodsRequestHandling, PlaybackProgressRecording {
     private let handle: OpaquePointer
 

@@ -1,6 +1,11 @@
+// DEPRECATED as of 1 October 2026. Do not review, extend, or append to this file.
+// See ios/DEPRECATED.md.
+
 import BackgroundTasks
 import SwiftUI
 import UIKit
+
+#warning("The Pods iPhone app is deprecated as of 1 October 2026. Do not extend this target. See ios/DEPRECATED.md.")
 
 private enum PodsAppRuntimeError: LocalizedError {
     case localServerUnavailable(String?)
@@ -18,6 +23,7 @@ private enum PodsAppRuntimeError: LocalizedError {
 }
 
 @main
+@available(*, deprecated, message: "The Pods iPhone app is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 struct PodsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -29,6 +35,7 @@ struct PodsApp: App {
     }
 }
 
+@available(*, deprecated, message: "The Pods iPhone app is deprecated as of 1 October 2026. Do not extend this code. See ios/DEPRECATED.md.")
 final class AppDelegate: NSObject, UIApplicationDelegate {
     private static let refreshTaskIdentifier = "dev.mcgiv.pods.feed-refresh"
     private var localServer: PodsLocalServer?

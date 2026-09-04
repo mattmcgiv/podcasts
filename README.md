@@ -23,7 +23,7 @@ People-following / guest appearances exist in the codebase but stay off by defau
 | Path | Role |
 |------|------|
 | `client/` | React UI (runtime deps: `react` + `react-dom` only) |
-| `ios/` | Private iPhone target, Swift backend, local server, reinstall automation |
+| `ios/` | **Deprecated 1 October 2026.** Private iPhone target, in-app backend shell, reinstall automation. See `ios/DEPRECATED.md`. |
 | `mac/` | Optional **Pods Speaker** menu-bar companion |
 | `docs/` | Design notes (for example ad removal) |
 | `dev/` | Isolated Apple `container` workflow for frontend tooling |
@@ -103,6 +103,11 @@ Ad removal is off by default. In Settings:
 Details, storage rules, and acceptance criteria: `docs/ad-removal-design.md` and `docs/ad-removal-v1-acceptance.md`.
 
 ## iOS app
+
+**Deprecated as of 1 October 2026.** Do not review, extend, or append to
+`ios/` or the iPhone FFI/build glue (`backend/src/ffi.rs`,
+`backend/include/pods_backend.h`, `backend/build-ios.sh`). The code is
+kept until removal. See `ios/DEPRECATED.md`.
 
 The private iPhone target lives under `ios/`.
 

@@ -1,6 +1,9 @@
 #!/bin/sh
+# DEPRECATED as of 1 October 2026. Do not review, extend, or append to this script.
+# See ios/DEPRECATED.md.
 # Write Podcast Index credentials into the built app bundle without committing secrets.
 set -eu
+echo "warning: deprecated as of 1 October 2026; do not extend this iPhone app/signing/install tooling. See ios/DEPRECATED.md." >&2
 
 OUT="${1:?output plist path is required}"
 CREDENTIALS_FILE="${PODCASTS_CREDENTIALS_ENV:-$HOME/.config/podcasts/credentials.env}"
