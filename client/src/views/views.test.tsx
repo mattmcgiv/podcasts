@@ -197,6 +197,20 @@ describe("RecentView", () => {
     expect(screen.getByText(/Nothing new/).textContent).not.toMatch(/refresh button/i);
   });
 
+  it("shows a preparing count when Listen is empty and ad-free is required", async () => {
+    installApi({
+      ...settings,
+      "GET /api/ad-removal/settings": adRemovalSettings({
+        enabled: true,
+        listen_requires_ready: true,
+        preparing_count: 3,
+      }),
+      "GET /api/recent": page([]),
+    });
+    wrap(<RecentView />);
+    expect(await screen.findByText("Nothing ready yet. Preparing 3 episodes.")).toBeInTheDocument();
+  });
+
   it("toggles Listen episode sort by release date", async () => {
     installApi({
       ...settings,
@@ -1833,5 +1847,31 @@ describe("ShowDetailView", () => {
     await user.click(screen.getByRole("button", { name: "Back to shows" }));
     expect(window.location.hash).toBe("#/shows");
     expect(calls.some((c) => c.key === "GET /api/shows/5")).toBe(true);
+  });
+
+  it("disables Play on a preparing Show-detail row when ad-free is required", async () => {
+    installApi({
+      ...settings,
+      "GET /api/ad-removal/settings": adRemovalSettings({
+        enabled: true,
+        listen_requires_ready: true,
+      }),
+      "GET /api/shows/5": {
+        show: show(),
+        episodes: page([
+          episode({
+            id: 11,
+            title: "Catalog Ep",
+            ad_removal_state: "preparing",
+            ad_removal_stage: "transcribing",
+            ad_removal_action: null,
+          }),
+        ]),
+      },
+    });
+    wrap(<ShowDetailView showId={5} />);
+    const play = (await screen.findByText("Catalog Ep")).closest("button");
+    await waitFor(() => expect(play).toBeDisabled());
+    expect(FakeAudio.last().src).toBe("");
   });
 });

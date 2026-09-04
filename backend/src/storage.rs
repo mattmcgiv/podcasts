@@ -1,7 +1,8 @@
 use crate::jobs::valid_artifact_path;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
@@ -50,6 +51,33 @@ impl ArtifactStore {
 
     pub fn url(&self, relative_path: &str) -> PathBuf {
         self.root.join(relative_path)
+    }
+
+    pub fn prepare_dest(&self, relative_path: &str) -> std::io::Result<PathBuf> {
+        if !valid_artifact_path(relative_path) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "untrusted path"));
+        }
+        let dest = self.root.join(relative_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(dest)
+    }
+
+    pub fn hash_file(path: &Path) -> std::io::Result<(String, i64)> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        let mut total = 0i64;
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as i64;
+        }
+        Ok((hex::encode(hasher.finalize()), total))
     }
 
     pub fn write_resume(&self, job_id: &str, bytes: &[u8]) -> std::io::Result<String> {

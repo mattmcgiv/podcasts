@@ -6,6 +6,8 @@ pub enum Error {
     Invalid(String),
     #[error("{0}")]
     Forbidden(String),
+    #[error("{0}")]
+    Unauthorized(String),
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -20,6 +22,7 @@ impl Error {
     pub fn status_code(&self) -> u16 {
         match self {
             Error::Forbidden(_) => 403,
+            Error::Unauthorized(_) => 401,
             Error::Invalid(_) => 422,
             Error::NotFound => 404,
             Error::Conflict(_) => 409,

@@ -40,7 +40,7 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
   }
   let res: Response;
   try {
-    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, headers });
+    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, headers, credentials: "include" });
   } catch (error) {
     console.warn(
       `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
@@ -48,6 +48,9 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
     throw error;
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      window.dispatchEvent(new Event("pods-auth-required"));
+    }
     let message = res.statusText || `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as { error?: string };
@@ -67,7 +70,7 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
   const target = `/api${path}`;
   let res: Response;
   try {
-    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, init);
+    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, credentials: "include" });
   } catch (error) {
     console.warn(
       `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
@@ -75,6 +78,9 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
     throw error;
   }
   if (!res.ok) {
+    if (res.status === 401) {
+      window.dispatchEvent(new Event("pods-auth-required"));
+    }
     let message = res.statusText || `HTTP ${res.status}`;
     try {
       const body = (await res.json()) as { error?: string };
@@ -88,7 +94,31 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
   return res.blob();
 }
 
+export type AuthStatus = { enrolled: boolean; session: boolean };
+
 export const Api = {
+  authStatus: () => request<AuthStatus>("/auth/status"),
+  registerOptions: (token: string) =>
+    request<{ state_id: string; publicKey: unknown }>(
+      "/auth/register/options",
+      { method: "POST", body: JSON.stringify({ token }) },
+    ),
+  register: (stateId: string, credential: unknown) =>
+    request<AuthStatus>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ state_id: stateId, credential }),
+    }),
+  loginOptions: () =>
+    request<{ state_id: string; publicKey: unknown }>(
+      "/auth/login/options",
+      { method: "POST", body: "{}" },
+    ),
+  login: (stateId: string, credential: unknown) =>
+    request<AuthStatus>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ state_id: stateId, credential }),
+    }),
+  logout: () => request<void>("/auth/logout", { method: "POST" }),
   recent: (offset = 0) => request<Page<EpisodeItem>>(`/recent?offset=${offset}`),
   played: (offset = 0) => request<Page<EpisodeItem>>(`/played?offset=${offset}`),
   shows: () => request<Show[]>("/shows"),

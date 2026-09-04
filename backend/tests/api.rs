@@ -430,6 +430,51 @@ fn test_native_playback_progress_recording_updates_episode_position() {
 }
 
 #[test]
+fn test_listen_hides_unready_episodes_when_ad_removal_is_enabled() {
+    let h = harness();
+    let feed_url = "https://feeds.example/listen-gate.xml";
+    h.fetcher.set(
+        feed_url,
+        rss(
+            "Gate",
+            &[
+                ("Old", "g-old", "https://h.example/old.mp3", D1),
+                ("New", "g-new", "https://h.example/new.mp3", D2),
+            ],
+        ),
+    );
+    assert_eq!(call(&h.backend, "POST", "/api/shows", Some(json!({"feed_url": feed_url}))).status_code, 201);
+    let before: Page<EpisodeItem> = decode(&call(&h.backend, "GET", "/api/recent", None));
+    assert_eq!(before.items.len(), 2);
+    assert_eq!(call(&h.backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0}))).status_code, 202);
+    let hidden: Page<EpisodeItem> = decode(&call(&h.backend, "GET", "/api/recent", None));
+    assert!(hidden.items.is_empty());
+    let settings: AdRemovalSettingsPayload = decode(&call(&h.backend, "GET", "/api/ad-removal/settings", None));
+    assert!(settings.listen_requires_ready);
+    let new_id = before.items.iter().find(|e| e.title == "New").unwrap().id;
+    h.backend
+        .db
+        .execute(
+            &format!(
+                "INSERT INTO ad_removal_jobs (id, episode_id, podcast_id, stage, attempt_count, enrolled_at, updated_at)
+                 SELECT 'ready-job', id, podcast_id, 'ready', 0, 1, 1 FROM episodes WHERE id = {new_id}"
+            ),
+            [],
+        )
+        .unwrap();
+    let ready: Page<EpisodeItem> = decode(&call(&h.backend, "GET", "/api/recent", None));
+    assert_eq!(ready.items.len(), 1);
+    assert_eq!(ready.items[0].id, new_id);
+    let next: Option<EpisodeItem> = decode(&call(
+        &h.backend,
+        "GET",
+        &format!("/api/next?after={new_id}&context=recent"),
+        None,
+    ));
+    assert!(next.is_none());
+}
+
+#[test]
 fn test_ad_removal_enable_consent_cutoff_and_new_episode_enrollment() {
     let h = harness();
     let enable = call(&h.backend, "POST", "/api/ad-removal/enable", Some(json!({"confirmed_bytes": 0})));

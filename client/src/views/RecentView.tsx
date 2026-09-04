@@ -399,7 +399,11 @@ export function RecentView() {
       {list.items == null && !list.error && <p className="muted">Loading…</p>}
       {list.items != null && list.items.length === 0 && (
         <div className="empty listen-empty-state">
-          <p>Nothing new. Subscribe to podcasts in the Search tab, or check your feeds now.</p>
+          <p>
+            {adSettings?.listen_requires_ready && (adSettings.preparing_count ?? 0) > 0
+              ? `Nothing ready yet. Preparing ${adSettings.preparing_count} episode${adSettings.preparing_count === 1 ? "" : "s"}.`
+              : "Nothing new. Subscribe to podcasts in the Search tab, or check your feeds now."}
+          </p>
           <button
             className={`primary-action refresh-action${checkingForEpisodes ? " is-refreshing" : ""}`}
             onClick={checkForNewEpisodes}

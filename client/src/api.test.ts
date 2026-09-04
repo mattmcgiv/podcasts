@@ -13,6 +13,7 @@ describe("request wrapper", () => {
     expect(res.items[0].title).toBe("Test Episode");
     const headers = new Headers(calls[0].init.headers);
     expect(headers.has("authorization")).toBe(false);
+    expect(calls[0].init.credentials).toBe("include");
   });
 
   it("uses the native API base when provided", async () => {

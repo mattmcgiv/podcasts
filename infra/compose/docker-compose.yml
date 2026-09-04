@@ -1,0 +1,48 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - /var/www/pods:/srv/pods:ro
+    depends_on:
+      - api
+
+  api:
+    image: pods-api:local
+    restart: unless-stopped
+    env_file:
+      - /etc/pods/secrets.env
+    environment:
+      PODS_BIND: "0.0.0.0:18180"
+      PODS_RESET_KEY_FILE: /etc/pods/reset.key
+      PODS_TRANSCRIBER: parakeet
+      PODS_PARAKEET_URL: "http://transcribe:18181/transcribe"
+    ports:
+      - "127.0.0.1:18180:18180"
+    volumes:
+      - /var/lib/pods/data:/data
+      - /etc/pods/reset.key:/etc/pods/reset.key:ro
+    command: ["/data/pods.sqlite"]
+    depends_on:
+      - transcribe
+
+  transcribe:
+    image: pods-transcribe:local
+    restart: unless-stopped
+    mem_limit: 1250m
+    environment:
+      PODS_BIND: "0.0.0.0:18181"
+      PODS_PARAKEET_BIN: parakeet-cli
+      PODS_PARAKEET_MODEL: /models/tdt_ctc-110m-q8_0.gguf
+    volumes:
+      - /var/lib/pods/data:/data
+      - /var/lib/pods/models:/models:ro
+
+volumes:
+  caddy_data:

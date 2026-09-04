@@ -163,6 +163,13 @@ pub struct AdRemovalSettingsPayload {
     pub device_available_bytes: i64,
     pub corrections: Vec<AdRemovalCorrectionCountPayload>,
     pub deepseek_usage: DeepSeekUsageMetricsPayload,
+    #[serde(default)]
+    pub preparing_count: i64,
+    #[serde(default)]
+    pub failed_count: i64,
+    /// When true, Listen hides non-ready episodes and Play requires `ad-free`.
+    #[serde(default)]
+    pub listen_requires_ready: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

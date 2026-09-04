@@ -286,3 +286,30 @@ CREATE TABLE IF NOT EXISTS podcasts (
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(title, notes);
+
+    CREATE TABLE IF NOT EXISTS passkey_credentials (
+        credential_id TEXT PRIMARY KEY,
+        user_handle TEXT NOT NULL,
+        public_key_json TEXT NOT NULL,
+        counter INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_enroll_tokens (
+        token_hash TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_webauthn_state (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+    );

@@ -17,6 +17,8 @@ interface Props {
    * returned stage, so the owning view can merge it into row state immediately
    * and invalidate any in-flight batch status poll. */
   onAdRemovalStage?: (id: number, stage: AdRemovalStage) => void;
+  /** When true, Play is disabled until the episode is ad-free. */
+  playRequiresAdFree?: boolean;
 }
 
 /** Small optimistic overlay derived from a returned prepare/retry stage. Used
@@ -52,6 +54,7 @@ export function EpisodeRow({
   actionIcon = "check",
   showPodcast = true,
   onAdRemovalStage,
+  playRequiresAdFree = false,
 }: Props) {
   const progress = progressFraction(item);
   const [adBusy, setAdBusy] = useState(false);
@@ -76,6 +79,7 @@ export function EpisodeRow({
   const effectiveStage = localAd ? localAd.stage : item.ad_removal_stage;
   const effectiveBlocking = localAd ? localAd.blocking : item.ad_removal_blocking_reason;
   const effectiveAction = localAd ? localAd.action : item.ad_removal_action;
+  const playLocked = playRequiresAdFree && effectiveState !== "ad-free";
   const adWindowProgress =
     effectiveStage === "classifying" &&
     item.ad_removal_total_windows != null &&
@@ -115,8 +119,16 @@ export function EpisodeRow({
   }
 
   return (
-    <li className={`episode-row${item.played_at ? " is-played" : ""}`}>
-      <button className="row-main" onClick={() => onPlay(item)}>
+    <li className={`episode-row${item.played_at ? " is-played" : ""}${playLocked ? " is-play-locked" : ""}`}>
+      <button
+        className="row-main"
+        disabled={playLocked}
+        title={playLocked ? "Waiting for ad removal" : undefined}
+        onClick={() => {
+          if (playLocked) return;
+          onPlay(item);
+        }}
+      >
         <Artwork src={item.image_url || item.podcast_image} size={56} />
         <span className="row-text">
           <span className="row-title episode-title-full">{item.title}</span>

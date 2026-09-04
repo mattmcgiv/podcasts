@@ -257,6 +257,24 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       </header>
 
       <div className="settings-body">
+        {!window.PODS_API_BASE && (
+          <section className="settings-section" aria-labelledby="account-title">
+            <h2 className="section-title" id="account-title">Account</h2>
+            <p className="settings-detail">Sign out on this browser. Your passkey stays in 1Password.</p>
+            <button
+              type="button"
+              className="ghost-btn"
+              onClick={() => {
+                void Api.logout().finally(() => {
+                  window.dispatchEvent(new Event("pods-auth-required"));
+                  window.location.reload();
+                });
+              }}
+            >
+              Sign out
+            </button>
+          </section>
+        )}
         <section className="settings-section settings-appearance" aria-labelledby="appearance-title">
           <h2 className="section-title" id="appearance-title">Appearance</h2>
           <p className="settings-detail">Choose how Pods looks on this iPhone.</p>

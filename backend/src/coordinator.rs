@@ -25,6 +25,7 @@ pub struct Coordinator<'a> {
     store: &'a JobStore<'a>,
     busy: Mutex<bool>,
     enabled: Box<dyn Fn() -> bool + Send + Sync + 'a>,
+    skip_daily_limit: bool,
 }
 
 impl<'a> Coordinator<'a> {
@@ -33,6 +34,7 @@ impl<'a> Coordinator<'a> {
             store,
             busy: Mutex::new(false),
             enabled: Box::new(|| true),
+            skip_daily_limit: false,
         }
     }
 
@@ -44,7 +46,13 @@ impl<'a> Coordinator<'a> {
             store,
             busy: Mutex::new(false),
             enabled: Box::new(enabled),
+            skip_daily_limit: false,
         }
+    }
+
+    pub fn skip_daily_limit(mut self, skip: bool) -> Self {
+        self.skip_daily_limit = skip;
+        self
     }
 
     pub fn run_next_stage<F>(&self, mut execute: F) -> Result<Option<Job>, JobStoreError>
@@ -83,7 +91,10 @@ impl<'a> Coordinator<'a> {
         if job.stage == JobStage::Queued || job.stage == JobStage::Downloaded {
             job = self.store.transition(&job.id, executing)?;
         }
-        if executing == JobStage::Classifying && !self.store.reserve_daily_classification_slot(job.episode_id, 20)? {
+        if executing == JobStage::Classifying
+            && !self.skip_daily_limit
+            && !self.store.reserve_daily_classification_slot(job.episode_id, 20)?
+        {
             return Ok(Some(self.store.set_blocking_reason(&job.id, Some(crate::jobs::BlockingReason::DailyLimit))?));
         }
         match execute(executing, &job) {

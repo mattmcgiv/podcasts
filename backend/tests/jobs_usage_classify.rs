@@ -111,6 +111,47 @@ fn test_failures_retry_four_times_with_stable_metadata_and_resume_failed_stage()
 }
 
 #[test]
+fn test_unbounded_retry_never_marks_listen_jobs_failed() {
+    let db = Database::open_in_memory().unwrap();
+    let id = seed_episode(&db);
+    let store = JobStore::with_now(&db, || 1_000).with_unbounded_retry(true);
+    let queued = store.enqueue(id).unwrap();
+    let downloading = store.transition(&queued.id, JobStage::Downloading).unwrap();
+    let mut job = downloading;
+    for _ in 0..8 {
+        job = store.record_failure(&job.id, "net", "boom").unwrap();
+        assert_eq!(job.stage, JobStage::Downloading);
+        assert!(job.retry_eligible);
+        assert!(job.next_retry_at.is_some());
+    }
+}
+
+#[test]
+fn test_reset_notes_transcript_jobs_clears_fake_ready_state() {
+    let db = Database::open_in_memory().unwrap();
+    let id = seed_episode(&db);
+    let store = JobStore::with_now(&db, || 1_000);
+    let queued = store.enqueue(id).unwrap();
+    db.execute(
+        "UPDATE ad_removal_jobs SET stage = 'ready', transcriber_version = 'notes-transcriber-v1' WHERE id = ?",
+        rusqlite::params![queued.id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO ad_transcript_segments (episode_id, segment_id, segment_index, language, start_time, end_time, text) VALUES (?, 's', 0, 'en', 0, 1, 'hi')",
+        rusqlite::params![id],
+    )
+    .unwrap();
+    let n = store.reset_notes_transcript_jobs().unwrap();
+    assert_eq!(n, 1);
+    let job = store.job(&queued.id).unwrap().unwrap();
+    assert_eq!(job.stage, JobStage::Queued);
+    assert!(job.transcriber_version.is_none());
+    let count = db.scalar_i64("SELECT COUNT(*) FROM ad_transcript_segments", []).unwrap().unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
 fn test_parse_usage_reads_deepseek_token_fields() {
     let value = serde_json::json!({"usage":{"prompt_tokens":10,"completion_tokens":4,"prompt_cache_hit_tokens":2}});
     let tokens = parse_usage(&value).unwrap();

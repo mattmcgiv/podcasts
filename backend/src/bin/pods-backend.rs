@@ -11,12 +11,15 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("pods.sqlite"));
     let db = Database::open(&db_path).expect("open database");
     let data_root = db_path.parent().map(|p| p.join("AdRemovalData"));
-    let backend = Arc::new(Backend::with_data_root(
+    let mut backend = Backend::with_data_root(
         db,
         Arc::new(UreqFetcher::default()),
         configured_directory(),
         data_root,
-    ));
+    );
+    backend.set_pipeline_config(pods_backend::pipeline::PipelineConfig::from_env());
+    let backend = Arc::new(backend);
+    pods_backend::auth::configure_from_env(&backend.auth).expect("configure auth");
     backend.start_runtime();
     let addr = std::env::var("PODS_BIND").unwrap_or_else(|_| "127.0.0.1:18180".into());
     eprintln!("pods-backend listening on http://{addr}");

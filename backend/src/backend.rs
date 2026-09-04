@@ -1,3 +1,4 @@
+use crate::auth::{self, Auth};
 use crate::db::{self, Database};
 use crate::diagnostics::Diagnostics;
 use crate::error::Error;
@@ -5,7 +6,10 @@ use crate::feeds::{self, FeedFetchResponse, FeedFetcher, FeedValidators, ParsedF
 use crate::http::{HttpRequest, HttpResponse};
 use crate::jobs::{JobStage, JobStore};
 use crate::models::*;
-use crate::pipeline::{self, AudioDownloader, CloudClassifier, NotesTranscriber, Transcriber, UreqDownloader};
+use crate::pipeline::{
+    self, AudioDownloader, CloudClassifier, NotesTranscriber, PipelineConfig, Transcriber, TranscriberKind,
+    UreqDownloader,
+};
 use crate::show_notes::ShowNotesService;
 use crate::storage::ArtifactStore;
 use crate::usage::UsageStore;
@@ -119,6 +123,10 @@ pub struct Backend {
     refreshing: Mutex<bool>,
     runtime_stop: Arc<AtomicBool>,
     runtime: Mutex<Option<JoinHandle<()>>>,
+    refresh_runtime: Mutex<Option<JoinHandle<()>>>,
+    pub pipeline: PipelineConfig,
+    pub auth: Auth,
+    trusted_origins: Vec<String>,
 }
 
 impl Backend {
@@ -160,9 +168,23 @@ impl Backend {
             refreshing: Mutex::new(false),
             runtime_stop: Arc::new(AtomicBool::new(false)),
             runtime: Mutex::new(None),
+            refresh_runtime: Mutex::new(None),
+            pipeline: PipelineConfig::default(),
+            auth: Auth::default(),
+            trusted_origins: auth::trusted_origins_from_env(),
         };
         let _ = backend.recover_interrupted_state();
         backend
+    }
+
+    pub fn set_pipeline_config(&mut self, config: PipelineConfig) {
+        self.pipeline = config;
+        if self.pipeline.transcriber == TranscriberKind::Parakeet {
+            if let Some(url) = self.pipeline.parakeet_url.clone() {
+                self.set_transcriber(Arc::new(pipeline::ParakeetTranscriber { endpoint: url }));
+            }
+            let _ = JobStore::new(&self.db).reset_notes_transcript_jobs();
+        }
     }
 
     pub fn set_credentials(&mut self, store: CredentialStore) {
@@ -211,6 +233,31 @@ impl Backend {
         Ok(())
     }
 
+    fn ad_removal_enabled(&self) -> bool {
+        self.setting("ad_removal_enabled").as_deref() == Some("true")
+    }
+
+    fn listen_ready_sql(&self) -> &'static str {
+        if self.ad_removal_enabled() {
+            "AND j.stage = 'ready'"
+        } else {
+            ""
+        }
+    }
+
+    fn playback_active(&self) -> bool {
+        let now = db::now_unix();
+        let last = self
+            .db
+            .scalar_i64(
+                "SELECT MAX(updated_at) FROM episode_state WHERE position_secs IS NOT NULL AND position_secs > 0",
+                [],
+            )
+            .ok()
+            .flatten();
+        last.map(|ts| now.saturating_sub(ts) <= 15).unwrap_or(false)
+    }
+
     fn recover_refresh_attempts(&self) -> Result<(), Error> {
         let now = db::now_unix();
         self.db.execute(
@@ -241,10 +288,25 @@ impl Backend {
     }
 
     pub fn handle(&self, request: HttpRequest) -> HttpResponse {
-        match self.route(&request) {
+        match self.dispatch(&request) {
             Ok(response) => response,
             Err(err) => HttpResponse::error(err),
         }
+    }
+
+    fn dispatch(&self, request: &HttpRequest) -> Result<HttpResponse, Error> {
+        auth::require_session(&self.auth, &self.db, request)?;
+        if let Some(response) = auth::handle_auth(&self.auth, &self.db, request)? {
+            return Ok(response);
+        }
+        self.route(request)
+    }
+
+    fn origin_allowed(&self, request: &HttpRequest) -> bool {
+        request
+            .header("origin")
+            .map(|origin| self.trusted_origins.iter().any(|item| item == origin))
+            .unwrap_or(false)
     }
 
     fn route(&self, request: &HttpRequest) -> Result<HttpResponse, Error> {
@@ -335,7 +397,7 @@ impl Backend {
             return Ok(HttpResponse::json(self.episode_detail(id)?, 200));
         }
         if parts.len() == 4 && parts[0] == "api" && parts[1] == "episodes" && parts[3] == "show-notes" {
-            if request.header("origin") != Some("http://127.0.0.1:18180") {
+            if !self.origin_allowed(request) {
                 return Err(Error::Forbidden("untrusted request origin".into()));
             }
             if method == "OPTIONS" {
@@ -527,9 +589,10 @@ impl Backend {
 
     fn recent(&self, offset: i64) -> Result<Page<EpisodeItem>, Error> {
         let sql = format!(
-            "{} WHERE s.played_at IS NULL AND s.archived_at IS NULL AND {} ORDER BY e.published_at DESC, e.id DESC LIMIT ? OFFSET ?",
+            "{} WHERE s.played_at IS NULL AND s.archived_at IS NULL AND {} {} ORDER BY e.published_at DESC, e.id DESC LIMIT ? OFFSET ?",
             Self::EPISODE_SELECT,
-            Self::IN_LISTEN
+            Self::IN_LISTEN,
+            self.listen_ready_sql()
         );
         self.page_episodes(&sql, rusqlite::params_from_iter([PAGE_SIZE + 1, offset]), offset)
     }
@@ -959,6 +1022,7 @@ impl Backend {
     }
 
     fn next(&self, after: i64, context: &str) -> Result<Option<EpisodeItem>, Error> {
+        let ready = self.listen_ready_sql();
         let conn = self.db.lock()?;
         let (published_at, podcast_id): (i64, i64) = conn
             .query_row("SELECT published_at, podcast_id FROM episodes WHERE id = ?", params![after], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -967,7 +1031,7 @@ impl Backend {
         let sql = if context == "show" {
             format!("{} WHERE s.played_at IS NULL AND s.archived_at IS NULL AND e.podcast_id = ?3 AND (e.published_at > ?1 OR (e.published_at = ?1 AND e.id > ?2)) ORDER BY e.published_at ASC, e.id ASC LIMIT 1", Self::EPISODE_SELECT)
         } else {
-            format!("{} WHERE s.played_at IS NULL AND s.archived_at IS NULL AND {} AND (e.published_at < ?1 OR (e.published_at = ?1 AND e.id < ?2)) AND ?3 = ?3 ORDER BY e.published_at DESC, e.id DESC LIMIT 1", Self::EPISODE_SELECT, Self::IN_LISTEN)
+            format!("{} WHERE s.played_at IS NULL AND s.archived_at IS NULL AND {} {} AND (e.published_at < ?1 OR (e.published_at = ?1 AND e.id < ?2)) AND ?3 = ?3 ORDER BY e.published_at DESC, e.id DESC LIMIT 1", Self::EPISODE_SELECT, Self::IN_LISTEN, ready)
         };
         let mut stmt = conn.prepare(&sql)?;
         Ok(stmt.query_row(params![published_at, after, podcast_id], map_episode).optional()?)
@@ -1217,6 +1281,19 @@ impl Backend {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(CASE WHEN j.stage = 'failed' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN j.stage NOT IN ('ready', 'cancelled', 'failed') THEN 1 ELSE 0 END), 0)
+                 FROM ad_removal_jobs j
+                 JOIN episodes e ON e.id = j.episode_id
+                 LEFT JOIN episode_state s ON s.episode_id = e.id
+                 WHERE s.played_at IS NULL AND s.archived_at IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or((0, 0));
         drop(conn);
         Ok(AdRemovalSettingsPayload {
             enabled,
@@ -1235,6 +1312,9 @@ impl Backend {
             device_available_bytes: 20_000_000_000,
             corrections,
             deepseek_usage,
+            failed_count: counts.0,
+            preparing_count: counts.1,
+            listen_requires_ready: enabled,
         })
     }
 
@@ -1309,11 +1389,31 @@ impl Backend {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }));
+        let interval = self.pipeline.background_refresh_secs;
+        if interval > 0 {
+            let backend = self.clone();
+            let stop = self.runtime_stop.clone();
+            *self.refresh_runtime.lock().unwrap() = Some(std::thread::spawn(move || {
+                let mut elapsed = 0u64;
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    elapsed += 1;
+                    if elapsed < interval {
+                        continue;
+                    }
+                    elapsed = 0;
+                    let _ = backend.refresh("background");
+                }
+            }));
+        }
     }
 
     pub fn stop_runtime(&self) {
         self.runtime_stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.runtime.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.refresh_runtime.lock().unwrap().take() {
             let _ = handle.join();
         }
     }
@@ -1322,14 +1422,19 @@ impl Backend {
         if self.setting("ad_removal_enabled").as_deref() != Some("true") {
             return Ok(false);
         }
-        let store = JobStore::new(&self.db);
-        let coordinator = crate::coordinator::Coordinator::new(&store);
+        let store = JobStore::new(&self.db).with_unbounded_retry(self.pipeline.unbounded_job_retry);
+        let coordinator = crate::coordinator::Coordinator::new(&store)
+            .skip_daily_limit(self.pipeline.skip_daily_classification_limit);
         let downloader = self.downloader.lock().unwrap().clone();
         let transcriber = self.transcriber.lock().unwrap().clone();
         let classifier = self.classifier.lock().unwrap().clone();
         let api_key = self.credentials.read().unwrap_or_default();
         let artifacts = &self.artifacts;
+        let playback_active = self.playback_active();
         let ran = coordinator.run_next_stage(|stage, job| {
+            if playback_active && matches!(stage, JobStage::Transcribing | JobStage::Classifying) {
+                return Err("pause:playback_active".into());
+            }
             let (audio_url, notes, duration) = self
                 .episode_pipeline_meta(job.episode_id)
                 .unwrap_or_else(|_| (String::new(), String::new(), None));

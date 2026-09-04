@@ -5,7 +5,7 @@ import { EpisodeRow } from "../components/EpisodeRow";
 import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { usePlayer } from "../player";
 import { navigate } from "../router";
-import type { DirectoryPodcast, SearchResults, Show } from "../types";
+import type { AdRemovalSettings, DirectoryPodcast, SearchResults, Show } from "../types";
 
 export const SHOW_SEARCH_DEBOUNCE_MS = 300;
 
@@ -16,6 +16,7 @@ export function ShowsView() {
   const [results, setResults] = useState<SearchResults | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchQuery = query.trim();
   const searchActive = searchQuery.length >= 3;
@@ -27,6 +28,9 @@ export function ShowsView() {
         .then((nextShows) => live && setShows(nextShows))
         .catch((error) => live && setShowsError(error instanceof Error ? error.message : String(error)));
     void load();
+    void Api.adRemovalSettings()
+      .then((next) => live && setAdSettings(next))
+      .catch(() => {});
     const off = onEpisodesChanged(() => void load());
     return () => {
       live = false;
@@ -95,7 +99,12 @@ export function ShowsView() {
       </div>
 
       {searchActive ? (
-        <SearchResultsView results={results} searching={searching} error={searchError} />
+        <SearchResultsView
+          results={results}
+          searching={searching}
+          error={searchError}
+          playRequiresAdFree={adSettings?.listen_requires_ready === true}
+        />
       ) : (
         <>
           <p className="shows-intro">You've subscribed to these feeds.</p>
@@ -125,7 +134,17 @@ export function ShowsView() {
   );
 }
 
-function SearchResultsView({ results, searching, error }: { results: SearchResults | null; searching: boolean; error: string | null }) {
+function SearchResultsView({
+  results,
+  searching,
+  error,
+  playRequiresAdFree,
+}: {
+  results: SearchResults | null;
+  searching: boolean;
+  error: string | null;
+  playRequiresAdFree: boolean;
+}) {
   const player = usePlayer();
   if (searching && results == null) return <p className="muted">Searching podcasts and episodes…</p>;
   if (error) return <p className="error">{error}</p>;
@@ -150,6 +169,7 @@ function SearchResultsView({ results, searching, error }: { results: SearchResul
             key={item.id}
             item={item}
             onPlay={(episode) => player.playEpisode(episode, "recent")}
+            playRequiresAdFree={playRequiresAdFree}
             actionLabel={item.played_at ? "Mark unplayed" : "Mark played"}
             onAction={(episode) =>
               void (item.played_at ? Api.unmarkPlayed(episode.id) : Api.markPlayed(episode.id))

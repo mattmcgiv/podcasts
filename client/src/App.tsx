@@ -13,6 +13,7 @@ import { FollowsView } from "./views/FollowsView";
 import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 import { applyThemePreference, currentThemePreference } from "./theme";
 import { SettingsSheet } from "./views/SettingsSheet";
+import { AuthGate } from "./AuthGate";
 
 const SWIPE_TABS = ["recent", "played", "shows", ...(FOLLOW_APPEARANCES_ENABLED ? ["follows"] : []), "settings"] as const;
 const SWIPE_DISTANCE_PX = 64;
@@ -31,9 +32,11 @@ export function App() {
   }, []);
 
   return (
-    <PlayerProvider>
-      <Shell />
-    </PlayerProvider>
+    <AuthGate>
+      <PlayerProvider>
+        <Shell />
+      </PlayerProvider>
+    </AuthGate>
   );
 }
 

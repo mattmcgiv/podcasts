@@ -146,6 +146,7 @@ pub struct JobStore<'a> {
     db: &'a Database,
     now: Box<dyn Fn() -> i64 + Send + Sync + 'a>,
     retry_backoff: Box<dyn Fn(i32) -> i64 + Send + Sync + 'a>,
+    unbounded_retry: bool,
 }
 
 impl<'a> JobStore<'a> {
@@ -154,6 +155,7 @@ impl<'a> JobStore<'a> {
             db,
             now: Box::new(crate::db::now_unix),
             retry_backoff: Box::new(default_backoff),
+            unbounded_retry: false,
         }
     }
 
@@ -165,6 +167,7 @@ impl<'a> JobStore<'a> {
             db,
             now: Box::new(now),
             retry_backoff: Box::new(default_backoff),
+            unbounded_retry: false,
         }
     }
 
@@ -177,7 +180,13 @@ impl<'a> JobStore<'a> {
             db,
             now: Box::new(now),
             retry_backoff: Box::new(backoff),
+            unbounded_retry: false,
         }
+    }
+
+    pub fn with_unbounded_retry(mut self, unbounded: bool) -> Self {
+        self.unbounded_retry = unbounded;
+        self
     }
 
     fn now(&self) -> i64 {
@@ -310,9 +319,13 @@ impl<'a> JobStore<'a> {
             return Err(JobStoreError::InvalidTransition);
         }
         let attempt = current.attempt_count + 1;
-        let exhausted = attempt >= 4;
+        let exhausted = !self.unbounded_retry && attempt >= 4;
         let timestamp = self.now();
-        let backoff = (self.retry_backoff)(attempt);
+        let backoff = if self.unbounded_retry {
+            unbounded_backoff(attempt)
+        } else {
+            (self.retry_backoff)(attempt)
+        };
         let next_retry = if exhausted { None } else { Some(timestamp + backoff) };
         let stage = if exhausted { JobStage::Failed } else { current.stage };
         self.db
@@ -817,6 +830,56 @@ impl<'a> JobStore<'a> {
         Ok(())
     }
 
+    pub fn reset_notes_transcript_jobs(&self) -> Result<u32, JobStoreError> {
+        let rows: Vec<(String, i64, Option<String>)> = {
+            let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT j.id, j.episode_id, j.audio_relative_path FROM ad_removal_jobs j
+                     JOIN episodes e ON e.id = j.episode_id
+                     LEFT JOIN episode_state s ON s.episode_id = e.id
+                     WHERE s.played_at IS NULL AND s.archived_at IS NULL
+                       AND j.stage NOT IN ('cancelled')
+                       AND (j.transcriber_version IS NULL OR j.transcriber_version = 'notes-transcriber-v1')",
+                )
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            let mapped = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            mapped
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?
+        };
+        let ts = self.now();
+        let mut n = 0u32;
+        for (job_id, episode_id, audio_path) in rows {
+            let stage = if audio_path.as_deref().is_some_and(|p| !p.is_empty()) {
+                "downloaded"
+            } else {
+                "queued"
+            };
+            self.db
+                .with_transaction(|tx| {
+                    tx.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", params![episode_id])?;
+                    tx.execute("DELETE FROM ad_transcript_segments WHERE episode_id = ?", params![episode_id])?;
+                    tx.execute("DELETE FROM ad_classification_windows WHERE episode_id = ?", params![episode_id])?;
+                    tx.execute(
+                        "UPDATE ad_removal_jobs SET stage = ?, transcriber_version = NULL, transcribed_at = NULL,
+                         classification_run_id = NULL, classifier_version = NULL, prompt_version = NULL,
+                         classifier_quantization = NULL, classified_at = NULL, failed_stage = NULL,
+                         last_error_code = NULL, last_error_message = NULL, retry_eligible = 1,
+                         next_retry_at = NULL, blocking_reason = NULL, attempt_count = 0, updated_at = ?
+                         WHERE id = ?",
+                        params![stage, ts, job_id],
+                    )?;
+                    Ok(())
+                })
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn recover_played_cleanup(&self) -> Result<(), JobStoreError> {
         let ids: Vec<i64> = {
             let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -1026,6 +1089,11 @@ pub fn valid_artifact_path(path: &str) -> bool {
 
 fn default_backoff(attempt: i32) -> i64 {
     [2, 5, 15][(attempt as usize - 1).min(2)]
+}
+
+fn unbounded_backoff(attempt: i32) -> i64 {
+    let exp = (attempt.max(1) as u32 - 1).min(7);
+    (15 * 2_i64.pow(exp)).min(1800)
 }
 
 fn local_day_start(now: i64) -> i64 {

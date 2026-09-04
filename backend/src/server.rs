@@ -113,6 +113,7 @@ fn write_response(mut stream: TcpStream, response: crate::http::HttpResponse) ->
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",

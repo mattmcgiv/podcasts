@@ -134,6 +134,24 @@ impl HttpResponse {
         }
     }
 
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn cookie(request: &HttpRequest, name: &str) -> Option<String> {
+        let header = request.header("cookie")?;
+        for part in header.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k.trim() == name {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
     pub fn error(error: Error) -> Self {
         Self::json(
             serde_json::json!({ "error": error.message() }),

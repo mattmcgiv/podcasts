@@ -5,7 +5,7 @@ import { EpisodeRow } from "../components/EpisodeRow";
 import { emitEpisodesChanged, onEpisodesChanged } from "../events";
 import { usePlayer } from "../player";
 import { navigate } from "../router";
-import type { EpisodeItem, Show } from "../types";
+import type { AdRemovalSettings, EpisodeItem, Show } from "../types";
 
 type ListenConfirmation = {
   id: number;
@@ -23,7 +23,9 @@ export function ShowDetailView({ showId }: { showId: number }) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [listenConfirmation, setListenConfirmation] = useState<ListenConfirmation | null>(null);
   const [confirmingUnsubscribe, setConfirmingUnsubscribe] = useState(false);
+  const [adSettings, setAdSettings] = useState<AdRemovalSettings | null>(null);
   const player = usePlayer();
+  const playRequiresAdFree = adSettings?.listen_requires_ready === true;
   const trimmedSearch = searchQuery.trim();
   const isSearching = trimmedSearch.length > 0;
 
@@ -47,6 +49,9 @@ export function ShowDetailView({ showId }: { showId: number }) {
     setEpisodes(null);
     setShow(null);
     void load(0);
+    void Api.adRemovalSettings()
+      .then(setAdSettings)
+      .catch(() => {});
     return onEpisodesChanged(() => void load(0));
   }, [load]);
 
@@ -195,6 +200,7 @@ export function ShowDetailView({ showId }: { showId: number }) {
             item={item}
             showPodcast={false}
             onPlay={(ep) => player.playEpisode(ep, "show")}
+            playRequiresAdFree={playRequiresAdFree}
             actionLabel="Add to Listen"
             onAction={addToListen}
             actionIcon="plus"

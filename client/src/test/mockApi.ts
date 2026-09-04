@@ -20,12 +20,16 @@ export class HttpError {
 /** Installs a fetch mock; returns a spy plus a per-route call log. */
 export function installApi(routes: MockRoutes) {
   const calls: { key: string; url: URL; init: RequestInit }[] = [];
+  const resolved: MockRoutes = {
+    "GET /api/auth/status": { enrolled: true, session: true },
+    ...routes,
+  };
   const impl = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = new URL(String(input), "http://localhost");
     const method = (init.method ?? "GET").toUpperCase();
     const key = `${method} ${url.pathname}`;
     calls.push({ key, url, init });
-    const handler = routes[key];
+    const handler = resolved[key];
     if (handler === undefined) {
       throw new Error(`unmocked route: ${key}`);
     }
@@ -108,6 +112,9 @@ export function adRemovalSettings(
       show_notes_cost_usd: 0,
       telemetry_complete: true,
     },
+    preparing_count: 0,
+    failed_count: 0,
+    listen_requires_ready: false,
     ...overrides,
   };
 }

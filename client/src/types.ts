@@ -187,6 +187,9 @@ export interface AdRemovalSettings {
   minimum_free_bytes: number;
   corrections: AdRemovalCorrectionCount[];
   deepseek_usage: DeepSeekUsageMetrics;
+  preparing_count?: number;
+  failed_count?: number;
+  listen_requires_ready?: boolean;
 }
 
 export interface RefreshStatus {

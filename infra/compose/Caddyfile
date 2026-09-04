@@ -1,0 +1,13 @@
+pods.mcgiv.dev {
+	handle /api/internal* {
+		respond 404
+	}
+	handle /api* {
+		reverse_proxy api:18180
+	}
+	handle {
+		root * /srv/pods
+		try_files {path} /index.html
+		file_server
+	}
+}
