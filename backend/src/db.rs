@@ -13,6 +13,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         conn.execute_batch(include_str!("schema.sql"))?;
         migrate_audio_metadata_columns(&conn)?;
+        conn.execute_batch(include_str!("browser_schema.sql"))?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -23,6 +24,7 @@ impl Database {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(include_str!("schema.sql"))?;
         migrate_audio_metadata_columns(&conn)?;
+        conn.execute_batch(include_str!("browser_schema.sql"))?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

@@ -16,6 +16,8 @@ export type AdRemovalBlockingReason =
   | "playback_active";
 
 export interface EpisodeItem {
+  manifest?: import("./offline/store").ArtifactManifest;
+  downloaded?: boolean;
   id: number;
   podcast_id: number;
   podcast_title: string;
@@ -67,6 +69,8 @@ export interface Show {
   site_url: string;
   episode_count: number;
   unplayed_count: number;
+  ready_count?: number;
+  pending_count?: number;
 }
 
 export interface Page<T> {
@@ -190,6 +194,26 @@ export interface AdRemovalSettings {
   preparing_count?: number;
   failed_count?: number;
   listen_requires_ready?: boolean;
+}
+
+export type ProcessingFailureCategory =
+  | "audio_download"
+  | "speech_to_text"
+  | "ad_classification"
+  | "show_notes";
+
+export type ProcessingFailureOutcome = "retry" | "blocked";
+
+export interface ProcessingNotification {
+  id: number;
+  episode_id: number;
+  category: ProcessingFailureCategory;
+  failed_stage: string;
+  message: string;
+  outcome: ProcessingFailureOutcome;
+  created_at: number;
+  episode_title: string;
+  podcast_title: string;
 }
 
 export interface RefreshStatus {

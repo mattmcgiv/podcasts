@@ -103,6 +103,20 @@ describe("App", () => {
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   });
 
+  it("keeps Listen selected on notifications and ignores horizontal swipes", async () => {
+    installApi(shellRoutes);
+    window.location.hash = "#/notifications";
+    render(<App />);
+    await screen.findByRole("heading", { name: "Notifications" });
+    expect(screen.getByRole("button", { name: "Listen" })).toHaveAttribute("aria-current", "page");
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(screen.getByRole("heading", { name: "Notifications" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/notifications");
+    expect(screen.queryByRole("heading", { name: "Played" })).not.toBeInTheDocument();
+  });
+
   it("animates a completed tab swipe", async () => {
     installApi(shellRoutes);
     render(<App />);

@@ -30,3 +30,5 @@ infra/library-export/
 
 # Xcode user state
 **/xcuserdata/
+mac/backend/.venv/
+mac/backend/__pycache__/

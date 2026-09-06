@@ -106,6 +106,7 @@ impl CredentialStore {
 }
 
 pub struct Backend {
+    pub local: bool,
     pub db: Database,
     fetcher: Arc<dyn FeedFetcher>,
     directory: Mutex<Arc<dyn DirectorySearcher>>,
@@ -151,6 +152,7 @@ impl Backend {
             .flatten()
             .filter(|s| !s.is_empty());
         let backend = Self {
+            local: false,
             db,
             fetcher,
             directory: Mutex::new(directory),
@@ -288,7 +290,14 @@ impl Backend {
     }
 
     pub fn handle(&self, request: HttpRequest) -> HttpResponse {
-        match self.dispatch(&request) {
+        if self.local {
+            return crate::browser::handle(self, &request);
+        }
+        self.handle_legacy(&request)
+    }
+
+    pub(crate) fn handle_legacy(&self, request: &HttpRequest) -> HttpResponse {
+        match self.dispatch(request) {
             Ok(response) => response,
             Err(err) => HttpResponse::error(err),
         }
@@ -927,7 +936,7 @@ impl Backend {
         Ok(())
     }
 
-    fn episode_detail(&self, id: i64) -> Result<EpisodeDetail, Error> {
+    pub(crate) fn episode_detail(&self, id: i64) -> Result<EpisodeDetail, Error> {
         let sql = format!(
             "SELECT e.id, e.podcast_id, p.title, p.image_url, e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url, CAST(COALESCE(s.position_secs, 0) AS REAL), s.played_at, e.notes_html, s.archived_at, CASE WHEN j.stage = 'ready' THEN 'ad-free' WHEN j.stage = 'failed' THEN 'failed' WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered' ELSE 'preparing' END, CASE WHEN j.stage = 'failed' THEN 'retry' WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare' ELSE NULL END, j.stage, j.blocking_reason FROM episodes e JOIN podcasts p ON p.id = e.podcast_id LEFT JOIN episode_state s ON s.episode_id = e.id LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id WHERE e.id = ?"
         );
@@ -1090,7 +1099,7 @@ impl Backend {
         Ok(status)
     }
 
-    fn refresh(&self, source: &str) -> Result<RefreshResult, Error> {
+    pub(crate) fn refresh(&self, source: &str) -> Result<RefreshResult, Error> {
         *self.refreshing.lock().unwrap() = true;
         let started = db::now_unix();
         let _ = self.db.execute(
@@ -1131,7 +1140,7 @@ impl Backend {
             let validators = {
                 let conn = self.db.lock()?;
                 conn.query_row(
-                    "SELECT etag, last_modified FROM feed_http_cache WHERE podcast_id = ?",
+                    "SELECT c.etag, c.last_modified FROM feed_http_cache c JOIN feed_parser_state p ON p.podcast_id=c.podcast_id AND p.version=1 WHERE c.podcast_id = ?",
                     params![id],
                     |r| {
                         Ok(FeedValidators {
@@ -1154,7 +1163,7 @@ impl Backend {
                 }
                 Ok(FeedFetchResponse::Data(data, next)) => match feeds::parse_feed(&data) {
                     Ok(feed) => {
-                        let _ = self.db.with_transaction(|tx| {
+                        let stored = self.db.with_transaction(|tx| {
                             upsert_podcast_meta(tx, id, &feed)?;
                             upsert_episodes(tx, id, &feed)?;
                             tx.execute(
@@ -1163,7 +1172,11 @@ impl Backend {
                             )?;
                             Ok(())
                         });
-                        refreshed += 1;
+                        if stored.is_ok() {
+                            refreshed += 1;
+                        } else {
+                            errors += 1;
+                        }
                     }
                     Err(_) => errors += 1,
                 },
@@ -1394,14 +1407,17 @@ impl Backend {
             let backend = self.clone();
             let stop = self.runtime_stop.clone();
             *self.refresh_runtime.lock().unwrap() = Some(std::thread::spawn(move || {
-                let mut elapsed = 0u64;
+                let mut next_refresh = if backend.local {
+                    0
+                } else {
+                    crate::db::now_unix() + interval as i64
+                };
                 while !stop.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    elapsed += 1;
-                    if elapsed < interval {
+                    if crate::db::now_unix() < next_refresh {
                         continue;
                     }
-                    elapsed = 0;
+                    next_refresh = crate::db::now_unix() + interval as i64;
                     let _ = backend.refresh("background");
                 }
             }));
@@ -1419,6 +1435,9 @@ impl Backend {
     }
 
     pub fn run_pipeline_step(&self) -> Result<bool, Error> {
+        if self.local {
+            return crate::local_worker::step(self);
+        }
         if self.setting("ad_removal_enabled").as_deref() != Some("true") {
             return Ok(false);
         }
@@ -1525,9 +1544,10 @@ fn fts_query(value: &str) -> String {
 
 fn upsert_podcast_meta(tx: &rusqlite::Transaction<'_>, podcast_id: i64, feed: &ParsedFeed) -> Result<(), Error> {
     tx.execute(
-        "UPDATE podcasts SET title = ?, description = ?, image_url = ?, site_url = ?, last_fetched_at = ? WHERE id = ?",
+        "UPDATE podcasts SET title = COALESCE(NULLIF(TRIM(?),''),title), description = COALESCE(NULLIF(TRIM(?),''),description), image_url = COALESCE(NULLIF(TRIM(?),''),image_url), site_url = COALESCE(NULLIF(TRIM(?),''),site_url), last_fetched_at = ? WHERE id = ?",
         params![feed.title, feed.description, feed.image_url, feed.site_url, db::now_unix(), podcast_id],
     )?;
+    tx.execute("INSERT INTO feed_parser_state(podcast_id,version) VALUES(?,1) ON CONFLICT(podcast_id) DO UPDATE SET version=1", [podcast_id])?;
     Ok(())
 }
 
@@ -1543,12 +1563,12 @@ fn upsert_episodes(tx: &rusqlite::Transaction<'_>, podcast_id: i64, feed: &Parse
 
 fn upsert_episode(tx: &rusqlite::Transaction<'_>, podcast_id: i64, episode: &crate::feeds::ParsedEpisode) -> Result<(i64, bool), Error> {
     let existing: Option<i64> = tx
-        .query_row("SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?", params![podcast_id, episode.guid], |r| r.get(0))
+        .query_row("SELECT id FROM episodes WHERE podcast_id = ? AND (guid = ? OR guid = '<![CDATA[' || ? || ']]>') ORDER BY CASE WHEN guid=? THEN 0 ELSE 1 END LIMIT 1", params![podcast_id, episode.guid, episode.guid, episode.guid], |r| r.get(0))
         .optional()?;
     let (episode_id, inserted) = if let Some(id) = existing {
         tx.execute(
-            "UPDATE episodes SET title = ?, notes_html = ?, audio_url = ?, duration_secs = ?, published_at = ?, image_url = ? WHERE id = ?",
-            params![episode.title, episode.notes_html, episode.audio_url, episode.duration_secs, episode.published_at, episode.image_url, id],
+            "UPDATE episodes SET title = ?, notes_html = ?, audio_url = ?, duration_secs = ?, published_at = ?, image_url = ?, guid = ? WHERE id = ?",
+            params![episode.title, episode.notes_html, episode.audio_url, episode.duration_secs, episode.published_at, episode.image_url, episode.guid, id],
         )?;
         (id, false)
     } else {

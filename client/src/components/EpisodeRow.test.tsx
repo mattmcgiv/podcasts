@@ -1,0 +1,87 @@
+import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { episode } from "../test/mockApi";
+import { EpisodeRow } from "./EpisodeRow";
+
+afterEach(() => {
+  delete window.PODS_LOCAL_CLIENT;
+});
+
+function renderRow(local: boolean) {
+  window.PODS_LOCAL_CLIENT = local;
+  render(
+    <EpisodeRow
+      item={episode({
+        title: "Model Blocked",
+        ad_removal_state: "preparing",
+        ad_removal_stage: "transcribing",
+        ad_removal_blocking_reason: "model_required",
+        ad_removal_action: null,
+      })}
+      onPlay={() => {}}
+      actionLabel="Mark played"
+      onAction={() => {}}
+    />,
+  );
+}
+
+describe("EpisodeRow download controls", () => {
+  it("does not render download status, pin, or remove-download controls", () => {
+    window.PODS_LOCAL_CLIENT = true;
+    const { container, rerender } = render(
+      <EpisodeRow
+        item={episode({
+          title: "Ready",
+          downloaded: true,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+        })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(container.querySelector(".offline-controls")).toBeNull();
+    expect(screen.queryByText("Downloaded")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not downloaded")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unpin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove download" })).not.toBeInTheDocument();
+    rerender(
+      <EpisodeRow
+        item={episode({
+          title: "Played episode",
+          downloaded: false,
+          played_at: 1,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+        })}
+        onPlay={() => {}}
+        actionLabel="Unmark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(container.querySelector(".offline-controls")).toBeNull();
+    expect(screen.queryByText("Not downloaded")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Download" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove download" })).not.toBeInTheDocument();
+  });
+});
+
+describe("EpisodeRow ad-removal status copy", () => {
+  it("waits for a DeepSeek API key on the non-local path", () => {
+    renderRow(false);
+    expect(screen.getByText("Waiting for DeepSeek API key")).toBeInTheDocument();
+  });
+
+  it("does not wait for a DeepSeek API key on the local-browser path", () => {
+    renderRow(true);
+    expect(screen.queryByText(/Waiting for DeepSeek API key/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/API key/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Paused · Mac unavailable")).toBeInTheDocument();
+  });
+});

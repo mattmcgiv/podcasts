@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Api } from "./api";
 import { APP_NAME } from "./config";
 import { assertPasskey, createPasskey, enrollTokenFromLocation } from "./passkey";
+import { hasLocalLibrary, offlineEnabled } from "./offline/client";
 
 type Gate = "loading" | "ready" | "login" | "enroll" | "unset";
 
@@ -13,8 +14,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   async function refresh() {
     const token = enrollTokenFromLocation();
     setEnrollToken(token);
+    if (offlineEnabled() && !token && await hasLocalLibrary()) { setGate("ready"); return; }
     const status = await Api.authStatus();
     if (status.session) {
+      window.dispatchEvent(new Event("pods-authenticated"));
       setGate("ready");
       return;
     }
@@ -28,6 +31,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refresh().catch(() => setGate("unset"));
     function onAuthRequired() {
+      if (offlineEnabled()) return; // Reauthentication lives in Settings; local playback remains usable.
       setGate((current) => (current === "ready" ? "login" : current));
     }
     function onHashChange() {
@@ -48,6 +52,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       const options = await Api.registerOptions(enrollToken);
       const credential = await createPasskey(options.publicKey);
       await Api.register(options.state_id, credential);
+      window.dispatchEvent(new Event("pods-authenticated"));
       window.location.hash = "/recent";
       setGate("ready");
     } catch (caught) {
@@ -61,6 +66,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       const options = await Api.loginOptions();
       const credential = await assertPasskey(options.publicKey);
       await Api.login(options.state_id, credential);
+      window.dispatchEvent(new Event("pods-authenticated"));
       setGate("ready");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Passkey sign-in failed");
@@ -79,7 +85,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="auth-gate" role="status">
         <h1>{APP_NAME}</h1>
-        <p>Not set up. Enroll a passkey from the server.</p>
+        <p>{offlineEnabled() ? "Connect this iPhone and your Mac to the same Wi-Fi, then open the enrollment link from the Mac." : "Not set up. Enroll a passkey from the server."}</p>
+        {offlineEnabled() && <button type="button" onClick={() => void refresh().catch(() => setGate("unset"))}>Reconnect</button>}
       </div>
     );
   }

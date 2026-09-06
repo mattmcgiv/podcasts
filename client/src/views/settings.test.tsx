@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EPISODES_CHANGED_EVENT } from "../events";
+import { LOCAL_OMLX_MODEL } from "../lib";
 import { episode, HttpError, installApi } from "../test/mockApi";
 import { SettingsSheet } from "./SettingsSheet";
 
@@ -33,6 +34,10 @@ const adRemovalSettings = {
 
 
 describe("SettingsSheet", () => {
+  afterEach(() => {
+    delete window.PODS_LOCAL_CLIENT;
+  });
+
   it("shows the most recent native automatic refresh", async () => {
     installApi({
       "GET /api/refresh-status": {
@@ -262,6 +267,40 @@ describe("SettingsSheet", () => {
     installApi({});
     render(<SettingsSheet onClose={() => {}} />);
     expect(screen.queryByRole("button", { name: "Close settings" })).not.toBeInTheDocument();
+  });
+
+  it("explains local Mac oMLX processing and hides DeepSeek cloud controls", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    installApi({});
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByRole("heading", { name: "Ad removal" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `Ad classification and show notes run locally on the Mac through oMLX using ${LOCAL_OMLX_MODEL}.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Processing pauses while the Mac is unavailable.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("DeepSeek API key")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save DeepSeek API key" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Transcript text is sent to DeepSeek V4 Pro/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Cloud classifier/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/DeepSeek V4 Pro ready/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/API key required/)).not.toBeInTheDocument();
+    expect(screen.queryByText("DeepSeek usage")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Total cost:/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Enable ad removal" })).not.toBeInTheDocument();
+  });
+
+  it("keeps DeepSeek cloud controls on the non-local path", async () => {
+    installApi({ "GET /api/ad-removal/settings": adRemovalSettings });
+    render(<SettingsSheet onClose={() => {}} />);
+
+    expect(await screen.findByLabelText("DeepSeek API key")).toBeInTheDocument();
+    expect(screen.getByText(/Transcript text is sent to DeepSeek V4 Pro/)).toBeInTheDocument();
+    expect(screen.getByText(/Cloud classifier: DeepSeek V4 Pro ready/)).toBeInTheDocument();
+    expect(screen.getByText("DeepSeek usage")).toBeInTheDocument();
+    expect(screen.queryByText(/run locally on the Mac through oMLX/)).not.toBeInTheDocument();
   });
 
   it("enables DeepSeek Pro ad removal when an API key is configured", async () => {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  LOCAL_OMLX_MODEL,
+  adStageLabel,
   cloudClassifierCopy,
   fmtDate,
   fmtDuration,
@@ -7,6 +9,8 @@ import {
   fmtTime,
   formatOptionalUSD,
   formatUSD,
+  listenClassifierPause,
+  localProcessingCopy,
   progressFraction,
 } from "./lib";
 
@@ -93,5 +97,53 @@ describe("cloudClassifierCopy", () => {
       status: "DeepSeek API key required.",
       recovery: expect.stringContaining("Save a DeepSeek API key"),
     });
+  });
+});
+
+describe("localProcessingCopy", () => {
+  it("names the Mac oMLX model and says processing pauses without the Mac", () => {
+    expect(localProcessingCopy()).toEqual({
+      summary: `Ad classification and show notes run locally on the Mac through oMLX using ${LOCAL_OMLX_MODEL}.`,
+      pause: "Processing pauses while the Mac is unavailable.",
+    });
+    expect(localProcessingCopy().summary).not.toMatch(/DeepSeek V4 Pro/);
+    expect(localProcessingCopy().summary).not.toMatch(/sent to DeepSeek/);
+  });
+});
+
+describe("listenClassifierPause", () => {
+  const unavailable = {
+    enabled: true,
+    classifier_available: false,
+    classifier_unavailable_reason: "api_key_required",
+  };
+
+  it("keeps the DeepSeek API key banner on the non-local path", () => {
+    expect(listenClassifierPause(unavailable, false)).toMatchObject({
+      status: "DeepSeek API key required.",
+      recovery: expect.stringContaining("Save a DeepSeek API key"),
+    });
+  });
+
+  it("does not ask for a DeepSeek API key on the local-browser path", () => {
+    expect(listenClassifierPause(unavailable, true)).toBeNull();
+  });
+
+  it("hides the banner when ad removal is off or the classifier is available", () => {
+    expect(listenClassifierPause(null, false)).toBeNull();
+    expect(listenClassifierPause({ ...unavailable, enabled: false }, false)).toBeNull();
+    expect(listenClassifierPause({ ...unavailable, classifier_available: true }, false)).toBeNull();
+  });
+});
+
+describe("adStageLabel", () => {
+  it("waits for a DeepSeek API key only on the non-local path", () => {
+    expect(adStageLabel("preparing", "transcribing", "model_required", false)).toBe(
+      "Waiting for DeepSeek API key",
+    );
+    expect(adStageLabel("preparing", "transcribing", "model_required", true)).toBe(
+      "Paused · Mac unavailable",
+    );
+    expect(adStageLabel("preparing", "transcribing", "model_required", true)).not.toMatch(/API key/i);
   });
 });

@@ -6,6 +6,7 @@ export type Tab = "recent" | "played" | "shows" | "settings" | "follows";
 export interface Route {
   tab: Tab;
   showId?: number;
+  notifications?: boolean;
 }
 
 export function parseHash(hash: string): Route {
@@ -15,6 +16,8 @@ export function parseHash(hash: string): Route {
       return { tab: "played" };
     case "search":
       return { tab: "shows" };
+    case "notifications":
+      return { tab: "recent", notifications: true };
     case "settings":
       return { tab: "settings" };
     case "follows":

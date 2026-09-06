@@ -82,30 +82,18 @@ describe("RecentView", () => {
     expect(await screen.findByText("Checked 2 feeds")).toBeInTheDocument();
   });
 
-  it("shows the latest successful feed refresh above the footer nav and updates it", async () => {
-    let statusCalls = 0;
+  it("does not keep the old Listen bottom copy", async () => {
     installApi({
       ...settings,
       "GET /api/recent": page([episode()]),
-      "GET /api/refresh-status": () => ({
-        is_refreshing: statusCalls === 0,
-        last_attempt_at: 1_784_071_860,
-        last_success_at: statusCalls++ === 0 ? 1_784_071_800 : 1_784_075_400,
-        last_source: "foreground",
-        last_refreshed: 1,
-        last_errors: 0,
-      }),
     });
-    wrap(<RecentView />);
-
-    const initial = await screen.findByText(/Latest feed refresh:/);
-    const initialText = initial.textContent;
-    expect(initial).toHaveClass("feed-refresh-status");
-    expect(initialText).toMatch(/^Refreshing feeds/);
-
-    window.dispatchEvent(new Event("pods-episodes-changed"));
-    await waitFor(() => expect(screen.getByText(/^Latest feed refresh:/).textContent).not.toBe(initialText));
-    expect(screen.getByText(/^Latest feed refresh:/).textContent).not.toMatch(/^Refreshing feeds/);
+    const view = wrap(<RecentView />);
+    await screen.findByText("Test Episode");
+    expect(view.container.textContent).not.toMatch(/Latest feed refresh/);
+    expect(view.container.textContent).not.toMatch(/Downloaded episodes play/);
+    expect(view.container.textContent).not.toMatch(/subscriptions saved/);
+    expect(view.container.textContent).not.toMatch(/awaiting processing on the Mac/);
+    expect(view.container.querySelector(".feed-refresh-status")).toBeNull();
   });
 
   it("renders, marks played optimistically, loads more", async () => {
@@ -1647,6 +1635,12 @@ describe("ShowsView search", () => {
 });
 
 describe("ShowsView", () => {
+  it("keeps unprocessed episodes in the counts without calling them played", async () => {
+    installApi({ ...settings, "GET /api/shows": [{ ...show(), episode_count: 20, unplayed_count: 12, ready_count: 0, pending_count: 12 }] });
+    wrap(<ShowsView />);
+    expect(await screen.findByText(/12 unplayed · 20 episodes · 0 ready · 12 awaiting processing/)).toBeInTheDocument();
+    expect(screen.queryByText(/all played/)).not.toBeInTheDocument();
+  });
   it("lists shows and navigates into one", async () => {
     installApi({ ...settings, "GET /api/shows": [show()] });
     const user = userEvent.setup();

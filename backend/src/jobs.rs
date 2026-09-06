@@ -1084,7 +1084,7 @@ pub fn valid_artifact_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains("..")
-        && (path.starts_with("episodes/") || path.starts_with("resume/"))
+        && (path.starts_with("episodes/") || path.starts_with("resume/") || path.starts_with("local/") || path.starts_with("published/"))
 }
 
 fn default_backoff(attempt: i32) -> i64 {

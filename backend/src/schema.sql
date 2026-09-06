@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS podcasts (
         etag TEXT,
         last_modified TEXT
     );
+    CREATE TABLE IF NOT EXISTS feed_parser_state (
+        podcast_id INTEGER PRIMARY KEY REFERENCES podcasts(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS ad_removal_jobs (
         id TEXT PRIMARY KEY,
