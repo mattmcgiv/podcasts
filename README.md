@@ -8,7 +8,8 @@ The current architecture and operating instructions are in [Mac backend and offl
 
 The Mac publishes only automatically processed episodes. There is no human review or correction workflow.
 There is no `prepare-review` command.
-Invalid, uncertain, or disagreeing inference fails closed.
+Classification is binary: `ad` or `content`. Mixed or unclear audio is `content`.
+Invalid or disagreeing block JSON still fails closed after repair.
 Automatic processing retries at most four failed attempts. Then the job stage is `blocked`.
 The episode remains unavailable.
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
@@ -18,8 +19,8 @@ Old `review.json` files, if present, are ignored. They need not be deleted.
 If the operator opens an upgraded database, it converts legacy `review` rows below four attempts to `retry`.
 It converts rows at or above four attempts to `blocked`. It converts over-limit `retry` rows to `blocked`.
 The upgrade does not alter publications or listening state.
-Source `CLASSIFIER_VERSION` is `pods-local-v3-whisper-large-v3-fp16-ad24-context12-blocks-repair-aac128`.
-Source `VERSION` is `pods-local-v21-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-aac128`.
+Source `CLASSIFIER_VERSION` is `pods-local-v4-whisper-large-v3-fp16-ad24-context12-blocks-repair-binary-aac128`.
+Source `VERSION` is `pods-local-v22-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.

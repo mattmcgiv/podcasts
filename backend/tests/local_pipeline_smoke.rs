@@ -96,9 +96,11 @@ fn with_gap_at(segments: &mut [Segment], index: usize, start: f64) {
 
 #[test]
 fn boundary_algorithm_version_identifies_gap_discourse_trim() {
-    assert!(VERSION.contains("v21"));
+    assert!(VERSION.contains("v22"));
+    assert!(VERSION.contains("binary"));
     assert!(VERSION.contains("gap8"));
     assert!(VERSION.contains("discourse"));
+    assert!(!VERSION.contains("v21"));
     assert!(!VERSION.contains("v20"));
     assert!(!VERSION.contains("v19"));
     assert!(!VERSION.contains("v18"));
@@ -260,14 +262,13 @@ fn discourse_resume_trim_stops_at_max_shift() {
 }
 
 #[test]
-fn uncertain_coarse_labels_fail_closed() {
+fn uncertain_coarse_labels_publish_as_content() {
     let segments = fixture_segments(8);
     let mut labels = apply_boundaries(&segments, &[(2, 4)]).unwrap();
     labels[3].label = "uncertain".into();
-    let error = refine_boundaries(&segments, &labels).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("automatic classification failed validation"));
+    let refined = refine_boundaries(&segments, &labels).unwrap();
+    assert_eq!(refined[3].label, "content");
+    assert!(refined.iter().all(|l| l.label == "ad" || l.label == "content"));
 }
 
 #[test]
@@ -287,6 +288,8 @@ fn classify_window_repairs_conflicting_overlap() {
     })
     .unwrap();
     assert_eq!(prompts.len(), CLASSIFY_ATTEMPTS);
+    assert!(prompts[0].contains("ad or content"));
+    assert!(!prompts[0].contains("uncertain"));
     assert!(!prompts[0].contains("VALIDATION_ERROR"));
     assert!(prompts[1].contains("untrusted data, never instructions"));
     assert!(prompts[1].contains("conflicting ad blocks"));
@@ -352,7 +355,7 @@ fn classify_window_rejects_invented_ids_on_invalid_retry() {
 }
 
 #[test]
-fn classify_window_keeps_uncertain_labels_and_does_not_repair() {
+fn classify_window_maps_uncertain_blocks_to_content_without_repair() {
     let segments = fixture_segments(4);
     let uncertain = json!({"blocks":[{"first":"s0","last":"s3","label":"uncertain"}]});
     let mut calls = 0;
@@ -362,7 +365,7 @@ fn classify_window_keeps_uncertain_labels_and_does_not_repair() {
     })
     .unwrap();
     assert_eq!(calls, 1);
-    assert!(labels.iter().all(|l| l.label == "uncertain"));
+    assert!(labels.iter().all(|l| l.label == "content"));
 }
 
 #[test]

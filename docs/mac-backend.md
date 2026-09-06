@@ -197,13 +197,14 @@ The `jobs` command reads the eligible pending view. Retry rejects nonexistent or
 The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
 It does not accept corrected labels.
 
-The installed classifier is pipeline v21.
+The source classifier is pipeline v22.
 It uses a bounded repair of at most two model calls per window. The second call uses 24 context segments.
-The repair keeps strict block validation. Invalid, uncertain, or disagreeing inference fails closed.
+Labels are binary: `ad` or `content`. Mixed or unclear audio is `content`, so the episode still publishes.
+The repair keeps strict block validation. Invalid or disagreeing JSON fails closed after two attempts.
 Content-bound versions include repair and retry semantics, not only the initial prompt.
 
-Installed `CLASSIFIER_VERSION` is `pods-local-v3-whisper-large-v3-fp16-ad24-context12-blocks-repair-aac128`.
-Installed `VERSION` is `pods-local-v21-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-aac128`.
+Source `CLASSIFIER_VERSION` is `pods-local-v4-whisper-large-v3-fp16-ad24-context12-blocks-repair-binary-aac128`.
+Source `VERSION` is `pods-local-v22-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.
@@ -366,7 +367,7 @@ There is no human review or correction workflow. There is no `prepare-review` co
 The command `python3 mac/backend/manage.py jobs` lists eligible pending work.
 The command reads the `browser_pending_jobs` view. It does not list excluded duplicates as the live queue.
 
-Invalid, uncertain, or disagreeing inference fails closed. The worker does not publish the episode.
+Invalid or disagreeing block JSON fails closed after repair. Mixed or unclear audio is `content`. The worker still publishes the episode.
 Automatic processing retries at most four failed attempts. Then the job stage is `blocked`.
 A blocked episode remains unavailable. It does not wait for operator labels.
 

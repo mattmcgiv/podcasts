@@ -1077,7 +1077,7 @@ fn ad_blocks_must_cover_each_segment_once_and_preserve_source_quotes() {
         &segments,
     )
     .unwrap();
-    assert!(review.iter().all(|l| l.label == "uncertain"));
+    assert!(review.iter().all(|l| l.label == "content"));
 }
 
 #[test]
