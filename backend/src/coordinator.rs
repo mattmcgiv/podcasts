@@ -1,25 +1,5 @@
-use crate::jobs::{blocking_reason_for_stage, Job, JobStage, JobStore, JobStoreError, ResourceConditions};
+use crate::jobs::{Job, JobStage, JobStore, JobStoreError};
 use std::sync::Mutex;
-
-pub fn next_stage(stage: JobStage) -> Option<JobStage> {
-    match stage {
-        JobStage::Queued => Some(JobStage::Downloading),
-        JobStage::Downloading => Some(JobStage::Downloading),
-        JobStage::Downloaded => Some(JobStage::Transcribing),
-        JobStage::Transcribing => Some(JobStage::Transcribing),
-        JobStage::Classifying => Some(JobStage::Classifying),
-        _ => None,
-    }
-}
-
-pub fn completion_stage(executing: JobStage) -> Option<JobStage> {
-    match executing {
-        JobStage::Downloading => Some(JobStage::Downloaded),
-        JobStage::Transcribing => Some(JobStage::Classifying),
-        JobStage::Classifying => Some(JobStage::Ready),
-        _ => None,
-    }
-}
 
 pub struct Coordinator<'a> {
     store: &'a JobStore<'a>,
@@ -168,19 +148,4 @@ impl<'a> Coordinator<'a> {
     fn next_sleep(&self, _now: i64) -> Result<Option<i64>, JobStoreError> {
         self.store.job_retry_wait()
     }
-}
-
-pub fn apply_resource_policy(store: &JobStore<'_>, job: &Job, conditions: ResourceConditions) -> Result<Job, JobStoreError> {
-    if let Some(reason) = blocking_reason_for_stage(job.stage, conditions) {
-        store.set_blocking_reason(&job.id, Some(reason))
-    } else {
-        Ok(job.clone())
-    }
-}
-
-pub fn run_until_idle<F>(store: &JobStore<'_>, execute: F) -> Result<u32, JobStoreError>
-where
-    F: FnMut(JobStage, &Job) -> Result<(), String>,
-{
-    Coordinator::new(store).run_until_idle(execute)
 }

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DiagnosticEvent {
@@ -34,10 +33,6 @@ impl DiagnosticEvent {
     }
 }
 
-pub fn make_playback_session_id() -> String {
-    Uuid::new_v4().to_string().to_lowercase()
-}
-
 pub fn attach_session(payload: &mut serde_json::Value, session_id: &str) {
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("playbackSessionId".into(), serde_json::Value::String(session_id.into()));
@@ -50,18 +45,13 @@ pub fn session_from_payload(payload: &serde_json::Value) -> Option<String> {
 
 pub struct Diagnostics {
     root: PathBuf,
-    retain: usize,
 }
 
 impl Diagnostics {
     pub fn open(root: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(root.join("logs"))?;
         fs::create_dir_all(root.join("snapshots"))?;
-        Ok(Self { root, retain: 5 })
-    }
-
-    pub fn retain_count(&self) -> usize {
-        self.retain
+        Ok(Self { root })
     }
 
     pub fn record(&self, event: DiagnosticEvent) -> std::io::Result<()> {

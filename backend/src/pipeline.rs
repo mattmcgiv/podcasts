@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -575,18 +575,6 @@ fn strip_html(html: &str) -> String {
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub fn spawn_runtime<F>(stop: Arc<std::sync::atomic::AtomicBool>, mut tick: F) -> std::thread::JoinHandle<()>
-where
-    F: FnMut() + Send + 'static,
-{
-    std::thread::spawn(move || {
-        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-            tick();
-            std::thread::sleep(Duration::from_millis(200));
-        }
-    })
 }
 
 #[cfg(test)]
