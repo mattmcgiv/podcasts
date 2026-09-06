@@ -14,15 +14,3 @@ pub fn is_foreground_refresh_due(status: &RefreshStatus, now: i64) -> bool {
         Some(last_success) => now >= last_success + AUTOMATIC_INTERVAL,
     }
 }
-
-pub fn next_background_refresh_at(status: &RefreshStatus, now: i64) -> i64 {
-    if status.last_errors > 0 {
-        if let Some(last_attempt) = status.last_attempt_at {
-            return now.max(last_attempt + RETRY_INTERVAL);
-        }
-    }
-    match status.last_success_at {
-        None => now,
-        Some(last_success) => now.max(last_success + AUTOMATIC_INTERVAL),
-    }
-}

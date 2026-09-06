@@ -351,9 +351,6 @@ impl Backend {
         if path == "/api/follow-candidates" && method == "GET" {
             return Ok(HttpResponse::json(self.follow_candidates()?, 200));
         }
-        if parts.len() == 2 && parts[0] == "api" && parts[1] == "feeds" {
-            // no
-        }
         if path == "/api/feeds/preview" && method == "POST" {
             let body = request.json_object()?;
             let feed_url = body.get("feed_url").and_then(Value::as_str).ok_or_else(|| Error::Invalid("feed_url is required".into()))?;

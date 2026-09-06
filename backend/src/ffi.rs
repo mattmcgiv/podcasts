@@ -7,7 +7,7 @@ use crate::db::Database;
 use crate::directory::PodcastIndexClient;
 use crate::feeds::UreqFetcher;
 use crate::http::HttpRequest;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 use std::ptr;
@@ -185,9 +185,4 @@ pub extern "C" fn pods_backend_free(ptr: *mut u8, len: usize) {
         return;
     }
     unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-}
-
-#[allow(dead_code)]
-fn _keep_cstring() {
-    let _ = CString::new("x");
 }

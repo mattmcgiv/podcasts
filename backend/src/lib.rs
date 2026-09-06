@@ -32,11 +32,6 @@ pub use error::Error;
 pub use feeds::{FeedFetcher, MockFeedFetcher};
 pub use http::{HttpRequest, HttpResponse};
 
-#[cfg(test)]
-mod ffi_unused {
-    // FFI is compiled in the library via optional module below.
-}
-
 // DEPRECATED as of 1 October 2026. iPhone FFI only. Do not extend. See ios/DEPRECATED.md.
 #[deprecated(
     since = "2026-10-01",

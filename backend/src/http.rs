@@ -27,11 +27,6 @@ impl HttpRequest {
         self
     }
 
-    pub fn with_text(mut self, text: impl Into<String>) -> Self {
-        self.body = text.into().into_bytes();
-        self
-    }
-
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into().to_lowercase(), value.into());
         self
