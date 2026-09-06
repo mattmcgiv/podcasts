@@ -12,6 +12,10 @@ describe("Artwork", () => {
     expect(screen.queryByRole("img", { name: "Cover" })).not.toBeInTheDocument();
     expect(document.querySelector(".art-fallback")).toBeTruthy();
 
+    rerender(<Artwork src="https://art.example/repaired.jpg" size={48} alt="Cover" />);
+    expect(screen.getByRole("img", { name: "Cover" })).toHaveAttribute("src", "https://art.example/repaired.jpg");
+    expect(document.querySelector(".art-fallback")).toBeNull();
+
     rerender(<Artwork src="" size={32} />);
     expect(document.querySelector(".art-fallback")).toBeTruthy();
   });

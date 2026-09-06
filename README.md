@@ -1,6 +1,47 @@
 # Pods
 
-A single-user, mobile-first podcast app for iPhone. The app bundles a React UI and runs a Rust library/API backend on `127.0.0.1:18180`.
+A single-user podcast app for Chrome on iPhone. The browser stores the library and downloaded audio. The Mac runs the Rust backend.
+
+**The native iOS app is deprecated.** Its source remains for history and data migration. New development targets the browser client.
+
+The current architecture and operating instructions are in [Mac backend and offline browser](docs/mac-backend.md).
+
+The Mac publishes only automatically processed episodes. There is no human review or correction workflow.
+There is no `prepare-review` command.
+Invalid, uncertain, or disagreeing inference fails closed.
+Automatic processing retries at most four failed attempts. Then the job stage is `blocked`.
+The episode remains unavailable.
+`omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
+The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
+It does not accept corrected labels.
+Old `review.json` files, if present, are ignored. They need not be deleted.
+If the operator opens an upgraded database, it converts legacy `review` rows below four attempts to `retry`.
+It converts rows at or above four attempts to `blocked`. It converts over-limit `retry` rows to `blocked`.
+The upgrade does not alter publications or listening state.
+Source `CLASSIFIER_VERSION` is `pods-local-v3-whisper-large-v3-fp16-ad24-context12-blocks-repair-aac128`.
+Source `VERSION` is `pods-local-v21-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-aac128`.
+
+The v21 real fixture is the episode 20720 transcript.
+It produces 977 segment labels.
+Expected ad ranges are `(2,38),(252,282),(443,457),(589,603),(773,788),(934,976)`.
+An independent rerun found zero mismatches.
+It published automatically and produced nonempty show notes.
+Runtime was 152.59 seconds.
+
+The strengthened synthetic end-to-end fixture used 16.110 seconds of source audio.
+Published duration was 11.150 seconds.
+The cutter removed 4.960 seconds.
+Labels were 2 ad and 3 content.
+An independent rerun published automatically and produced nonempty notes.
+Runtime was 11.25 seconds.
+
+These fixtures pass the current acceptance contract.
+They do not prove universal classifier accuracy.
+Broader automatic monitoring remains appropriate.
+There is no manual review or operator labeling.
+VPS retirement remains deferred.
+
+The sections after this notice describe the legacy native app, not the supported deployment.
 
 No discovery feed. No recommendations. Your subscriptions, unplayed episodes first (oldest by default), with mark-played archive.
 
@@ -25,8 +66,8 @@ People-following / guest appearances exist in the codebase but stay off by defau
 | `client/` | React UI (runtime deps: `react` + `react-dom` only) |
 | `backend/` | Active library/API (`Backend::handle`). Implement backend changes here. |
 | `ios/` | **Deprecated 1 October 2026.** Frozen iPhone shell and signing/install tooling. See `ios/DEPRECATED.md`. |
-| `mac/` | Optional **Pods Speaker** menu-bar companion |
-| `docs/` | Design notes (for example ad removal) |
+| `mac/` | Mac backend tooling (`mac/backend/`) plus optional **Pods Speaker** |
+| `docs/` | Architecture and design notes (browser/Mac backend, ad removal) |
 | `dev/` | Isolated Apple `container` workflow for frontend tooling |
 | `shared/` | Small shared Swift helpers |
 
@@ -99,6 +140,90 @@ PODCASTINDEX_BASE_URL=https://api.podcastindex.org/api/1.0
 ```
 
 Without keys, local episode search still works. Directory subscribe-by-search reports `directory_configured: false`. You can still paste an RSS URL in Settings.
+
+## oMLX inference lock
+
+Pods shares the Mac GPU with Pi and other local clients. Native oMLX `max_concurrent_requests=1` is per model engine. It still queues extra work. It is not a Mac-wide exclusive lock.
+
+This project adds one cooperative advisory lock. It is not a daemon. No extra background process starts. Kernel close of the lock file descriptor releases ownership.
+
+### Why two controls exist
+
+| Control | What it does |
+| --- | --- |
+| oMLX `max_concurrent_requests=1` | Per engine: at most one admitted prefill/decode. Extra requests wait (up to 32), then HTTP 503. Two models can still run at once. Leave this setting unchanged. |
+| Cooperative `flock(2)` | Mac-wide mutex for complete inference work among cooperative callers (Pods, Pi wrapper, scripts). |
+
+### Paths
+
+The lock file contains no secrets. Existence of the file is not ownership. `flock(2)` is ownership.
+
+```text
+~/.omlx/locks/mac-inference.lock      # advisory lock (same BSD flock(2) as /usr/bin/lockf)
+~/.omlx/locks/mac-inference.json      # inspection only: pid, owner, purpose, model, started_at
+```
+
+Never put keys, prompts, transcripts, URLs, or payloads in the JSON file.
+
+### When Pods holds the lock
+
+- **Classification phase:** one permit covers every transcript window and the boundary pass. Pods does not release between windows. It releases before ffmpeg audio rendering.
+- **Show notes:** a second acquire of the same lock. Pods holds it through the complete oMLX notes response/work, then releases.
+
+Chat POST requires that permit token. Nested acquire of the same path returns busy. That prevents deadlock and accidental bypass inside Pods.
+
+After `flock` succeeds, Pods makes an authenticated read-only `GET /api/status`. If `active_requests` or `waiting_requests` is nonzero, Pods releases and reports `omlx_busy`. An uncooperative caller can still race after this check and POST to `127.0.0.1:8000` without the file lock.
+
+If the lock is held or oMLX is occupied, Pods does not start `/v1/chat/completions`. It does not consume a classifier failure attempt. Job error is `omlx_busy`. `next_retry_at` is 30–60 seconds with bounded deterministic jitter from the episode id.
+
+### Pi and scripts
+
+Use the standard-library wrapper. It acquires the same lock, writes metadata, then runs the command. It releases when the wrapped process exits. It does not read credentials and does not call oMLX.
+
+Put the command after `--` so flags stay with that command:
+
+```sh
+python3 mac/backend/omlx_inference_lock.py --owner pi --purpose chat --model DeepSeek-V4-Flash-0731-2.4bit-mixed -- pi
+python3 mac/backend/omlx_inference_lock.py --owner script --purpose chat --model unspecified -- /usr/bin/python3 ./my_omlx_client.py
+```
+
+A shell-only wrapper is not enough. macOS has `/usr/bin/lockf`, not util-linux `flock`. `lockf` can run a command under `flock(2)`, but it cannot keep metadata and exact argv together without a parent process. The Python wrapper is stdlib-only (`fcntl.flock` is `flock(2)` on macOS).
+
+### Inspect ownership without stealing the lock
+
+Do not delete the lock file. Deleting it does not unlock a live holder.
+
+```sh
+python3 mac/backend/omlx_inference_lock.py --check
+/usr/bin/lockf -k -s -t 0 ~/.omlx/locks/mac-inference.lock /usr/bin/true
+# busy → exit 75 (EX_TEMPFAIL)
+lsof ~/.omlx/locks/mac-inference.lock
+cat ~/.omlx/locks/mac-inference.json
+```
+
+`--check` and `lockf -t 0 … /usr/bin/true` try a non-blocking lock and drop it at once. They do not keep ownership. `--check` does not write metadata.
+
+### Crash and stale state
+
+The kernel releases `flock` when the last holding fd closes. That includes normal Drop, errors, cancellation, panic/unwind, and process death (`kill -9`). Sleep/wake keeps a live holder.
+
+Stale `mac-inference.json` can remain after a crash. The lock file is the source of truth. The next holder overwrites or removes the JSON. Never delete `mac-inference.lock` to unlock.
+
+### Cooperative bypass and a possible later proxy
+
+Any process with the API key can POST to `127.0.0.1:8000` and skip this file lock. Native `max_concurrent_requests=1` still serializes admitted work on one model and can queue the bypass. A later loopback proxy that owns port 8000 can enforce this for every HTTP client. That needs an oMLX bind/restart. This change does not do that.
+
+### Debug override and rollback
+
+Locking is on by default and fail closed. If the lock or status check cannot prove it is safe to start inference, Pods does not POST.
+
+```sh
+PODS_OMLX_LOCK=0    # WARNING: disables only the cooperative lock. Unsafe for normal use.
+```
+
+Rollback: set `PODS_OMLX_LOCK=0`, stop using the wrapper, leave oMLX settings and the live service unchanged. Tests can set `PODS_OMLX_LOCK_DIR` to a temporary directory.
+
+This code does not create a LaunchAgent, lock daemon, or other mysterious background process.
 
 ### Ad removal (optional)
 

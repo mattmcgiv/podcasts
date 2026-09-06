@@ -55,6 +55,7 @@ fi
 PUBLISH_IP="${PUBLISH_IP:-127.0.0.1}"
 
 "$CONTAINER_BIN" run -d --name "$NAME" \
+  --dns "${PODS_DEV_DNS:-1.1.1.1}" \
   --cpus 6 --memory 8g \
   -v "$ROOT/client:/work/client" \
   --tmpfs /work/client/node_modules \

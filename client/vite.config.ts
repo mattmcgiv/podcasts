@@ -7,7 +7,21 @@ const viteBase =
 
 export default defineConfig({
   base: viteBase,
-  plugins: [react()],
+  define: { __PODS_BUILD_ID__: JSON.stringify(crypto.randomUUID()) },
+  plugins: [react(), {
+    name: "pods-offline-assets",
+    enforce: "post",
+    generateBundle(_options, bundle) {
+      const paths = [...new Set(["/index.html", "/manifest.webmanifest", "/icon.svg", ...Object.keys(bundle).filter(p => !p.endsWith(".map")).map(p => `/${p}`)])];
+      this.emitFile({ type: "asset", fileName: "offline-assets.json", source: JSON.stringify(paths) });
+    },
+  }],
+  build: {
+    rollupOptions: {
+      input: { main: "index.html", sw: "src/sw.ts" },
+      output: { entryFileNames: chunk => chunk.name === "sw" ? "sw.js" : "assets/[name]-[hash].js" },
+    },
+  },
   server: {
     host: true,
   },

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Api } from "../api";
-import { fmtDate, fmtRemaining, progressFraction } from "../lib";
+import { adStageLabel, fmtDate, fmtRemaining, progressFraction } from "../lib";
 import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
+import { offlineEnabled } from "../offline/client";
 
 interface Props {
   item: EpisodeItem;
@@ -122,10 +123,10 @@ export function EpisodeRow({
     <li className={`episode-row${item.played_at ? " is-played" : ""}${playLocked ? " is-play-locked" : ""}`}>
       <button
         className="row-main"
-        disabled={playLocked}
+        disabled={playLocked || (offlineEnabled() && !item.downloaded)}
         title={playLocked ? "Waiting for ad removal" : undefined}
         onClick={() => {
-          if (playLocked) return;
+          if (playLocked || (offlineEnabled() && !item.downloaded)) return;
           onPlay(item);
         }}
       >
@@ -141,7 +142,7 @@ export function EpisodeRow({
             className={`ad-removal-state is-${effectiveState}`}
             style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
           >
-            {adStageLabel(effectiveState, effectiveStage, effectiveBlocking)}
+            {adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
           </span>
           {adWindowProgress != null && (
             <span
@@ -195,48 +196,4 @@ export function EpisodeRow({
       </button>
     </li>
   );
-}
-
-function adStageLabel(
-  state: EpisodeItem["ad_removal_state"],
-  stage: AdRemovalStage | null,
-  blocking: AdRemovalBlockingReason | null,
-): string {
-  // Terminal states always surface their own wording so Failed stays obvious.
-  if (state === "failed" || stage === "failed") return "Failed";
-  if (state === "ad-free" || stage === "ready") return "Ad-free";
-  // A cancelled job stage is deliberately rendered as the Unfiltered state.
-  if (state === "unfiltered" || stage === "cancelled") return "Unfiltered";
-
-  // An active stage may be paused/waiting; the blocking reason overrides wording.
-  if (blocking) {
-    switch (blocking) {
-      case "storage_limit":
-        return "Paused · low storage";
-      case "model_required":
-        return "Waiting for DeepSeek API key";
-      case "low_power":
-        return "Paused · low power";
-      case "thermal_pressure":
-        return "Paused · thermal";
-      case "playback_active":
-        return "Paused during playback";
-    }
-  }
-
-  switch (stage) {
-    case "queued":
-      return "Queued";
-    case "downloading":
-      return "Downloading";
-    case "downloaded":
-      return "Downloaded";
-    case "transcribing":
-      return "Transcribing";
-    case "classifying":
-      return "Finding ads";
-    default:
-      // No granular stage reported; fall back to the coarse Preparing label.
-      return "Preparing";
-  }
 }

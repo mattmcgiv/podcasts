@@ -2,8 +2,8 @@ import { useState } from "react";
 
 /** Square artwork with a quiet fallback block when the URL is missing/broken. */
 export function Artwork({ src, size, alt = "" }: { src: string; size: number; alt?: string }) {
-  const [broken, setBroken] = useState(false);
-  if (!src || broken) {
+  const [brokenSrc, setBrokenSrc] = useState<string | null>(null);
+  if (!src || brokenSrc === src) {
     return <div className="art art-fallback" style={{ width: size, height: size }} aria-hidden />;
   }
   return (
@@ -14,7 +14,7 @@ export function Artwork({ src, size, alt = "" }: { src: string; size: number; al
       height={size}
       alt={alt}
       loading="lazy"
-      onError={() => setBroken(true)}
+      onError={() => setBrokenSrc(src)}
     />
   );
 }

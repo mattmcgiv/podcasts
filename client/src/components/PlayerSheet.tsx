@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { SPEEDS } from "../config";
+import { offlineEnabled } from "../offline/client";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
@@ -177,7 +178,7 @@ export function PlayerSheet() {
         </div>
 
         <div className="player-options">
-          <div className="cast-row" role="group" aria-label="Audio output">
+          {!offlineEnabled() && <div className="cast-row" role="group" aria-label="Audio output">
             <span className="cast-label">Play on</span>
             <div className="cast-choices">
               <button
@@ -215,7 +216,7 @@ export function PlayerSheet() {
                 Playing through Mac · progress saves on this phone
               </p>
             )}
-          </div>
+          </div>}
           <div className="player-action-row">
             <button
               type="button"

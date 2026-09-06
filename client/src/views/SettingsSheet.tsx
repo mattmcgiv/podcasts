@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { OfflineSettings } from "../offline/Controls";
+import { offlineEnabled } from "../offline/client";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
-import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration } from "../lib";
+import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration, localProcessingCopy } from "../lib";
 import type { AdRemovalSettings, CarBluetoothSettings, FeedPreview, FeedPreviewEpisode, RefreshStatus } from "../types";
 
 function formatGB(bytes: number): string {
@@ -248,6 +250,8 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     });
   }
 
+  const localCopy = offlineEnabled() ? localProcessingCopy() : null;
+
   return (
     <div className="settings-sheet" role="dialog" aria-label="Settings">
       <header className="sheet-header">
@@ -257,6 +261,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       </header>
 
       <div className="settings-body">
+        {offlineEnabled() && <OfflineSettings />}
         {!window.PODS_API_BASE && (
           <section className="settings-section" aria-labelledby="account-title">
             <h2 className="section-title" id="account-title">Account</h2>
@@ -335,7 +340,14 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
             )}
           </section>
         )}
-        {adRemoval && (
+        {localCopy && (
+          <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
+            <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
+            <p className="settings-detail">{localCopy.summary}</p>
+            <p className="settings-detail">{localCopy.pause}</p>
+          </section>
+        )}
+        {adRemoval && !offlineEnabled() && (
           <section className="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
             <h2 className="section-title" id="ad-removal-title">Ad removal</h2>
             <p className="settings-detail">
@@ -454,7 +466,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           </div>
         </section>
 
-        <section className="settings-section" aria-labelledby="add-episode-title">
+        {!offlineEnabled() && <section className="settings-section" aria-labelledby="add-episode-title">
           <h2 className="section-title" id="add-episode-title">Add one episode</h2>
           <p className="settings-detail">
             Paste an RSS feed URL, then pick one episode for Listen without subscribing to the show.
@@ -494,6 +506,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           )}
         </section>
 
+        }
         <section className="settings-section" aria-labelledby="subscriptions-title">
           <h2 className="section-title" id="subscriptions-title">Library</h2>
           <p className="settings-detail">Import, export, or refresh your subscriptions.</p>

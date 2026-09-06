@@ -122,6 +122,8 @@ export function ShowsView() {
                     <span className="row-title">{show.title}</span>
                     <span className="row-sub">
                       {show.unplayed_count > 0 ? `${show.unplayed_count} unplayed` : "all played"} · {show.episode_count} episodes
+                      {show.ready_count != null && ` · ${show.ready_count} ready`}
+                      {(show.pending_count ?? 0) > 0 && ` · ${show.pending_count} awaiting processing`}
                     </span>
                   </span>
                 </button>

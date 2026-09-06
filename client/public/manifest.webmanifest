@@ -1,7 +1,7 @@
 {
   "name": "Pods",
   "short_name": "Pods",
-  "description": "Your episodes, newest first.",
+  "description": "Your episodes, oldest unplayed first. Download for offline playback.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0d10",

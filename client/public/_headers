@@ -1,0 +1,21 @@
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; connect-src 'self' https://sync.pods.mcgiv.dev:8443; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+# Artwork fetch() in the worker is connect-src on this script, not document img-src.
+# Detach the document policy first. Two CSP headers intersect and still block publisher images.
+/sw.js
+  Cache-Control: no-cache
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'self'; script-src 'self'; connect-src 'self' https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+
+/index.html
+  Cache-Control: no-cache
+
+/offline-assets.json
+  Cache-Control: no-cache
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

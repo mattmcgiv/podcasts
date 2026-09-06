@@ -7,6 +7,7 @@ import { postPodsLifecycleEvent } from "./podsLifecycle";
 import { navigate, useRoute } from "./router";
 import { PlayedView } from "./views/PlayedView";
 import { RecentView } from "./views/RecentView";
+import { NotificationsView } from "./views/NotificationsView";
 import { ShowDetailView } from "./views/ShowDetailView";
 import { ShowsView } from "./views/ShowsView";
 import { FollowsView } from "./views/FollowsView";
@@ -63,7 +64,7 @@ function Shell() {
   function onTouchEnd(event: React.TouchEvent<HTMLElement>) {
     const start = swipeStart.current;
     swipeStart.current = null;
-    if (!start || event.changedTouches.length !== 1 || route.showId != null) return;
+    if (!start || event.changedTouches.length !== 1 || route.showId != null || route.notifications) return;
     const touch = event.changedTouches[0];
     const xDistance = touch.clientX - start.x;
     const yDistance = touch.clientY - start.y;
@@ -81,8 +82,8 @@ function Shell() {
   return (
     <div className="shell">
       <main className="content" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-        <div className={`tab-swipe-screen${swipeDirection ? ` tab-swipe-${swipeDirection}` : ""}`} key={`${route.tab}-${route.showId ?? "root"}`}>
-          {route.tab === "recent" && <RecentView />}
+        <div className={`tab-swipe-screen${swipeDirection ? ` tab-swipe-${swipeDirection}` : ""}`} key={`${route.tab}-${route.showId ?? "root"}-${route.notifications ? "n" : "t"}`}>
+          {route.tab === "recent" && (route.notifications ? <NotificationsView /> : <RecentView />)}
           {route.tab === "played" && <PlayedView />}
           {route.tab === "shows" &&
             (route.showId != null ? <ShowDetailView showId={route.showId} /> : <ShowsView />)}

@@ -38,109 +38,49 @@ pub struct ParsedFeed {
 }
 
 pub fn parse_feed(data: &[u8]) -> Result<ParsedFeed, Error> {
-    let xml = String::from_utf8_lossy(data);
-    let mut feed = ParsedFeed::default();
-    if let Some(title) = tag_text(&xml, "title") {
-        feed.title = title;
-    }
-    if let Some(desc) = tag_text(&xml, "description") {
-        feed.description = desc;
-    }
-    let mut rest: &str = &xml;
-    while let Some(start) = rest.find("<item") {
-        let after = &rest[start..];
-        let Some(end_rel) = after.to_lowercase().find("</item>") else { break };
-        let item = &after[..end_rel + 7];
+    let xml = std::str::from_utf8(data).map_err(|_| Error::Upstream("feed is not UTF-8".into()))?;
+    let document = roxmltree::Document::parse(xml).map_err(|_| Error::Upstream("feed contains invalid XML".into()))?;
+    let channel = document.root_element().children().find(|n| n.has_tag_name("channel")).ok_or_else(|| Error::Upstream("feed has no RSS channel".into()))?;
+    let text = |node: roxmltree::Node<'_, '_>, name: &str| -> String {
+        node.children().find(|n| n.is_element() && n.tag_name().name() == name).map(|n| {
+            n.children().filter(|c| c.is_text()).filter_map(|c| c.text()).collect::<String>().trim().to_owned()
+        }).unwrap_or_default()
+    };
+    let image = |node: roxmltree::Node<'_, '_>| -> String {
+        node.children().find(|n| n.is_element() && n.tag_name().name() == "image" && n.tag_name().namespace().is_some_and(|ns| ns.contains("itunes.com")))
+            .and_then(|n| n.attribute("href")).map(str::to_owned).filter(|s| !s.trim().is_empty())
+            .or_else(|| node.children().find(|n| n.has_tag_name("image")).map(|n| text(n, "url")))
+            .unwrap_or_default()
+    };
+    let mut feed = ParsedFeed {
+        title: text(channel, "title"),
+        description: text(channel, "description"),
+        image_url: image(channel),
+        site_url: text(channel, "link"),
+        episodes: Vec::new(),
+    };
+    for item in channel.children().filter(|n| n.has_tag_name("item")) {
+        let description = text(item, "description");
+        let duration = text(item, "duration");
+        let date = text(item, "pubDate");
         let mut current = ParsedEpisode {
-            guid: tag_text(item, "guid").unwrap_or_default(),
-            title: tag_text(item, "title").unwrap_or_default(),
-            notes_html: tag_text(item, "description").or_else(|| tag_text(item, "content:encoded")).unwrap_or_default(),
-            audio_url: enclosure_url(item).unwrap_or_default(),
-            duration_secs: tag_text(item, "itunes:duration").and_then(|d| parse_duration(&d)),
-            published_at: tag_text(item, "pubDate").or_else(|| tag_text(item, "pubdate")).map(|d| parse_feed_date(&d)).unwrap_or(0),
-            image_url: itunes_image(item).unwrap_or_default(),
+            guid: text(item, "guid"),
+            title: text(item, "title"),
+            notes_html: if description.is_empty() { text(item, "encoded") } else { description },
+            audio_url: item.children().find(|n| n.has_tag_name("enclosure")).and_then(|n| n.attribute("url")).unwrap_or_default().to_owned(),
+            duration_secs: parse_duration(&duration),
+            published_at: parse_feed_date(&date),
+            image_url: image(item),
         };
         if current.audio_url.is_empty() {
-            rest = &after[end_rel + 7..];
             continue;
         }
         if current.guid.trim().is_empty() {
             current.guid = current.audio_url.clone();
         }
         feed.episodes.push(current);
-        rest = &after[end_rel + 7..];
     }
     Ok(feed)
-}
-
-fn tag_text(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}");
-    let close = format!("</{tag}>");
-    let lower = xml.to_lowercase();
-    let open_l = open.to_lowercase();
-    let close_l = close.to_lowercase();
-    let start = lower.find(&open_l)?;
-    let after = &xml[start..];
-    let gt = after.find('>')?;
-    let inner = &after[gt + 1..];
-    let inner_l = inner.to_lowercase();
-    let end = inner_l.find(&close_l)?;
-    Some(decode_entities(inner[..end].trim()))
-}
-
-fn enclosure_url(item: &str) -> Option<String> {
-    let lower = item.to_lowercase();
-    let idx = lower.find("<enclosure")?;
-    let rest = &item[idx..];
-    let end = rest.find('>')?;
-    let attrs = parse_attrs(&rest[10..end]);
-    attrs.get("url").cloned()
-}
-
-fn itunes_image(item: &str) -> Option<String> {
-    let lower = item.to_lowercase();
-    let idx = lower.find("<itunes:image")?;
-    let rest = &item[idx..];
-    let end = rest.find('>')?;
-    parse_attrs(&rest[13..end]).get("href").cloned()
-}
-
-fn parse_attrs(src: &str) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    let mut rest = src.trim().trim_end_matches('/');
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        let eq = match rest.find('=') {
-            Some(i) => i,
-            None => break,
-        };
-        let key = rest[..eq].trim().to_lowercase();
-        rest = rest[eq + 1..].trim_start();
-        if rest.starts_with('"') || rest.starts_with('\'') {
-            let quote = rest.chars().next().unwrap();
-            rest = &rest[1..];
-            if let Some(end) = rest.find(quote) {
-                out.insert(key, decode_entities(&rest[..end]));
-                rest = &rest[end + 1..];
-            } else {
-                break;
-            }
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            out.insert(key, decode_entities(&rest[..end]));
-            rest = &rest[end..];
-        }
-    }
-    out
-}
-
-fn decode_entities(value: &str) -> String {
-    value
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
 }
 
 pub fn parse_feed_date(value: &str) -> i64 {

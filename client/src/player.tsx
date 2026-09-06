@@ -9,6 +9,8 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
+import { offlineEnabled } from "./offline/client";
+import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
   type AudioEngine,
@@ -99,6 +101,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
+  const playingHashRef = useRef<string | undefined>(undefined);
   const contextRef = useRef<PlayContext>("recent");
   const speedRef = useRef(1);
   const autoplayRef = useRef(true);
@@ -114,8 +117,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const flushPosition = useCallback(() => {
     const a = audioRef.current;
     const cur = currentRef.current;
-    if (a && cur && a.currentTime > 0) {
-      void Api.setPosition(cur.id, a.currentTime).catch(() => {});
+    // new Audio() reports 0 until loadedmetadata applies a pending nonzero resume.
+    if (a && cur && Number.isFinite(a.currentTime) && (a.currentTime > 0 || (offlineEnabled() && a.currentTime === 0 && resumeAtRef.current === 0))) {
+      const saved = offlineEnabled() ? Api.setPosition(cur.id, a.currentTime, playingHashRef.current) : Api.setPosition(cur.id, a.currentTime);
+      void saved.catch(() => {});
     }
   }, []);
 
@@ -144,6 +149,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       flushPosition();
       a.pause();
       a.removeAttribute("src");
+      protectPlayingArtifact(null);
       a.load();
     }
     currentRef.current = null;
@@ -158,6 +164,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setShowNotesGenerating(false);
     setShowNotesError(null);
   }, [flushPosition]);
+
+  useEffect(() => {
+    const onClose = (event: Event) => {
+      const id = (event as CustomEvent<{ id?: number }>).detail?.id;
+      if (endInFlightRef.current) return;
+      if (currentRef.current?.id === id) close();
+    };
+    window.addEventListener("pods-close-episode", onClose);
+    return () => window.removeEventListener("pods-close-episode", onClose);
+  }, [close]);
 
   const requestShowNotes = useCallback((episodeID: number) => {
     const operation = beginVisitOperation(episodeID);
@@ -207,6 +223,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void Api.episode(episodeID)
         .then((detail) => {
           if (!acceptVisitOperation(operation)) return;
+          if (offlineEnabled() && detail.manifest?.hash !== playingHashRef.current) return;
           setCurrent((prev) => (prev?.id === episodeID ? { ...prev, ...detail } : prev));
           if (detail.show_notes?.length) {
             setShowNotesError(null);
@@ -288,6 +305,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       flushPosition();
       const a = ensureAudio();
       contextRef.current = context;
+      if (offlineEnabled() && (!item.downloaded || !item.manifest)) return;
+      if (offlineEnabled()) protectPlayingArtifact(item.manifest?.hash ?? null);
+      playingHashRef.current = item.manifest?.hash;
       setCurrent(item);
       currentRef.current = item;
       currentEpisodeVisitRef.current = {
@@ -430,6 +450,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   // Periodic position sync while playing.
   useEffect(() => {
+    if (!offlineEnabled()) return;
+    const hidden = () => { if (document.visibilityState === "hidden") flushPosition(); };
+    document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("pagehide", flushPosition);
+    return () => { document.removeEventListener("visibilitychange", hidden); window.removeEventListener("pagehide", flushPosition); };
+  }, [flushPosition]);
+
+  useEffect(() => {
     if (!playing) return;
     const t = setInterval(() => {
       flushPosition();
@@ -481,9 +509,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const seekTo = useCallback((secs: number) => {
     const a = audioRef.current;
     if (!a || !Number.isFinite(secs)) return;
+    resumeAtRef.current = 0;
     a.currentTime = Math.max(0, secs);
     setPosition(a.currentTime);
-  }, []);
+    if (offlineEnabled()) flushPosition();
+  }, [flushPosition]);
 
   const skipForward = useCallback(() => {
     const a = audioRef.current;
@@ -498,13 +528,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const markPlayedAndClose = useCallback(async () => {
     const cur = currentRef.current;
     if (!cur) return;
+    const id = cur.id;
+    close();
     try {
-      await Api.markPlayed(cur.id);
+      await Api.markPlayed(id);
       emitEpisodesChanged();
     } catch {
-      // leave the player open if the call failed? No: close anyway, list reload will resync.
+      // Playback already stopped. List reload resyncs if the mark-played call failed.
     }
-    close();
   }, [close]);
 
   const setCastOutput = useCallback((target: "local" | "mac") => {

@@ -16,6 +16,7 @@ import type {
   ShowDetailResponse,
   CarBluetoothSettings,
 } from "./types";
+import { localRequest, offlineEnabled } from "./offline/client";
 
 declare global {
   interface Window {
@@ -32,6 +33,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}, raw = false): Promise<T> {
+  if (offlineEnabled() && !path.startsWith("/auth/")) return localRequest<T>(path, init, raw);
   const method = init.method ?? "GET";
   const target = `/api${path}`;
   const headers = new Headers(init.headers);
@@ -154,10 +156,10 @@ export const Api = {
     }),
   markPlayed: (id: number) => request<void>(`/episodes/${id}/played`, { method: "POST" }),
   unmarkPlayed: (id: number) => request<void>(`/episodes/${id}/played`, { method: "DELETE" }),
-  setPosition: (id: number, seconds: number) =>
+  setPosition: (id: number, seconds: number, artifact_hash?: string) =>
     request<void>(`/episodes/${id}/position`, {
       method: "PUT",
-      body: JSON.stringify({ seconds }),
+      body: JSON.stringify({ seconds, artifact_hash }),
     }),
   prepareAdRemoval: (id: number) =>
     request<{ stage: string }>(`/episodes/${id}/ad-removal/prepare`, { method: "POST" }),

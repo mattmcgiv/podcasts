@@ -1,6 +1,8 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Api } from "./api";
+import { POSITION_SYNC_INTERVAL_MS } from "./config";
 import { PlayerProvider, usePlayer } from "./player";
 import {
   adRemovalStatusItem,
@@ -11,12 +13,19 @@ import {
   type MockRoutes,
 } from "./test/mockApi";
 import { FakeAudio } from "./test/fakeAudio";
+import type { ArtifactManifest, Snapshot } from "./offline/store";
+import { allDownloads, readRecord, updateState, writeRecord } from "./offline/store";
+import * as store from "./offline/store";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import type { EpisodeItem } from "./types";
 
 afterEach(() => {
   vi.useRealTimers();
   delete window.webkit;
   delete window.PODS_API_BASE;
+  delete window.PODS_LOCAL_CLIENT;
   delete window.PodsAudioBridge;
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
 
 function Probe() {
@@ -1110,5 +1119,289 @@ describe("PlayerProvider", () => {
     );
     await user.click(screen.getByText("play-bad-art"));
     expect(FakeAudio.last().src).toBe("https://h.example/ep.mp3");
+  });
+});
+
+const ARTIFACT_HASH = "a".repeat(64);
+
+function downloadedEpisode(overrides: Partial<EpisodeItem> = {}): EpisodeItem {
+  const manifest: ArtifactManifest = {
+    version: 1,
+    episode_id: 1,
+    hash: ARTIFACT_HASH,
+    source_hash: "source",
+    bytes: 8,
+    duration: 1800,
+    chunk_size: 1024 ** 2,
+    chunks: [ARTIFACT_HASH],
+    timeline: [{ original_start: 0, original_end: 1800, processed_start: 0 }],
+  };
+  return episode({
+    id: 1,
+    position_secs: 30,
+    downloaded: true,
+    manifest,
+    ...overrides,
+  });
+}
+
+function OfflinePositionProbe({ item }: { item: EpisodeItem }) {
+  const p = usePlayer();
+  return (
+    <div>
+      <button onClick={() => p.playEpisode(item, "recent")}>play-offline</button>
+      <button onClick={() => p.seekTo(0)}>restart</button>
+      <button onClick={p.toggle}>toggle</button>
+      <span data-testid="state">
+        {p.current ? `${p.current.id}:${p.playing ? "playing" : "paused"}` : "none"}
+      </span>
+      <span data-testid="pos">{Math.floor(p.position)}</span>
+    </div>
+  );
+}
+
+function hideDocument() {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+describe("PlayerProvider offline position flush", () => {
+  function renderOffline(item: EpisodeItem) {
+    window.PODS_LOCAL_CLIENT = true;
+    const setPosition = vi.spyOn(Api, "setPosition").mockResolvedValue(undefined);
+    render(
+      <PlayerProvider>
+        <OfflinePositionProbe item={item} />
+      </PlayerProvider>,
+    );
+    return { setPosition };
+  }
+
+  it("does not persist startup zero while a nonzero resume is pending", async () => {
+    vi.useFakeTimers();
+    const { setPosition } = renderOffline(downloadedEpisode());
+
+    await act(async () => {
+      screen.getByText("play-offline").click();
+      await Promise.resolve();
+    });
+    const audio = FakeAudio.last();
+    expect(audio.currentTime).toBe(0);
+    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_SYNC_INTERVAL_MS);
+    });
+    act(() => {
+      hideDocument();
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    act(() => {
+      screen.getByText("toggle").click();
+    });
+    expect(setPosition).not.toHaveBeenCalled();
+
+    act(() => audio.emitLoadedMetadata(1800));
+    expect(audio.currentTime).toBe(30);
+
+    act(() => {
+      hideDocument();
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    expect(setPosition).toHaveBeenCalledWith(1, 30, ARTIFACT_HASH);
+
+    await act(async () => {
+      screen.getByText("toggle").click();
+      await Promise.resolve();
+    });
+    setPosition.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_SYNC_INTERVAL_MS);
+    });
+    expect(setPosition).toHaveBeenCalledWith(1, 30, ARTIFACT_HASH);
+  });
+
+  it("persists an explicit restart zero before and after resume applies", async () => {
+    const { setPosition } = renderOffline(downloadedEpisode());
+    const user = userEvent.setup();
+    await user.click(screen.getByText("play-offline"));
+    const audio = FakeAudio.last();
+    expect(audio.currentTime).toBe(0);
+
+    await user.click(screen.getByText("restart"));
+    expect(setPosition).toHaveBeenCalledWith(1, 0, ARTIFACT_HASH);
+
+    act(() => audio.emitLoadedMetadata(1800));
+    expect(audio.currentTime).toBe(0);
+
+    act(() => audio.emitTime(40));
+    setPosition.mockClear();
+    await user.click(screen.getByText("restart"));
+    expect(setPosition).toHaveBeenCalledWith(1, 0, ARTIFACT_HASH);
+  });
+
+  it("persists legitimate startup zero when no resume is waiting", async () => {
+    vi.useFakeTimers();
+    const { setPosition } = renderOffline(downloadedEpisode({ position_secs: 0 }));
+
+    await act(async () => {
+      screen.getByText("play-offline").click();
+      await Promise.resolve();
+    });
+    expect(FakeAudio.last().currentTime).toBe(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(POSITION_SYNC_INTERVAL_MS);
+    });
+    act(() => {
+      hideDocument();
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    expect(setPosition).toHaveBeenCalledWith(1, 0, ARTIFACT_HASH);
+  });
+});
+
+const NEXT_HASH = "b".repeat(64);
+
+function offlineManifest(id: number, hash: string): ArtifactManifest {
+  return {
+    version: 1,
+    episode_id: id,
+    hash,
+    source_hash: "source",
+    bytes: 8,
+    duration: 1800,
+    chunk_size: 1024 ** 2,
+    chunks: [hash],
+    timeline: [{ original_start: 0, original_end: 1800, processed_start: 0 }],
+  };
+}
+
+function listenItem(id: number, hash: string): EpisodeItem {
+  return downloadedEpisode({
+    id,
+    title: `Episode ${id}`,
+    audio_url: `/_media/${hash}.m4a`,
+    downloaded: true,
+    manifest: offlineManifest(id, hash),
+    position_secs: 0,
+  });
+}
+
+function OfflineCleanupProbe({ item }: { item: EpisodeItem }) {
+  const p = usePlayer();
+  return (
+    <div>
+      <button onClick={() => p.playEpisode(item, "recent")}>play-offline</button>
+      <button onClick={() => void p.markPlayedAndClose()}>done</button>
+      <span data-testid="state">
+        {p.current ? `${p.current.id}:${p.playing ? "playing" : "paused"}` : "none"}
+      </span>
+    </div>
+  );
+}
+
+async function seedListenDownloads() {
+  const snapshot: Snapshot = {
+    version: 1,
+    cursor: 0,
+    replace: true,
+    settings: { speed: 1, autoplay: true },
+    versions: {},
+    shows: [{ id: 1, feed_url: "https://example.org/feed", title: "Example", description: "", image_url: "", site_url: "", episode_count: 2, unplayed_count: 2 }],
+    episodes: [1, 2].map((id) => {
+      const hash = id === 1 ? ARTIFACT_HASH : NEXT_HASH;
+      return {
+        id,
+        podcast_id: 1,
+        podcast_title: "Example",
+        title: `Episode ${id}`,
+        podcast_image: "",
+        image_url: "",
+        published_at: id,
+        duration_secs: 1800,
+        position_secs: 0,
+        played_at: null,
+        archived_at: null,
+        notes_html: "",
+        show_notes: [],
+        ad_markers: [],
+        audio_url: `/_media/${hash}.m4a`,
+        ad_removal_state: "ad-free" as const,
+        ad_removal_stage: "ready" as const,
+        ad_removal_action: null,
+        ad_removal_blocking_reason: null,
+        manifest: offlineManifest(id, hash),
+      };
+    }),
+  };
+  await updateState((s) => { s.snapshot = snapshot; });
+  for (const [id, hash] of [[1, ARTIFACT_HASH], [2, NEXT_HASH]] as const) {
+    await writeRecord("meta", `manifest:${hash}`, offlineManifest(id, hash));
+    await writeRecord("chunks", `${hash}:0`, new TextEncoder().encode("abcdefgh").buffer);
+    await writeRecord("downloads", hash, { hash, episode: id, bytes: 8, complete: true, touched: 0 });
+  }
+}
+
+describe("PlayerProvider automatic download cleanup", () => {
+  beforeEach(() => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+    window.PODS_LOCAL_CLIENT = true;
+    window.PODS_API_BASE = "https://sync.pods.mcgiv.dev:8443";
+  });
+
+  it("on ended: removes completed audio, keeps played metadata, and autoplays the next download", async () => {
+    await seedListenDownloads();
+    const first = listenItem(1, ARTIFACT_HASH);
+    render(
+      <PlayerProvider>
+        <OfflineCleanupProbe item={first} />
+      </PlayerProvider>,
+    );
+    await act(async () => {
+      screen.getByText("play-offline").click();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    await act(async () => FakeAudio.last().emitEnded());
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("2:playing"));
+    expect(FakeAudio.last().src).toBe(`/_media/${NEXT_HASH}.m4a`);
+    expect(await allDownloads()).toEqual([expect.objectContaining({ hash: NEXT_HASH, episode: 2, complete: true })]);
+    expect(await readRecord("meta", `manifest:${ARTIFACT_HASH}`)).toBeUndefined();
+    expect(await readRecord("chunks", `${ARTIFACT_HASH}:0`)).toBeUndefined();
+    expect((await Api.played()).items.map((item) => item.id)).toEqual([1]);
+    expect((await Api.recent()).items.map((item) => item.id)).toEqual([2]);
+  });
+
+  it("stops the active episode before deleting its download", async () => {
+    await seedListenDownloads();
+    const original = store.deleteDownload.bind(store);
+    const spy = vi.spyOn(store, "deleteDownload").mockImplementation(async (hash) => {
+      expect(screen.getByTestId("state")).toHaveTextContent("none");
+      expect(FakeAudio.last().src).toBe("");
+      expect(FakeAudio.last().paused).toBe(true);
+      return original(hash);
+    });
+    const first = listenItem(1, ARTIFACT_HASH);
+    render(
+      <PlayerProvider>
+        <OfflineCleanupProbe item={first} />
+      </PlayerProvider>,
+    );
+    await act(async () => {
+      screen.getByText("play-offline").click();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    await act(async () => {
+      screen.getByText("done").click();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("none"));
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    expect(await allDownloads()).toEqual([expect.objectContaining({ hash: NEXT_HASH, episode: 2 })]);
+    expect(await readRecord("downloads", ARTIFACT_HASH)).toBeUndefined();
+    spy.mockRestore();
   });
 });

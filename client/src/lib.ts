@@ -1,3 +1,5 @@
+import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "./types";
+
 /** 65 -> "1:05", 3725 -> "1:02:05" */
 export function fmtTime(secs: number): string {
   const s = Math.max(0, Math.floor(secs));
@@ -48,6 +50,9 @@ export function progressFraction(item: {
   return Math.min(1, Math.max(0, item.position_secs / item.duration_secs));
 }
 
+/** Local Mac oMLX model used for ad classification and show notes. */
+export const LOCAL_OMLX_MODEL = "DeepSeek-V4-Flash-0731-2.4bit-mixed";
+
 /** Formats a USD amount with extra precision for sub-cent DeepSeek costs. */
 export function formatUSD(value: number): string {
   if (!Number.isFinite(value) || value === 0) return "$0.00";
@@ -63,6 +68,16 @@ export function formatUSD(value: number): string {
 export function formatOptionalUSD(value: number | null): string {
   if (value == null) return "—";
   return formatUSD(value);
+}
+
+export function localProcessingCopy(modelRepository = LOCAL_OMLX_MODEL): {
+  summary: string;
+  pause: string;
+} {
+  return {
+    summary: `Ad classification and show notes run locally on the Mac through oMLX using ${modelRepository}.`,
+    pause: "Processing pauses while the Mac is unavailable.",
+  };
 }
 
 export function cloudClassifierCopy(settings: {
@@ -88,4 +103,62 @@ export function cloudClassifierCopy(settings: {
     canEnable: false,
     shouldPoll: false,
   };
+}
+
+/** Listen pause banner for a missing cloud classifier. Local-browser path never asks for an API key. */
+export function listenClassifierPause(
+  settings: {
+    enabled: boolean;
+    classifier_available: boolean;
+    classifier_unavailable_reason: string | null;
+  } | null,
+  local: boolean,
+): ReturnType<typeof cloudClassifierCopy> | null {
+  if (local || !settings || !settings.enabled || settings.classifier_available) return null;
+  return cloudClassifierCopy(settings);
+}
+
+export function adStageLabel(
+  state: EpisodeItem["ad_removal_state"],
+  stage: AdRemovalStage | null,
+  blocking: AdRemovalBlockingReason | null,
+  local = false,
+): string {
+  // Terminal states always surface their own wording so Failed stays obvious.
+  if (state === "failed" || stage === "failed") return "Failed";
+  if (state === "ad-free" || stage === "ready") return "Ad-free";
+  // A cancelled job stage is deliberately rendered as the Unfiltered state.
+  if (state === "unfiltered" || stage === "cancelled") return "Unfiltered";
+
+  // An active stage may be paused/waiting; the blocking reason overrides wording.
+  if (blocking) {
+    switch (blocking) {
+      case "storage_limit":
+        return "Paused · low storage";
+      case "model_required":
+        return local ? "Paused · Mac unavailable" : "Waiting for DeepSeek API key";
+      case "low_power":
+        return "Paused · low power";
+      case "thermal_pressure":
+        return "Paused · thermal";
+      case "playback_active":
+        return "Paused during playback";
+    }
+  }
+
+  switch (stage) {
+    case "queued":
+      return "Queued";
+    case "downloading":
+      return "Downloading";
+    case "downloaded":
+      return "Downloaded";
+    case "transcribing":
+      return "Transcribing";
+    case "classifying":
+      return "Finding ads";
+    default:
+      // No granular stage reported; fall back to the coarse Preparing label.
+      return "Preparing";
+  }
 }

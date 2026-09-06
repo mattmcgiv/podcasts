@@ -1,6 +1,9 @@
 pub mod auth;
 pub mod backend;
 pub mod bootstrap;
+pub mod browser;
+pub mod local_worker;
+pub mod omlx_lock;
 pub mod classify;
 pub mod coordinator;
 pub mod db;
