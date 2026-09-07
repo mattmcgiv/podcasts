@@ -2,6 +2,7 @@
 export class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
   static failNextPlay = false;
+  static pendingPlay: Promise<void> | null = null;
 
   src = "";
   currentTime = 0;
@@ -18,6 +19,7 @@ export class FakeAudio extends EventTarget {
   static reset(): void {
     FakeAudio.instances = [];
     FakeAudio.failNextPlay = false;
+    FakeAudio.pendingPlay = null;
   }
 
   static last(): FakeAudio {
@@ -27,6 +29,11 @@ export class FakeAudio extends EventTarget {
   }
 
   play(): Promise<void> {
+    if (FakeAudio.pendingPlay) {
+      const pending = FakeAudio.pendingPlay;
+      FakeAudio.pendingPlay = null;
+      return pending;
+    }
     if (FakeAudio.failNextPlay) {
       FakeAudio.failNextPlay = false;
       return Promise.reject(new Error("play failed"));
