@@ -912,7 +912,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .shell:has(.notification-stack) .content {
-  padding-bottom: calc(var(--tabbar-h) + var(--mini-h) + env(safe-area-inset-bottom) + 16px + 11rem);
+  padding-bottom: calc(var(--tabbar-h) + var(--mini-h) + env(safe-area-inset-bottom) + 16px + 4rem);
 }
 
 .notification-bar {
@@ -1609,3 +1609,14 @@ input[type="search"]::-webkit-search-cancel-button {
 .settings-section[aria-label="Offline library"] label { display: flex; justify-content: space-between; gap: 1rem; margin: 1rem 0; }
 .settings-section[aria-label="Offline library"] input { width: 6rem; }
 .show-row .row-sub { white-space: normal; }
+
+.notification-clear {
+  margin-left: auto;
+  min-height: 44px;
+  flex-shrink: 0;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.notification-clear:disabled { opacity: 0.5; }
