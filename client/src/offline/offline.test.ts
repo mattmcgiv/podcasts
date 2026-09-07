@@ -4,7 +4,7 @@ import { webcrypto } from "node:crypto";
 import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writeRecord, type ArtifactManifest, type LocalState, type Snapshot } from "./store";
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
-import { applyOverlay, enqueue, hasLocalLibrary, localRequest, network, offlineEnabled, resolveConflict, state, synchronize, validateSnapshot } from "./client";
+import { clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, network, offlineEnabled, resolveConflict, state, synchronize, validateSnapshot } from "./client";
 import { cleanupPlayedDownload, downloadEpisode, downloadError, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { byteRange, localMedia } from "./media";
 import type { EpisodeDetail } from "../types";
@@ -443,5 +443,38 @@ describe("automatic Listen downloads", () => {
     vi.mocked(fetch).mockResolvedValue(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
     await prefetch();
     expect((await localRequest<{ items: { id: number }[] }>("/recent")).items.map(e => e.id)).toEqual([1]);
+  });
+});
+
+
+describe("notification dismissal", () => {
+  const notice = (id: number) => ({ id, episode_id: 1, category: "ad_classification" as const,
+    failed_stage: "classifying", message: "Ad classification failed.", outcome: "retry" as const,
+    created_at: id, episode_title: "Episode", podcast_title: "Example" });
+
+  it("persists offline dismissal across rereads and repeated sync snapshots while allowing new failures", async () => {
+    const incoming = { ...snapshot(), notifications: [notice(3), notice(2), notice(1)] };
+    await updateState(s => { s.snapshot = incoming; });
+    expect(store.visibleNotifications(await state())).toHaveLength(3);
+    await clearNotifications(3);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(store.visibleNotifications(await state())).toEqual([]);
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(incoming)));
+    await synchronize();
+    expect(store.visibleNotifications(await state())).toEqual([]);
+    incoming.notifications.unshift(notice(4));
+    await synchronize();
+    expect(store.visibleNotifications(await state()).map(n => n.id)).toEqual([4]);
+    expect((await state()).snapshot?.episodes).toEqual(incoming.episodes);
+    expect((await state()).outbox).toEqual([]);
+  });
+
+  it("retains notices arriving during clear and never lowers the marker on stale clears", async () => {
+    await updateState(s => { s.snapshot = { ...snapshot(), notifications: [notice(5), notice(4), notice(3)] }; });
+    await Promise.all([clearNotifications(4), clearNotifications(3)]);
+    expect(store.visibleNotifications(await state()).map(n => n.id)).toEqual([5]);
+    await clearNotifications(5);
+    await clearNotifications(3);
+    expect(store.visibleNotifications(await state())).toEqual([]);
   });
 });

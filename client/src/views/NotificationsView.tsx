@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { navigate } from "../router";
-import { state } from "../offline/client";
-import { snapshotNotifications } from "../offline/store";
+import { clearNotifications, state } from "../offline/client";
+import { visibleNotifications } from "../offline/store";
 import type { ProcessingFailureCategory, ProcessingFailureOutcome, ProcessingNotification } from "../types";
 
-export const COMPACT_NOTIFICATION_LIMIT = 3;
+export const COMPACT_NOTIFICATION_LIMIT = 1;
 
 export function failureAreaLabel(category: ProcessingFailureCategory): string {
   switch (category) {
@@ -45,13 +45,15 @@ function useCachedNotifications(): ProcessingNotification[] | null {
   const [items, setItems] = useState<ProcessingNotification[] | null>(null);
   useEffect(() => {
     let active = true;
+    let generation = 0;
     const refresh = () => {
+      const current = ++generation;
       void state()
         .then((local) => {
-          if (active) setItems(newestFirst(snapshotNotifications(local.snapshot)));
+          if (active && current === generation) setItems(newestFirst(visibleNotifications(local)));
         })
         .catch(() => {
-          if (active) setItems([]);
+          if (active && current === generation) setItems([]);
         });
     };
     refresh();
@@ -87,6 +89,19 @@ export function ProcessingNotifications() {
 
 export function NotificationsView() {
   const items = useCachedNotifications() ?? [];
+  const [clearing, setClearing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function clearAll() {
+    setClearing(true);
+    setError(null);
+    try {
+      await clearNotifications(items[0].id);
+    } catch {
+      setError("Could not clear notifications. Try again.");
+    } finally {
+      setClearing(false);
+    }
+  }
   return (
     <section className="view">
       <header className="view-header">
@@ -96,7 +111,13 @@ export function NotificationsView() {
           </svg>
         </button>
         <h1>Notifications</h1>
+        {items.length > 0 && (
+          <button type="button" className="notification-clear" disabled={clearing} onClick={() => { void clearAll(); }}>
+            {clearing ? "Clearing…" : "Clear all"}
+          </button>
+        )}
       </header>
+      {error && <p role="alert">{error}</p>}
       {items.length === 0 ? (
         <p className="muted">No processing failures.</p>
       ) : (

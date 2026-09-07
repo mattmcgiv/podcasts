@@ -20,12 +20,17 @@ export interface Preferences { limit: number; count: number }
 export interface LocalState {
   client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
   preferences: Preferences; lastSync: number | null;
+  notificationsClearedThrough?: number;
 }
 export interface Download { hash: string; episode: number; bytes: number; complete: boolean; touched: number }
 export const DATABASE = "pods-offline-v1";
 
 export function snapshotNotifications(snapshot: Snapshot | null | undefined): ProcessingNotification[] {
   return snapshot?.notifications ?? [];
+}
+
+export function visibleNotifications(state: LocalState): ProcessingNotification[] {
+  return snapshotNotifications(state.snapshot).filter(item => item.id > (state.notificationsClearedThrough ?? 0));
 }
 
 export function openDatabase(): Promise<IDBDatabase> {

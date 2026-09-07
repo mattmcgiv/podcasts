@@ -17,6 +17,14 @@ export async function state(): Promise<LocalState> {
   if (raw.preferences && "pins" in raw.preferences) return await updateState(() => {});
   return raw;
 }
+/** Dismiss only the entries displayed when Clear all was tapped, even if a sync races it. */
+export async function clearNotifications(throughId: number): Promise<void> {
+  await updateState(s => {
+    s.notificationsClearedThrough = Math.max(s.notificationsClearedThrough ?? 0, throughId);
+  });
+  window.dispatchEvent(new Event("pods-offline-changed"));
+}
+
 export async function hasLocalLibrary(): Promise<boolean> { return (await state()).snapshot != null; }
 
 const NETWORK_TIMEOUT_MS = 15_000;

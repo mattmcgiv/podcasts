@@ -11,7 +11,7 @@ import {
   failureOutcomeLabel,
 } from "./NotificationsView";
 
-vi.mock("../offline/client", () => ({ state: vi.fn() }));
+vi.mock("../offline/client", () => ({ state: vi.fn(), clearNotifications: vi.fn() }));
 
 function notice(overrides: Partial<ProcessingNotification> = {}): ProcessingNotification {
   return {
@@ -50,7 +50,7 @@ it("renders nothing when notifications are omitted or empty", async () => {
   await vi.waitFor(() => expect(empty.container).toBeEmptyDOMElement());
 });
 
-it("shows at most three newest bars and opens the notifications route", async () => {
+it("shows only the newest bar and opens the notifications route", async () => {
   const local = emptyState();
   local.snapshot = {
     version: 1, cursor: 1, replace: true, shows: [], episodes: [], settings: {}, versions: {},
@@ -65,11 +65,11 @@ it("shows at most three newest bars and opens the notifications route", async ()
   render(<ProcessingNotifications />);
   fireEvent(window, new Event("pods-offline-changed"));
   expect(await screen.findByText("Newest")).toBeInTheDocument();
-  expect(screen.getByText("Second")).toBeInTheDocument();
-  expect(screen.getByText("Third")).toBeInTheDocument();
+  expect(screen.queryByText("Second")).not.toBeInTheDocument();
+  expect(screen.queryByText("Third")).not.toBeInTheDocument();
   expect(screen.queryByText("Hidden")).not.toBeInTheDocument();
   const titles = [...document.querySelectorAll(".notification-bar-title")].map((node) => node.textContent);
-  expect(titles).toEqual(["Newest", "Second", "Third"]);
+  expect(titles).toEqual(["Newest"]);
   expect(titles).toHaveLength(COMPACT_NOTIFICATION_LIMIT);
   fireEvent.click(screen.getByRole("button", { name: "Open 4 processing failure notifications" }));
   expect(window.location.hash).toBe("#/notifications");
@@ -105,4 +105,37 @@ it("lists every notification newest first and returns to Listen", async () => {
   expect(screen.getByRole("button", { name: "Back to Listen" })).toHaveClass("icon-btn");
   fireEvent.click(screen.getByRole("button", { name: "Back to Listen" }));
   expect(window.location.hash).toBe("#/recent");
+});
+
+
+it("clears the displayed list and hides the Listen notice after the saved state changes", async () => {
+  const local = emptyState();
+  local.snapshot = { version: 1, cursor: 1, replace: true, shows: [], episodes: [], settings: {}, versions: {},
+    notifications: [notice({ id: 5 }), notice({ id: 4 })] };
+  vi.mocked(client.state).mockResolvedValue(local);
+  vi.mocked(client.clearNotifications).mockImplementation(async through => {
+    local.notificationsClearedThrough = through;
+    window.dispatchEvent(new Event("pods-offline-changed"));
+  });
+  const view = render(<><NotificationsView /><ProcessingNotifications /></>);
+  fireEvent.click(await screen.findByRole("button", { name: "Clear all" }));
+  await screen.findByText("No processing failures.");
+  expect(client.clearNotifications).toHaveBeenCalledWith(5);
+  expect(screen.queryByRole("button", { name: /Open .* processing failure/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Clear all" })).not.toBeInTheDocument();
+  view.unmount();
+  render(<><NotificationsView /><ProcessingNotifications /></>);
+  await vi.waitFor(() => expect(screen.queryByRole("listitem")).not.toBeInTheDocument());
+});
+
+it("keeps entries visible and offers retry if saving the dismissal fails", async () => {
+  const local = emptyState();
+  local.snapshot = { version: 1, cursor: 1, replace: true, shows: [], episodes: [], settings: {}, versions: {}, notifications: [notice()] };
+  vi.mocked(client.state).mockResolvedValue(local);
+  vi.mocked(client.clearNotifications).mockRejectedValueOnce(new Error("Storage unavailable"));
+  render(<NotificationsView />);
+  fireEvent.click(await screen.findByRole("button", { name: "Clear all" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not clear notifications. Try again.");
+  expect(screen.getByRole("listitem")).toHaveTextContent("Alpha Hour");
+  expect(screen.getByRole("button", { name: "Clear all" })).toBeEnabled();
 });
