@@ -351,6 +351,76 @@ describe("BrowserSpeakerEngine", () => {
     expect(current.paused).toBe(false);
   });
 
+  it("still plays after helper death when Play follows a Mac tap and a poll tick", async () => {
+    const pending = deferred<SpeakerStatus>();
+    let loads = 0;
+    const load = vi.fn(() => {
+      loads += 1;
+      if (loads === 1) {
+        return Promise.resolve(status({
+          generation: 1,
+          paused: false,
+          position: 8,
+          session_id: "sess-test",
+          connected: true,
+        }));
+      }
+      return pending.promise;
+    });
+    const play = vi.fn(async (id) => status({
+      paused: false,
+      generation: id.generation,
+      position: 8,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    let live = false;
+    const { client } = fakeClient({
+      load,
+      play,
+      status: async () => {
+        if (!live) return status({ connected: false, generation: 0, session_id: null, available: true });
+        return status({
+          connected: false,
+          generation: 1,
+          session_id: null,
+          available: true,
+          paused: true,
+          position: 8,
+        });
+      },
+    });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    live = true;
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    await waitFor(() => expect(current.cast.connected).toBe(false));
+    current.castConnect();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    const started = current.play();
+    vi.useRealTimers();
+    pending.resolve(status({
+      generation: 2,
+      paused: false,
+      position: 8,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    await started;
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    expect(current.paused).toBe(false);
+    expect(current.cast.error ?? "").not.toMatch(/Tap Mac/);
+  });
+
   it("does not start local audio when disconnect is not acknowledged", async () => {
     const { client } = fakeClient({
       disconnect: async () => {

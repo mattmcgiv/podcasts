@@ -183,7 +183,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
 
   play(): Promise<void> {
     if (this._cast.output !== "mac") return this.local.play();
-    if (this.lostControl && !this._cast.connected) {
+    if (this.lostControl && !this._cast.connected && !this.connecting) {
       this.setCast({ ...this._cast, output: "mac", connected: false, error: RECONNECT_HINT });
       return Promise.reject(new Error(RECONNECT_HINT));
     }
@@ -251,6 +251,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     const attempt = ++this.connectAttempt;
     this.lostControl = false;
     this.connecting = true;
+    this.stopPoll();
     this.macMayBePlaying = false;
     this._playbackRate = rate;
     this._currentTime = position;
@@ -580,7 +581,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       this.lostControl = false;
       this.ownsSession = true;
       this.connecting = false;
-    } else if (expectControl) {
+    } else if (expectControl && !this.connecting) {
       this.ownsSession = false;
       this.connecting = false;
       this.lostControl = true;
@@ -603,6 +604,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       error: this._cast.output === "mac" ? status.error ?? undefined : undefined,
     });
     if (connected) this.startPoll();
+    else this.stopPoll();
     if (seq !== this.mutateSeq && !status.ended) return;
     if (this._cast.output !== "mac") return;
     if (Number.isFinite(status.position)) {
@@ -645,7 +647,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   }
 
   private async pollOnce(): Promise<void> {
-    if (this.pollBusy || this._cast.output !== "mac" || this.destroyed) {
+    if (this.pollBusy || this._cast.output !== "mac" || this.destroyed || this.connecting) {
       if (this._cast.output !== "mac") this.stopPoll();
       return;
     }
@@ -661,6 +663,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       this.pollFailures += 1;
       if (this.pollFailures >= MAX_POLL_FAILURES || error instanceof SpeakerDisconnectedError) {
         this.stopPoll();
+        if (this.connecting) return;
         this.lostControl = true;
         this.setCast({
           available: false,
