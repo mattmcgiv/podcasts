@@ -13,6 +13,7 @@ import { offlineEnabled } from "./offline/client";
 import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
+  hasNativeAudioBridge,
   type AudioEngine,
   type AudioMetadata,
   type AdSkipNotice,
@@ -50,6 +51,7 @@ export interface PlayerApi {
   setAutoplay: (on: boolean) => void;
   setExpanded: (on: boolean) => void;
   setCastOutput: (target: "local" | "mac") => void;
+  retryMacAvailability: () => void;
   undoAdSkip: () => void;
   retryShowNotes: () => void;
   markPlayedAndClose: () => Promise<void>;
@@ -324,12 +326,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setShowNotesError(null);
       setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
-      resumeAtRef.current = a.loadSource ? 0 : resumeAt;
+      resumeAtRef.current = hasNativeAudioBridge() || engineOutput(a) === "mac" ? 0 : resumeAt;
       const metadata = audioMetadata(item);
       a.setMetadata?.(metadata);
       a.playbackRate = speedRef.current;
       if (a.loadSource) {
-        a.loadSource(item.audio_url, resumeAt, item.id);
+        a.loadSource(item.audio_url, resumeAt, item.id, item.manifest?.hash);
       } else {
         a.src = item.audio_url;
       }
@@ -444,7 +446,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   // Ensure cast discovery starts even before the first play.
   useEffect(() => {
-    ensureAudio();
+    const a = ensureAudio();
+    return () => {
+      a.dispose?.();
+      if (audioRef.current === a) audioRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -550,6 +556,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const retryMacAvailability = useCallback(() => {
+    ensureAudio().requestCastStatus?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const undoAdSkip = useCallback(() => {
     audioRef.current?.undoAdSkip?.();
   }, []);
@@ -594,6 +605,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setAutoplay,
       setExpanded,
       setCastOutput,
+      retryMacAvailability,
       undoAdSkip,
       retryShowNotes,
       markPlayedAndClose,
@@ -620,6 +632,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setSpeed,
       setAutoplay,
       setCastOutput,
+      retryMacAvailability,
       undoAdSkip,
       retryShowNotes,
       markPlayedAndClose,
@@ -628,6 +641,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   );
 
   return <PlayerContext.Provider value={value}>{children}</PlayerContext.Provider>;
+}
+
+function engineOutput(a: AudioEngine): "local" | "mac" {
+  return (a as AudioEngine & { cast?: CastInfo }).cast?.output === "mac" ? "mac" : "local";
 }
 
 function audioMetadata(item: EpisodeItem): AudioMetadata {

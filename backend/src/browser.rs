@@ -105,6 +105,9 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
             200,
         ));
     }
+    if path.starts_with("/api/speaker") {
+        return crate::speaker::handle(backend, request);
+    }
     if path == "/api/status" && request.method == "GET" {
         let conn = backend.db.lock()?;
         let pending: i64 =

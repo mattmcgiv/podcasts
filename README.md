@@ -54,7 +54,7 @@ No discovery feed. No recommendations. Your subscriptions, unplayed episodes fir
 - **Playback** with scrubber, skip back/forward, speeds through 3×, autoplay next, and mini player
 - **Ad removal** (optional): download audio, local speech transcription, DeepSeek V4 Pro classification of ad ranges, automatic skip during playback with undo
 - **Generated show notes / chapters** from the episode transcript when ad-removal processing is ready
-- **Play on Mac** via the optional **Pods Speaker** menu-bar app (LAN cast, not AirPlay; progress saves on the phone)
+- **Play on Mac** from the player Audio output controls (same Wi-Fi, authenticated Mac backend; progress saves on the phone)
 - **Library tools**: subscribe by search or RSS URL, OPML import/export, unsubscribe
 - **Appearance**: system, light, or dark theme
 
@@ -251,6 +251,6 @@ The private iPhone target lives under `ios/`.
 
 See `ios/README.md` for Xcode setup, seed DB staging, feed refresh behavior, refresh automation, and reinstall acceptance tests.
 
-## Mac speaker (optional)
+## Mac speaker
 
-`mac/PodsSpeaker` plays episode audio on the Mac while you control playback from the iPhone. Phone and Mac must share the same Wi‑Fi. See `mac/README.md`.
+The Mac backend plays processed episode audio. The browser on the same Wi-Fi controls playback. See [Play on Mac](docs/mac-speaker.md).

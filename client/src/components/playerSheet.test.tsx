@@ -1,9 +1,9 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlayerProvider, usePlayer } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
-import { episode, installApi } from "../test/mockApi";
+import { episode, HttpError, installApi } from "../test/mockApi";
 import { MiniPlayer } from "./MiniPlayer";
 import { PlayerSheet } from "./PlayerSheet";
 
@@ -371,4 +371,163 @@ describe("PlayerSheet + MiniPlayer", () => {
     await screen.findByRole("dialog", { name: "Player" });
     expect(screen.getByRole("button", { name: "Next: Hour two (+1 hr 7 mins)" })).toBeInTheDocument();
   });
+
+  it("shows audio output controls in offline browser mode", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    const hash = "a".repeat(64);
+    const item = episode({
+      id: 1,
+      title: "Sheet Episode",
+      downloaded: true,
+      audio_url: `/_media/${hash}.m4a`,
+      manifest: {
+        version: 1,
+        episode_id: 1,
+        hash,
+        source_hash: "source",
+        bytes: 8,
+        duration: 600,
+        chunk_size: 1024 ** 2,
+        chunks: [hash],
+        timeline: [{ original_start: 0, original_end: 600, processed_start: 0 }],
+      },
+    });
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/1": { ...item, notes_html: "", archived_at: null, show_notes: [], ad_markers: [] },
+      "PUT /api/episodes/1/position": null,
+    });
+    function OfflineStart() {
+      const p = usePlayer();
+      return <button onClick={() => p.playEpisode(item, "recent")}>start</button>;
+    }
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <OfflineStart />
+        <PlayerSheet />
+      </PlayerProvider>,
+    );
+    await user.click(screen.getByText("start"));
+    expect(await screen.findByRole("group", { name: "Audio output" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "iPhone" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Mac" })).toBeInTheDocument();
+  });
+
+  it("shows a visible warning when Mac stop is not confirmed", async () => {
+    const hash = "b".repeat(64);
+    const item = episode({
+      id: 1,
+      title: "Sheet Episode",
+      audio_url: `/_media/${hash}.m4a`,
+      downloaded: true,
+      manifest: {
+        version: 1,
+        episode_id: 1,
+        hash,
+        source_hash: "source",
+        bytes: 8,
+        duration: 600,
+        chunk_size: 1024 ** 2,
+        chunks: [hash],
+        timeline: [{ original_start: 0, original_end: 600, processed_start: 0 }],
+      },
+    });
+    type SpeakerBody = {
+      session_id?: string;
+      generation?: number;
+      episode_id?: number;
+      artifact_hash?: string;
+      position?: number;
+      rate?: number;
+      playing?: boolean;
+      seconds?: number;
+    };
+    let speaker = {
+      available: true,
+      connected: false,
+      generation: 0,
+      position: 0,
+      duration: 0,
+      rate: 1,
+      paused: true,
+      ended: false,
+      name: "Mac",
+      session_id: null as string | null,
+      episode_id: null as number | null,
+      artifact_hash: null as string | null,
+      error: null as string | null,
+    };
+    const snapshot = () => ({ ...speaker });
+    const adopt = (body: SpeakerBody, extras: Partial<typeof speaker> = {}) => {
+      speaker = {
+        ...speaker,
+        available: true,
+        connected: true,
+        error: null,
+        session_id: body.session_id ?? speaker.session_id,
+        generation: body.generation ?? speaker.generation,
+        ...extras,
+      };
+      return snapshot();
+    };
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/1": { ...item, notes_html: "", show_notes: [], ad_markers: [], archived_at: null },
+      "PUT /api/episodes/1/position": null,
+      "GET /api/speaker/status": () => snapshot(),
+      "POST /api/speaker/load": (_url: URL, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as SpeakerBody;
+        return adopt(body, {
+          generation: (body.generation ?? 0) + 1,
+          episode_id: body.episode_id ?? 1,
+          artifact_hash: body.artifact_hash ?? hash,
+          position: body.position ?? 8,
+          duration: 1800,
+          rate: body.rate ?? 1,
+          paused: !body.playing,
+        });
+      },
+      "POST /api/speaker/play": (_url: URL, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as SpeakerBody;
+        return adopt(body, { paused: false });
+      },
+      "POST /api/speaker/pause": (_url: URL, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as SpeakerBody;
+        return adopt(body, { paused: true });
+      },
+      "POST /api/speaker/seek": (_url: URL, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as SpeakerBody;
+        return adopt(body, { position: body.seconds ?? speaker.position });
+      },
+      "POST /api/speaker/rate": (_url: URL, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as SpeakerBody;
+        return adopt(body, { rate: body.rate ?? speaker.rate });
+      },
+      "POST /api/speaker/disconnect": new HttpError(500, { error: "Mac speaker disconnected." }),
+    });
+    function StartProcessed() {
+      const p = usePlayer();
+      return <button onClick={() => p.playEpisode(item, "recent")}>start</button>;
+    }
+    const user = userEvent.setup();
+    render(
+      <PlayerProvider>
+        <StartProcessed />
+        <PlayerSheet />
+      </PlayerProvider>,
+    );
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    await user.click(await screen.findByRole("button", { name: "Mac" }));
+    expect(await screen.findByText(/Playing through Mac/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "iPhone" }));
+    expect(await screen.findByRole("status", { name: "Mac speaker message" })).toHaveTextContent(/may still be playing/);
+  });
+});
+
+afterEach(() => {
+  delete window.PODS_LOCAL_CLIENT;
 });

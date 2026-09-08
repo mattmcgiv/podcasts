@@ -22,6 +22,7 @@ pub mod refresh;
 pub mod show_notes;
 pub mod server;
 pub mod skip;
+pub mod speaker;
 pub mod storage;
 pub mod transcribe;
 pub mod usage;

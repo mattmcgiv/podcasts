@@ -127,6 +127,7 @@ pub struct Backend {
     refresh_runtime: Mutex<Option<JoinHandle<()>>>,
     pub pipeline: PipelineConfig,
     pub auth: Auth,
+    pub speaker: crate::speaker::Speaker,
     trusted_origins: Vec<String>,
 }
 
@@ -173,6 +174,7 @@ impl Backend {
             refresh_runtime: Mutex::new(None),
             pipeline: PipelineConfig::default(),
             auth: Auth::default(),
+            speaker: crate::speaker::Speaker::platform(),
             trusted_origins: auth::trusted_origins_from_env(),
         };
         let _ = backend.recover_interrupted_state();
@@ -281,6 +283,10 @@ impl Backend {
 
     pub fn set_car_routes(&self, routes: Vec<BluetoothRoute>) {
         *self.car_routes.lock().unwrap() = routes;
+    }
+
+    pub fn set_speaker_transport(&self, transport: std::sync::Arc<dyn crate::speaker::SpeakerTransport>) {
+        self.speaker.set_transport(transport);
     }
 
     fn wake_ad_removal(&self) {
@@ -1429,6 +1435,7 @@ impl Backend {
         if let Some(handle) = self.refresh_runtime.lock().unwrap().take() {
             let _ = handle.join();
         }
+        self.speaker.stop();
     }
 
     pub fn run_pipeline_step(&self) -> Result<bool, Error> {

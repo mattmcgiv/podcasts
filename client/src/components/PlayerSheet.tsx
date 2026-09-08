@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { SPEEDS } from "../config";
-import { offlineEnabled } from "../offline/client";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
@@ -178,7 +177,7 @@ export function PlayerSheet() {
         </div>
 
         <div className="player-options">
-          {!offlineEnabled() && <div className="cast-row" role="group" aria-label="Audio output">
+          <div className="cast-row" role="group" aria-label="Audio output">
             <span className="cast-label">Play on</span>
             <div className="cast-choices">
               <button
@@ -196,7 +195,7 @@ export function PlayerSheet() {
                 title={
                   p.cast.available || p.cast.connected
                     ? p.cast.name ?? "Mac"
-                    : "Open Pods Speaker on your Mac (same Wi‑Fi)"
+                    : "Mac is not reachable on this Wi-Fi"
                 }
               >
                 {p.cast.connected || p.cast.output === "mac"
@@ -205,9 +204,14 @@ export function PlayerSheet() {
                     ? "Mac"
                     : "Mac (offline)"}
               </button>
+              {!p.cast.available && !p.cast.connected && (
+                <button type="button" className="chip" onClick={p.retryMacAvailability}>
+                  Retry Mac
+                </button>
+              )}
             </div>
-            {p.cast.error && p.cast.output === "mac" && (
-              <p className="cast-error" role="status">
+            {p.cast.error && (
+              <p className="cast-error" role="status" aria-label="Mac speaker message">
                 {p.cast.error}
               </p>
             )}
@@ -216,7 +220,7 @@ export function PlayerSheet() {
                 Playing through Mac · progress saves on this phone
               </p>
             )}
-          </div>}
+          </div>
           <div className="player-action-row">
             <button
               type="button"

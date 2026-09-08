@@ -1,3 +1,5 @@
+import { BrowserSpeakerEngine } from "./speakerEngine";
+
 export interface AudioEngine extends EventTarget {
   src: string;
   currentTime: number;
@@ -6,12 +8,13 @@ export interface AudioEngine extends EventTarget {
   setPlaybackRate?(rate: number, correlationId: string): void;
   paused: boolean;
   preload: string;
-  loadSource?(src: string, position: number, episodeId?: number): void;
+  loadSource?(src: string, position: number, episodeId?: number, artifactHash?: string): void;
   setMetadata?(metadata: AudioMetadata): void;
   castConnect?(): void;
   castDisconnect?(): void;
   requestCastStatus?(): void;
   undoAdSkip?(): void;
+  dispose?(): void;
   play(): Promise<void>;
   pause(): void;
   load(): void;
@@ -109,7 +112,7 @@ export function hasNativeAudioBridge(): boolean {
 
 export function createAudioEngine(): AudioEngine {
   if (hasNativeAudioBridge()) return new NativeAudioEngine();
-  return new Audio() as AudioEngine;
+  return new BrowserSpeakerEngine();
 }
 
 class NativeAudioEngine extends EventTarget implements AudioEngine {
@@ -139,7 +142,7 @@ class NativeAudioEngine extends EventTarget implements AudioEngine {
     this.loadSource(value, 0);
   }
 
-  loadSource(src: string, position: number, episodeId?: number): void {
+  loadSource(src: string, position: number, episodeId?: number, _artifactHash?: string): void {
     const initialPosition = Number.isFinite(position) ? Math.max(0, position) : 0;
     this._src = src;
     this._currentTime = initialPosition;
