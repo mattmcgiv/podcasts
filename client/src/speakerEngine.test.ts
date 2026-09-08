@@ -313,6 +313,20 @@ describe("BrowserSpeakerEngine", () => {
     expect(current.cast.output).toBe("mac");
   });
 
+  it("does not reconnect on ordinary play after a finished failed Mac connect", async () => {
+    const load = vi.fn(async (body) => status({ generation: body.generation + 1, paused: false }));
+    const { client } = fakeClient({ load });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 0, 1);
+    current.castConnect();
+    await waitFor(() => expect(current.cast.error).toMatch(/processed episode/));
+    expect(load).not.toHaveBeenCalled();
+    await expect(current.play()).rejects.toThrow(/Tap Mac/);
+    expect(load).not.toHaveBeenCalled();
+    expect(current.cast.connected).toBe(false);
+  });
+
   it("still plays when Play arrives during an in-flight Mac connect", async () => {
     const pending = deferred<SpeakerStatus>();
     const load = vi.fn(() => pending.promise);

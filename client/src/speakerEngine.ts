@@ -56,6 +56,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   private lostControl = false;
   private ownsSession = false;
   private connecting = false;
+  private connectAttempt = 0;
   private macMayBePlaying = false;
   private authFailed = false;
   private destroyed = false;
@@ -247,6 +248,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       ? this.local.playbackRate
       : this._playbackRate;
     const op = ++this.op;
+    const attempt = ++this.connectAttempt;
     this.lostControl = false;
     this.connecting = true;
     this.macMayBePlaying = false;
@@ -255,38 +257,34 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     this.stopLocal(false);
     this.setCast({ ...this._cast, output: "mac", error: undefined });
     this.runBackground(op, async () => {
-      if (this.stale(op)) {
-        this.connecting = false;
-        return;
-      }
-      const status = await this.probe();
-      if (this.stale(op)) {
-        this.connecting = false;
-        return;
-      }
-      if (!status?.available) {
-        this.connecting = false;
+      try {
+        if (this.stale(op)) return;
+        const status = await this.probe();
+        if (this.stale(op)) return;
+        if (!status?.available) {
+          this.setCast({
+            available: false,
+            connected: false,
+            output: "mac",
+            error: status?.error || "Mac is not reachable on this Wi-Fi.",
+          });
+          return;
+        }
+        if (status.generation > 0) this.generation = status.generation;
+        if (this._episodeId != null) {
+          await this.loadMac(op, this._episodeId, this._artifactHash, position, playing);
+          return;
+        }
         this.setCast({
-          available: false,
+          available: true,
           connected: false,
+          name: status.name ?? "Mac",
           output: "mac",
-          error: status?.error || "Mac is not reachable on this Wi-Fi.",
+          error: undefined,
         });
-        return;
+      } finally {
+        this.finishConnect(attempt);
       }
-      if (status.generation > 0) this.generation = status.generation;
-      if (this._episodeId != null) {
-        await this.loadMac(op, this._episodeId, this._artifactHash, position, playing);
-        return;
-      }
-      this.connecting = false;
-      this.setCast({
-        available: true,
-        connected: false,
-        name: status.name ?? "Mac",
-        output: "mac",
-        error: undefined,
-      });
     });
   }
 
@@ -465,6 +463,10 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     this.applyRemote(op, seq, status, false);
   }
 
+  private finishConnect(attempt: number): void {
+    if (this.connectAttempt === attempt) this.connecting = false;
+  }
+
   private async loadMac(
     op: number,
     episodeId: number | undefined,
@@ -472,19 +474,19 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     position: number,
     playing: boolean,
   ): Promise<void> {
-    if (this.stale(op)) return;
-    if (episodeId == null || !artifactHash) {
-      this.setCast({
-        ...this._cast,
-        output: "mac",
-        connected: false,
-        error: "Play a processed episode before using the Mac speaker.",
-      });
-      return;
-    }
-    this.stopLocal(false);
-    const seq = ++this.mutateSeq;
     try {
+      if (this.stale(op)) return;
+      if (episodeId == null || !artifactHash) {
+        this.setCast({
+          ...this._cast,
+          output: "mac",
+          connected: false,
+          error: "Play a processed episode before using the Mac speaker.",
+        });
+        return;
+      }
+      this.stopLocal(false);
+      const seq = ++this.mutateSeq;
       const status = await this.client.load({
         episode_id: episodeId,
         artifact_hash: artifactHash,
@@ -517,6 +519,8 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     } catch (error) {
       if (this.stale(op)) return;
       throw error;
+    } finally {
+      if (!this.stale(op)) this.connecting = false;
     }
   }
 
