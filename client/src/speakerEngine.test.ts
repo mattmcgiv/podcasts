@@ -536,6 +536,41 @@ describe("BrowserSpeakerEngine", () => {
     expect(FakeAudio.last().currentTime).toBe(8);
   });
 
+  it("does not disconnect or pause phone audio after a confirmed stop", async () => {
+    const disconnect = vi.fn(async () => {
+      if (disconnect.mock.calls.length > 1) {
+        throw new SpeakerStaleError("Playback session is out of date.");
+      }
+      return status({ connected: false, generation: 2, session_id: null, paused: true, position: 8 });
+    });
+    const { client } = fakeClient({ disconnect });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    current.castDisconnect();
+    await waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(current.cast.output).toBe("local"));
+    expect(current.cast.error).toBeUndefined();
+    expect(FakeAudio.last().paused).toBe(false);
+    current.castDisconnect();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(current.cast.error).toBeUndefined();
+    expect(current.cast.output).toBe("local");
+    expect(FakeAudio.last().paused).toBe(false);
+    current.dispose();
+    engine = undefined;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(FakeAudio.last().paused).toBe(true);
+  });
+
   it("stays paused when automatic local play is rejected after a confirmed stop", async () => {
     const rejections: unknown[] = [];
     const onReject = (event: PromiseRejectionEvent) => {

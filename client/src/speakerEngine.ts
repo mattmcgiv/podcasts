@@ -54,6 +54,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   private emittedPaused: boolean | null = null;
   private reportedDuration = false;
   private lostControl = false;
+  private ownsSession = false;
   private macMayBePlaying = false;
   private authFailed = false;
   private destroyed = false;
@@ -354,7 +355,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   }
 
   private identity(): SpeakerIdentity | null {
-    if (this.generation <= 0) return null;
+    if (!this.ownsSession || this.generation <= 0) return null;
     return { session_id: this.sessionId, generation: this.generation };
   }
 
@@ -523,6 +524,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     }
     if (status.session_id && status.session_id !== this.sessionId && status.connected) {
       this.lostControl = true;
+      this.ownsSession = false;
       this.stopPoll();
       this.setCast({
         available: status.available,
@@ -541,7 +543,10 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     if (status.duration > 0) this._duration = status.duration;
     this.pollFailures = 0;
     const connected = !!status.connected && this._cast.output === "mac";
-    if (connected) this.lostControl = false;
+    if (connected) {
+      this.lostControl = false;
+      this.ownsSession = true;
+    }
     if (!expectControl) {
       this.setCast({
         available: !!status.available,
@@ -656,14 +661,14 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     const rate = this._playbackRate;
     const playing = restoreLocal && !this._paused && !this.macMayBePlaying;
     const identity = this.identity();
-    const wasConnected = this._cast.connected || identity != null;
-    if (wasConnected && identity) {
+    if (identity) {
       try {
         const status = await this.client.disconnect(identity);
-        if (this.destroyed) return;
-        if (this.stale(op)) return;
+        this.ownsSession = false;
         this.macMayBePlaying = false;
         if (status.generation > 0) this.generation = status.generation;
+        if (this.destroyed) return;
+        if (this.stale(op)) return;
         if (Number.isFinite(status.position) && status.position >= 0) {
           position = status.position;
           this._currentTime = status.position;
