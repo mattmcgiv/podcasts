@@ -28,6 +28,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 - The still-present iPhone shell serves the Rust backend on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `RustBackend`.
 - The bundled React app can point at that loopback backend through `window.PODS_API_BASE` in `ios/Pods/PodsWebView.swift`.
 - There is no active Hetzner remote dev host for this project.
+- There is no Vultr VPS. Cloudflare Pages serves the client. The Mac host runs the backend.
 
 ## Product rules
 

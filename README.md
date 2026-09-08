@@ -40,7 +40,7 @@ These fixtures pass the current acceptance contract.
 They do not prove universal classifier accuracy.
 Broader automatic monitoring remains appropriate.
 There is no manual review or operator labeling.
-VPS retirement remains deferred.
+The Vultr VPS is retired. Cloudflare Pages serves the client. The Mac host runs the backend.
 
 The sections after this notice describe the legacy native app, not the supported deployment.
 

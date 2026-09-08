@@ -106,7 +106,7 @@ The earlier v13 automatic real test for episode 20720 used a fresh disposable tr
 It completed all 41 coarse classification windows. It failed closed at the first opening-boundary disagreement.
 The test published no automatic result. Runtime was 433.11 seconds.
 
-The iOS native app is deprecated. VPS retirement remains deferred. No VPS or paid resource was removed.
+The iOS native app is deprecated. The Vultr VPS was destroyed on 2026-09-07.
 
 Classifier v21 fixtures pass the current automatic acceptance contract.
 They do not prove universal classifier accuracy.
@@ -337,8 +337,8 @@ Note: The installed release is `20260905-123534`.
 
 ## Backup and migration
 
-CAUTION: Do not remove the VPS or uninstall the deprecated iOS app. VPS retirement remains deferred.
-Uninstalling the native app can erase its remaining local data.
+CAUTION: Do not uninstall the deprecated iOS app. Uninstalling the native app can erase its remaining local data.
+The Vultr VPS was destroyed on 2026-09-07. Cloudflare Pages serves the client. The Mac host runs the backend.
 
 Use SQLite backup, not a standalone copy of a live database file.
 The backup command includes committed WAL data and runs an integrity check.
@@ -350,8 +350,8 @@ python3 mac/backend/manage.py import /absolute/new/backup.sqlite
 ```
 
 Import refuses to overwrite an existing destination database.
-The initial VPS copy is a migration baseline. Edits on the old deployment after that copy require a final reconciliation.
-Keep backup hashes, table counts, audio hashes, and the old DNS records outside Git.
+The initial VPS copy is a historical migration baseline. The live library is the Mac database.
+Keep backup hashes, table counts, and audio hashes outside Git.
 Existing passkey credentials remain in the database.
 
 For an additional passkey, run `python3 mac/backend/manage.py enroll` locally.
@@ -387,7 +387,7 @@ A window uses 24 core segments and 12 context segments. Bounded repair allows at
 Every label requires an exact transcript quote. The output schema constrains IDs and labels before validation.
 Transcript text is data, never instructions. Show notes use the same model and source-constrained chapter IDs.
 
-## Required acceptance before VPS retirement
+## VPS retirement
 
 The Mac release `20260905-123534` is installed and active.
 The public Cloudflare client serves `main-Cp0Opcme.js`, `main-CsV4hKcg.css`, and `store-z4IKHTCH.js`.
@@ -414,6 +414,6 @@ Broader automatic monitoring remains appropriate.
 There is no manual review or operator labeling.
 
 The native iOS app remains deprecated.
-VPS deletion, paid-resource cancellation, and a claim of zero ongoing hosting costs remain deferred.
-The user decision is to defer VPS retirement.
-No VPS or paid resource was removed.
+The Vultr VPS, firewall, and SSH key were destroyed on 2026-09-07.
+The account had no snapshots, backups, reserved IPs, object storage, or other paid Vultr resources.
+`https://pods.mcgiv.dev` stayed on Cloudflare Pages. Route53 records were not deleted.

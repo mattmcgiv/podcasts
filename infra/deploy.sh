@@ -1,6 +1,9 @@
 #!/bin/sh
+# Retired 2026-09-07. The Vultr VPS is gone.
 # Build the Linux API image and web UI on the laptop, then copy them to the VPS.
 set -eu
+echo "error: the Vultr VPS is retired. Cloudflare Pages serves the client. The Mac host runs the backend." >&2
+exit 1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${PODS_SSH_HOST:-pods.mcgiv.dev}"
 EXPORT="${PODS_LIBRARY_EXPORT:-$ROOT/infra/library-export}"
