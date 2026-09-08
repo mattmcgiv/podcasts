@@ -274,6 +274,153 @@ describe("BrowserSpeakerEngine", () => {
     expect(load).not.toHaveBeenCalled();
   });
 
+  it("does not reconnect on ordinary play after status reports the helper is gone", async () => {
+    const load = vi.fn(async (body) => status({
+      generation: body.generation + 1,
+      paused: !body.playing,
+      position: body.position,
+    }));
+    let live = false;
+    const { client } = fakeClient({
+      load,
+      status: async () => {
+        if (!live) return status({ connected: false, generation: 0, session_id: null, available: true });
+        return status({
+          connected: false,
+          generation: 1,
+          session_id: null,
+          available: true,
+          paused: true,
+          position: 8,
+        });
+      },
+    });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    load.mockClear();
+    live = true;
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    await waitFor(() => expect(current.cast.connected).toBe(false));
+    await expect(current.play()).rejects.toThrow(/Tap Mac/);
+    expect(load).not.toHaveBeenCalled();
+    expect(current.cast.output).toBe("mac");
+  });
+
+  it("does not reconnect on ordinary play after a finished failed Mac connect", async () => {
+    const load = vi.fn(async (body) => status({ generation: body.generation + 1, paused: false }));
+    const { client } = fakeClient({ load });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 0, 1);
+    current.castConnect();
+    await waitFor(() => expect(current.cast.error).toMatch(/processed episode/));
+    expect(load).not.toHaveBeenCalled();
+    await expect(current.play()).rejects.toThrow(/Tap Mac/);
+    expect(load).not.toHaveBeenCalled();
+    expect(current.cast.connected).toBe(false);
+  });
+
+  it("still plays when Play arrives during an in-flight Mac connect", async () => {
+    const pending = deferred<SpeakerStatus>();
+    const load = vi.fn(() => pending.promise);
+    const play = vi.fn(async (id) => status({ paused: false, generation: id.generation, position: 8 }));
+    const { client } = fakeClient({ load, play });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    current.castConnect();
+    const started = current.play();
+    await waitFor(() => expect(load).toHaveBeenCalled());
+    pending.resolve(status({
+      generation: 1,
+      paused: false,
+      position: 8,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    await started;
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    expect(current.paused).toBe(false);
+  });
+
+  it("still plays after helper death when Play follows a Mac tap and a poll tick", async () => {
+    const pending = deferred<SpeakerStatus>();
+    let loads = 0;
+    const load = vi.fn(() => {
+      loads += 1;
+      if (loads === 1) {
+        return Promise.resolve(status({
+          generation: 1,
+          paused: false,
+          position: 8,
+          session_id: "sess-test",
+          connected: true,
+        }));
+      }
+      return pending.promise;
+    });
+    const play = vi.fn(async (id) => status({
+      paused: false,
+      generation: id.generation,
+      position: 8,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    let live = false;
+    const { client } = fakeClient({
+      load,
+      play,
+      status: async () => {
+        if (!live) return status({ connected: false, generation: 0, session_id: null, available: true });
+        return status({
+          connected: false,
+          generation: 1,
+          session_id: null,
+          available: true,
+          paused: true,
+          position: 8,
+        });
+      },
+    });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    live = true;
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    await waitFor(() => expect(current.cast.connected).toBe(false));
+    current.castConnect();
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    const started = current.play();
+    vi.useRealTimers();
+    pending.resolve(status({
+      generation: 2,
+      paused: false,
+      position: 8,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    await started;
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    expect(current.paused).toBe(false);
+    expect(current.cast.error ?? "").not.toMatch(/Tap Mac/);
+  });
+
   it("does not start local audio when disconnect is not acknowledged", async () => {
     const { client } = fakeClient({
       disconnect: async () => {

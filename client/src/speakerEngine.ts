@@ -55,6 +55,8 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   private reportedDuration = false;
   private lostControl = false;
   private ownsSession = false;
+  private connecting = false;
+  private connectAttempt = 0;
   private macMayBePlaying = false;
   private authFailed = false;
   private destroyed = false;
@@ -181,7 +183,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
 
   play(): Promise<void> {
     if (this._cast.output !== "mac") return this.local.play();
-    if (this.lostControl && !this._cast.connected) {
+    if (this.lostControl && !this._cast.connected && !this.connecting) {
       this.setCast({ ...this._cast, output: "mac", connected: false, error: RECONNECT_HINT });
       return Promise.reject(new Error(RECONNECT_HINT));
     }
@@ -189,11 +191,17 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     const seq = ++this.mutateSeq;
     return this.enqueue(op, async () => {
       if (this.stale(op)) return;
-      if (!this._cast.connected) {
+      if (this._cast.connected) {
+        await this.command(op, seq, (id) => this.client.play(id));
+        return;
+      }
+      if (this.connecting) {
         await this.loadMac(op, this._episodeId, this._artifactHash, this._currentTime, true);
         return;
       }
-      await this.command(op, seq, (id) => this.client.play(id));
+      this.lostControl = true;
+      this.setCast({ ...this._cast, output: "mac", connected: false, error: RECONNECT_HINT });
+      throw new Error(RECONNECT_HINT);
     });
   }
 
@@ -240,42 +248,50 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       ? this.local.playbackRate
       : this._playbackRate;
     const op = ++this.op;
+    const attempt = ++this.connectAttempt;
     this.lostControl = false;
+    this.connecting = true;
+    this.stopPoll();
     this.macMayBePlaying = false;
     this._playbackRate = rate;
     this._currentTime = position;
     this.stopLocal(false);
     this.setCast({ ...this._cast, output: "mac", error: undefined });
     this.runBackground(op, async () => {
-      if (this.stale(op)) return;
-      const status = await this.probe();
-      if (this.stale(op)) return;
-      if (!status?.available) {
+      try {
+        if (this.stale(op)) return;
+        const status = await this.probe();
+        if (this.stale(op)) return;
+        if (!status?.available) {
+          this.setCast({
+            available: false,
+            connected: false,
+            output: "mac",
+            error: status?.error || "Mac is not reachable on this Wi-Fi.",
+          });
+          return;
+        }
+        if (status.generation > 0) this.generation = status.generation;
+        if (this._episodeId != null) {
+          await this.loadMac(op, this._episodeId, this._artifactHash, position, playing);
+          return;
+        }
         this.setCast({
-          available: false,
+          available: true,
           connected: false,
+          name: status.name ?? "Mac",
           output: "mac",
-          error: status?.error || "Mac is not reachable on this Wi-Fi.",
+          error: undefined,
         });
-        return;
+      } finally {
+        this.finishConnect(attempt);
       }
-      if (status.generation > 0) this.generation = status.generation;
-      if (this._episodeId != null) {
-        await this.loadMac(op, this._episodeId, this._artifactHash, position, playing);
-        return;
-      }
-      this.setCast({
-        available: true,
-        connected: false,
-        name: status.name ?? "Mac",
-        output: "mac",
-        error: undefined,
-      });
     });
   }
 
   castDisconnect(): void {
     const op = ++this.op;
+    this.connecting = false;
     this.stopPoll();
     if (this._cast.output === "mac" && this._cast.connected) {
       this.setCast({ ...this._cast, connected: false });
@@ -448,6 +464,10 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     this.applyRemote(op, seq, status, false);
   }
 
+  private finishConnect(attempt: number): void {
+    if (this.connectAttempt === attempt) this.connecting = false;
+  }
+
   private async loadMac(
     op: number,
     episodeId: number | undefined,
@@ -455,19 +475,19 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     position: number,
     playing: boolean,
   ): Promise<void> {
-    if (this.stale(op)) return;
-    if (episodeId == null || !artifactHash) {
-      this.setCast({
-        ...this._cast,
-        output: "mac",
-        connected: false,
-        error: "Play a processed episode before using the Mac speaker.",
-      });
-      return;
-    }
-    this.stopLocal(false);
-    const seq = ++this.mutateSeq;
     try {
+      if (this.stale(op)) return;
+      if (episodeId == null || !artifactHash) {
+        this.setCast({
+          ...this._cast,
+          output: "mac",
+          connected: false,
+          error: "Play a processed episode before using the Mac speaker.",
+        });
+        return;
+      }
+      this.stopLocal(false);
+      const seq = ++this.mutateSeq;
       const status = await this.client.load({
         episode_id: episodeId,
         artifact_hash: artifactHash,
@@ -500,6 +520,8 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     } catch (error) {
       if (this.stale(op)) return;
       throw error;
+    } finally {
+      if (!this.stale(op)) this.connecting = false;
     }
   }
 
@@ -536,6 +558,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     if (status.session_id && status.session_id !== this.sessionId && status.connected) {
       this.lostControl = true;
       this.ownsSession = false;
+      this.connecting = false;
       this.stopPoll();
       this.setCast({
         available: status.available,
@@ -557,8 +580,11 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     if (connected) {
       this.lostControl = false;
       this.ownsSession = true;
-    } else if (expectControl) {
+      this.connecting = false;
+    } else if (expectControl && !this.connecting) {
       this.ownsSession = false;
+      this.connecting = false;
+      this.lostControl = true;
     }
     if (!expectControl) {
       this.setCast({
@@ -578,6 +604,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       error: this._cast.output === "mac" ? status.error ?? undefined : undefined,
     });
     if (connected) this.startPoll();
+    else this.stopPoll();
     if (seq !== this.mutateSeq && !status.ended) return;
     if (this._cast.output !== "mac") return;
     if (Number.isFinite(status.position)) {
@@ -620,7 +647,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   }
 
   private async pollOnce(): Promise<void> {
-    if (this.pollBusy || this._cast.output !== "mac" || this.destroyed) {
+    if (this.pollBusy || this._cast.output !== "mac" || this.destroyed || this.connecting) {
       if (this._cast.output !== "mac") this.stopPoll();
       return;
     }
@@ -636,6 +663,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       this.pollFailures += 1;
       if (this.pollFailures >= MAX_POLL_FAILURES || error instanceof SpeakerDisconnectedError) {
         this.stopPoll();
+        if (this.connecting) return;
         this.lostControl = true;
         this.setCast({
           available: false,
@@ -666,6 +694,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
   }
 
   private async stopRemote(op: number, restoreLocal: boolean): Promise<void> {
+    this.connecting = false;
     this.stopPoll();
     if (this._cast.connected) {
       this.setCast({ ...this._cast, connected: false });
@@ -749,6 +778,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     const stale = error instanceof SpeakerStaleError;
     const resync = error instanceof SpeakerResyncError;
     if (stale || disconnected || resync) this.lostControl = true;
+    this.connecting = false;
     this.stopPoll();
     this.setCast({
       available: !disconnected && this._cast.available,
