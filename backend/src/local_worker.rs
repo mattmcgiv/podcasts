@@ -19,9 +19,9 @@ pub const MODEL: &str = "DeepSeek-V4-Flash-0731-2.4bit-mixed";
 // retry policy, and deterministic boundary shrink, not only first-request
 // prompt text.
 const CLASSIFIER_VERSION: &str =
-    "pods-local-v4-whisper-large-v3-fp16-ad24-context12-blocks-repair-binary-aac128";
+    "pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128";
 pub const VERSION: &str =
-    "pods-local-v22-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128";
+    "pods-local-v23-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128";
 const WINDOW_CORE: usize = 24;
 const WINDOW_CONTEXT: usize = 12;
 const WINDOW_REPAIR_CONTEXT: usize = 24;
@@ -31,6 +31,8 @@ pub const BOUNDARY_MAX_SHIFT: usize = 8;
 // Bumper-length discontinuity. Conversational turn gaps are typically under 2s.
 pub const BOUNDARY_OPEN_GAP_SECS: f64 = 8.0;
 pub const MAX_FAILED_ATTEMPTS: i64 = 4;
+/// AAC frame rounding. MP3 encoder delay is measured from decoded samples, not this window.
+const PROCESSED_DURATION_TOLERANCE_SECS: f64 = 0.25;
 /// Matches browser_processing_notifications_retain_100 in browser_schema.sql.
 pub const NOTIFICATION_HISTORY_LIMIT: i64 = 100;
 
@@ -452,7 +454,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             .iter()
             .map(|s| s.original_end - s.original_start)
             .sum();
-        if (actual_duration - expected).abs() > 0.25 {
+        if (actual_duration - expected).abs() > PROCESSED_DURATION_TOLERANCE_SECS {
             return Err(failure("processed duration mismatch"));
         }
         let (hash, bytes) = ArtifactStore::hash_file(&rendered).map_err(failure)?;
@@ -750,6 +752,14 @@ fn classify_window_prefixed(
                 Ok(labels) => return Ok(labels),
                 Err(error) => {
                     if attempt + 1 == CLASSIFY_ATTEMPTS {
+                        // Mixed or unclear audio is content. A last-attempt overlap
+                        // conflict publishes the disputed IDs as content instead of
+                        // blocking the episode. Unknown IDs still fail closed.
+                        if error.to_string() == "conflicting ad blocks" {
+                            if let Ok(labels) = validate_blocks_prefer_content(&value, core) {
+                                return Ok(labels);
+                            }
+                        }
                         return Err(error);
                     }
                     guidance = format!("{}{prefix}", repair_prompt_prefix(&error, Some(&value)));
@@ -802,6 +812,21 @@ fn repair_prompt_prefix(error: &Error, output: Option<&Value>) -> String {
 }
 
 pub fn validate_blocks(value: &Value, segments: &[Segment]) -> Result<Vec<Label>, Error> {
+    assign_blocks(value, segments, false)
+}
+
+fn validate_blocks_prefer_content(
+    value: &Value,
+    segments: &[Segment],
+) -> Result<Vec<Label>, Error> {
+    assign_blocks(value, segments, true)
+}
+
+fn assign_blocks(
+    value: &Value,
+    segments: &[Segment],
+    prefer_content_on_conflict: bool,
+) -> Result<Vec<Label>, Error> {
     let mut blocks: Vec<_> = value["blocks"]
         .as_array()
         .ok_or_else(|| failure("invalid ad blocks"))?
@@ -832,9 +857,13 @@ pub fn validate_blocks(value: &Value, segments: &[Segment]) -> Result<Vec<Label>
         }
         for label in &mut assigned[first..=last] {
             // Two adjacent sponsor descriptions can overlap. Agreement is safe
-            // to coalesce; conflicting labels must never silently win.
+            // to coalesce. A true ad/content overlap is mixed audio: content.
             if label.is_some_and(|old| old != kind) {
-                return Err(failure("conflicting ad blocks"));
+                if !prefer_content_on_conflict {
+                    return Err(failure("conflicting ad blocks"));
+                }
+                *label = Some("content");
+                continue;
             }
             *label = Some(kind);
         }
@@ -1187,26 +1216,37 @@ pub fn retained_intervals(
 }
 
 fn audio_duration(path: &Path) -> Result<f64, Error> {
-    let output = Command::new("ffprobe")
+    // Decode-based duration. MP3 headers often include encoder delay that
+    // ffmpeg atrim cannot copy, so ffprobe format=duration is too long.
+    let output = Command::new("ffmpeg")
         .args([
+            "-nostdin",
+            "-hide_banner",
             "-v",
             "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
+            "-progress",
+            "pipe:1",
+            "-i",
         ])
         .arg(path)
+        .args(["-map", "0:a:0", "-f", "null", "-"])
         .output()
         .map_err(failure)?;
-    let value = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .map_err(failure)?;
-    if !output.status.success() || !value.is_finite() || value <= 0.0 {
+    if !output.status.success() {
         return Err(failure("invalid audio"));
     }
-    Ok(value)
+    decoded_duration_secs(&output.stdout).ok_or_else(|| failure("invalid audio"))
+}
+
+fn decoded_duration_secs(progress: &[u8]) -> Option<f64> {
+    String::from_utf8_lossy(progress)
+        .lines()
+        .filter_map(|line| line.strip_prefix("out_time_us="))
+        .filter_map(|value| value.trim().parse::<i64>().ok())
+        .filter(|us| *us > 0)
+        .last()
+        .map(|us| us as f64 / 1_000_000.0)
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
 }
 
 fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
@@ -1397,6 +1437,66 @@ mod download_tests {
         thread,
         time::Instant,
     };
+
+    #[test]
+    fn decoded_duration_reads_last_progress_timestamp() {
+        let progress =
+            b"out_time_us=N/A\nout_time_us=1000000\nout_time_us=634932245\nprogress=end\n";
+        assert!((decoded_duration_secs(progress).unwrap() - 634.932245).abs() < 1e-9);
+        assert!(decoded_duration_secs(b"out_time_us=N/A\nprogress=end\n").is_none());
+        assert!(decoded_duration_secs(b"").is_none());
+    }
+
+    #[test]
+    fn audio_duration_follows_decoded_samples_not_the_container_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("tone.wav");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2:sample_rate=44100",
+                "-y",
+            ])
+            .arg(&wav)
+            .status()
+            .unwrap()
+            .success());
+        let wav_secs = audio_duration(&wav).unwrap();
+        assert!((wav_secs - 2.0).abs() < 0.05, "wav_secs={wav_secs}");
+        let encoded = dir.path().join("tone.mp3");
+        let mp3_ok = Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&wav)
+            .args(["-c:a", "libmp3lame", "-b:a", "128k", "-y"])
+            .arg(&encoded)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let path = if mp3_ok {
+            encoded
+        } else {
+            let aac = dir.path().join("tone.m4a");
+            assert!(Command::new("ffmpeg")
+                .args(["-nostdin", "-v", "error", "-i"])
+                .arg(&wav)
+                .args(["-c:a", "aac", "-b:a", "128k", "-y"])
+                .arg(&aac)
+                .status()
+                .unwrap()
+                .success());
+            aac
+        };
+        let decoded = audio_duration(&path).unwrap();
+        assert!(
+            (decoded - wav_secs).abs() < 0.08,
+            "decoded={decoded} wav_secs={wav_secs}"
+        );
+    }
 
     #[test]
     fn chapter_selection_preserves_beginning_middle_and_end() {

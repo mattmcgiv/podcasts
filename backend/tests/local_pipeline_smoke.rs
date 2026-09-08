@@ -1,8 +1,8 @@
 //! Explicit local-inference check. No network audio or cloud inference.
 use pods_backend::local_worker::{
     apply_boundaries, cached_classifier_run_id, cached_run_id, classify_window_with,
-    refine_boundaries, validate_blocks, Label, Segment, BOUNDARY_MAX_SHIFT,
-    BOUNDARY_OPEN_GAP_SECS, CLASSIFY_ATTEMPTS, MODEL, VERSION,
+    refine_boundaries, validate_blocks, Label, Segment, BOUNDARY_MAX_SHIFT, BOUNDARY_OPEN_GAP_SECS,
+    CLASSIFY_ATTEMPTS, MODEL, VERSION,
 };
 use pods_backend::{Backend, Database, DisabledDirectory, MockFeedFetcher};
 use serde_json::{json, Value};
@@ -268,7 +268,9 @@ fn uncertain_coarse_labels_publish_as_content() {
     labels[3].label = "uncertain".into();
     let refined = refine_boundaries(&segments, &labels).unwrap();
     assert_eq!(refined[3].label, "content");
-    assert!(refined.iter().all(|l| l.label == "ad" || l.label == "content"));
+    assert!(refined
+        .iter()
+        .all(|l| l.label == "ad" || l.label == "content"));
 }
 
 #[test]
@@ -302,11 +304,11 @@ fn classify_window_repairs_conflicting_overlap() {
 }
 
 #[test]
-fn classify_window_second_invalid_answer_fails_without_coercion() {
+fn classify_window_second_conflict_publishes_overlap_as_content() {
     let segments = fixture_segments(4);
     let conflict = conflicting_blocks();
     let mut prompts = Vec::new();
-    let error = classify_window_with(&segments, 0, 4, 12, |prompt, _schema| {
+    let labels = classify_window_with(&segments, 0, 4, 12, |prompt, _schema| {
         prompts.push(prompt.to_string());
         assert!(
             prompts.len() <= CLASSIFY_ATTEMPTS,
@@ -314,10 +316,11 @@ fn classify_window_second_invalid_answer_fails_without_coercion() {
         );
         Ok(conflict.clone())
     })
-    .unwrap_err();
+    .unwrap();
     assert_eq!(prompts.len(), CLASSIFY_ATTEMPTS);
-    assert_eq!(error.to_string(), "conflicting ad blocks");
     assert!(validate_blocks(&conflict, &segments).is_err());
+    // s0-s2 ad overlapping s1-s3 content: uncontested s0 stays ad, overlap is content.
+    assert_eq!(labels_of(&labels), ["ad", "content", "content", "content"]);
 }
 
 #[test]
@@ -699,16 +702,18 @@ fn synthetic_audio_through_publication_and_notes() {
         "ending editorial must remain, last_end={last_end} source={source_duration}"
     );
     let run = manifest.pipeline_version.as_str();
-    let labels: Vec<Label> = serde_json::from_slice(
-        &std::fs::read(work.join(format!("refined-{run}.json"))).unwrap(),
-    )
-    .unwrap();
+    let labels: Vec<Label> =
+        serde_json::from_slice(&std::fs::read(work.join(format!("refined-{run}.json"))).unwrap())
+            .unwrap();
     let ad = labels.iter().filter(|label| label.label == "ad").count();
     let content = labels
         .iter()
         .filter(|label| label.label == "content")
         .count();
-    assert!(ad >= 1, "refined labels must include an ad, labels={labels:?}");
+    assert!(
+        ad >= 1,
+        "refined labels must include an ad, labels={labels:?}"
+    );
     assert!(
         content >= 1,
         "refined labels must include content, labels={labels:?}"
