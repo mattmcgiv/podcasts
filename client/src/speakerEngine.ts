@@ -479,9 +479,20 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       });
       if (this.stale(op)) {
         if (status.session_id === this.sessionId && status.connected) {
+          if (status.generation > 0) this.generation = status.generation;
           try {
-            await this.client.disconnect({ session_id: this.sessionId, generation: status.generation });
-          } catch { /* Late load must not keep Mac audio after close. */ }
+            const stopped = await this.client.disconnect({
+              session_id: this.sessionId,
+              generation: status.generation,
+            });
+            this.ownsSession = false;
+            this.macMayBePlaying = false;
+            if (stopped.generation > 0) this.generation = stopped.generation;
+          } catch {
+            this.ownsSession = true;
+          }
+        } else {
+          this.ownsSession = false;
         }
         return;
       }
@@ -546,6 +557,8 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
     if (connected) {
       this.lostControl = false;
       this.ownsSession = true;
+    } else if (expectControl) {
+      this.ownsSession = false;
     }
     if (!expectControl) {
       this.setCast({

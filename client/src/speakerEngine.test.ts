@@ -136,6 +136,97 @@ describe("BrowserSpeakerEngine", () => {
     expect(engine.paused).toBe(true);
   });
 
+  it("does not send a stale disconnect after a late load is stopped", async () => {
+    const pending = deferred<SpeakerStatus>();
+    let loads = 0;
+    const load = vi.fn(() => {
+      loads += 1;
+      if (loads === 1) {
+        return Promise.resolve(status({
+          episode_id: 1,
+          generation: 1,
+          session_id: "sess-test",
+          connected: true,
+          paused: false,
+          position: 8,
+        }));
+      }
+      return pending.promise;
+    });
+    const disconnect = vi.fn(async (id) => {
+      if (id.generation !== 2) {
+        throw new SpeakerStaleError("Playback session is out of date.");
+      }
+      return status({ connected: false, generation: 3, session_id: null, paused: true, position: 8 });
+    });
+    const { client } = fakeClient({ load, disconnect });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/one.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    current.loadSource("https://h.example/two.m4a", 4, 2, "bb".repeat(32));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    current.castDisconnect();
+    pending.resolve(status({
+      episode_id: 2,
+      generation: 2,
+      session_id: "sess-test",
+      connected: true,
+      paused: false,
+      position: 4,
+    }));
+    await waitFor(() => expect(disconnect).toHaveBeenCalledWith({ session_id: "sess-test", generation: 2 }));
+    await waitFor(() => expect(current.cast.output).toBe("local"));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disconnect.mock.calls).toEqual([[{ session_id: "sess-test", generation: 2 }]]);
+    expect(current.cast.error).toBeUndefined();
+    expect(FakeAudio.last().paused).toBe(false);
+  });
+
+  it("does not disconnect after status reports the Mac session is gone", async () => {
+    const disconnect = vi.fn(async () => {
+      throw new SpeakerStaleError("Mac speaker is not connected.");
+    });
+    let live = false;
+    const { client } = fakeClient({
+      disconnect,
+      status: async () => {
+        if (!live) return status({ connected: false, generation: 0, session_id: null, available: true });
+        return status({
+          connected: false,
+          generation: 1,
+          session_id: null,
+          available: true,
+          paused: true,
+          position: 8,
+        });
+      },
+    });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.loadSource("https://h.example/ep.m4a", 8, 1, "aa".repeat(32));
+    FakeAudio.last().emitLoadedMetadata(1800);
+    await current.play();
+    current.castConnect();
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    live = true;
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    await waitFor(() => expect(current.cast.connected).toBe(false));
+    current.castDisconnect();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(disconnect).not.toHaveBeenCalled();
+    expect(current.cast.error ?? "").not.toMatch(/may still be playing/);
+    expect(current.cast.output).toBe("local");
+  });
+
   it("does not let an older poll rewind a newer seek", async () => {
     const poll = deferred<SpeakerStatus>();
     let statusCalls = 0;
