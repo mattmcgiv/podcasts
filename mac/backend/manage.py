@@ -27,6 +27,8 @@ PATH = "/opt/homebrew/bin:/usr/local/bin:" + str(Path.home() / ".local/bin") + "
 OMLX_LOOPBACK = ("127.0.0.1", 8000)
 OMLX_DOWN_GRACE_SECS = 60
 OMLX_START_INTERVAL_SECS = 15 * 60
+OMLX_START_WAIT_SECS = 2
+OMLX_APP_CLI = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
 
 
 def read_config():
@@ -238,6 +240,7 @@ def omlx_has_pending_inference(path):
         with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
             row = db.execute(
                 "SELECT 1 FROM browser_pending_jobs WHERE stage NOT IN ('blocked','review') "
+                "AND (error IS NULL OR error!='memory_busy') "
                 "AND (stage IN ('classifying','ad_boundaries','show_notes') OR error='omlx_busy') LIMIT 1"
             ).fetchone()
     except sqlite3.Error:
@@ -245,21 +248,49 @@ def omlx_has_pending_inference(path):
     return row is not None
 
 
+def omlx_user_cli():
+    return Path.home() / ".omlx/bin/omlx"
+
+
+def omlx_cli_is_managed(path):
+    resolved = str(Path(path).resolve())
+    return "/oMLX.app/Contents/MacOS/" in resolved or resolved.endswith("/.omlx/bin/omlx")
+
+
 def omlx_cli():
-    return shutil.which("omlx", path=PATH)
+    for candidate in (OMLX_APP_CLI, omlx_user_cli()):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    found = shutil.which("omlx", path=PATH)
+    if found and omlx_cli_is_managed(found):
+        return found
+    return None
 
 
 def post_notification(body):
     script = f"display notification {json.dumps(body)} with title {json.dumps('Pods')}"
-    subprocess.Popen(["/usr/bin/osascript", "-e", script], stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        subprocess.Popen(["/usr/bin/osascript", "-e", script], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return
 
 
 def request_omlx_start(cli):
-    # Fire and forget. `omlx start` imports a heavy runtime; do not block DNS/Caddy.
-    subprocess.Popen([cli, "start", "--no-wait"], stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, env=dict(os.environ, PATH=PATH))
+    # Wait briefly for a fast argparse failure. A real app CLI import can exceed
+    # this window; leave that child running and do not block DNS/Caddy.
+    process = subprocess.Popen([cli, "start", "--no-wait"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True, env=dict(os.environ, PATH=PATH), text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=OMLX_START_WAIT_SECS)
+    except subprocess.TimeoutExpired:
+        return
+    if process.returncode:
+        text = (stderr or stdout or "").strip()
+        if text:
+            print(text.splitlines()[0][:300], file=sys.stderr)
+        raise OSError("oMLX start failed")
 
 
 def maybe_start_omlx(config, now, state):
@@ -280,19 +311,24 @@ def maybe_start_omlx(config, now, state):
     cli = omlx_cli()
     if not cli:
         if not state["cli_missing_logged"]:
-            print("oMLX CLI is not on PATH; autostart disabled for this process.", file=sys.stderr)
+            print("oMLX CLI was not found; will look again later.", file=sys.stderr)
             state["cli_missing_logged"] = True
         return
     try:
         request_omlx_start(cli)
+        requested = True
     except OSError:
+        requested = False
         print("oMLX start failed.", file=sys.stderr)
-        post_notification("oMLX start failed")
-        state["next_start_at"] = now + OMLX_START_INTERVAL_SECS
-        return
-    print("oMLX not responding; requested start.", file=sys.stderr)
-    post_notification("oMLX start requested")
     state["next_start_at"] = now + OMLX_START_INTERVAL_SECS
+    try:
+        if requested:
+            print("oMLX not responding; requested start.", file=sys.stderr)
+            post_notification("oMLX start requested")
+        else:
+            post_notification("oMLX start failed")
+    except OSError:
+        return
 
 
 def launch():
@@ -358,7 +394,10 @@ https://{DOMAIN}:8443 {{
                 except Exception:
                     print("Certificate renewal failed.", file=sys.stderr)
                 next_certificate = time.time() + 12 * 3600
-            maybe_start_omlx(config, time.time(), omlx_state)
+            try:
+                maybe_start_omlx(config, time.time(), omlx_state)
+            except Exception:
+                print("oMLX autostart failed.", file=sys.stderr)
             time.sleep(5)
     finally:
         for child in (proxy, backend):

@@ -2,9 +2,11 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -364,16 +366,64 @@ class ManageTests(unittest.TestCase):
                 add_episode(db, 7, 1, "classifying", stage="classifying", error="omlx_busy")
                 db.commit()
                 self.assertTrue(manage.omlx_has_pending_inference(path))
+                db.execute("UPDATE browser_jobs SET error='memory_busy' WHERE episode_id=7")
+                db.commit()
+                self.assertFalse(manage.omlx_has_pending_inference(path))
+                db.execute("UPDATE browser_jobs SET error='omlx_busy' WHERE episode_id=7")
+                db.commit()
+                self.assertTrue(manage.omlx_has_pending_inference(path))
             self.assertFalse(manage.omlx_has_pending_inference(Path(directory) / "missing.sqlite"))
 
+    def test_omlx_cli_prefers_app_cli_over_homebrew_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            brew_dir = Path(directory) / "opt/homebrew/bin"
+            brew_dir.mkdir(parents=True)
+            brew = brew_dir / "omlx"
+            brew.write_text("#!/bin/sh\necho brew\n")
+            os.chmod(brew, 0o755)
+            app = Path(directory) / "oMLX.app/Contents/MacOS/omlx-cli"
+            app.parent.mkdir(parents=True)
+            app.write_text("#!/bin/sh\nexit 0\n")
+            os.chmod(app, 0o755)
+            missing = Path(directory) / "missing-omlx"
+            with patch.object(manage, "OMLX_APP_CLI", app), \
+                 patch.object(manage, "omlx_user_cli", return_value=missing), \
+                 patch.object(manage, "PATH", str(brew_dir)):
+                self.assertEqual(manage.omlx_cli(), str(app))
+            with patch.object(manage, "OMLX_APP_CLI", missing), \
+                 patch.object(manage, "omlx_user_cli", return_value=missing), \
+                 patch.object(manage, "PATH", str(brew_dir)):
+                self.assertIsNone(manage.omlx_cli())
+                self.assertTrue(brew.is_file())
+
     def test_request_omlx_start_uses_no_wait_and_keeps_secrets_off_argv(self):
-        with patch.object(manage.subprocess, "Popen") as popen:
+        process = unittest.mock.Mock()
+        process.communicate.return_value = ("", "")
+        process.returncode = 0
+        with patch.object(manage.subprocess, "Popen", return_value=process) as popen:
             manage.request_omlx_start("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
             argv = popen.call_args[0][0]
             self.assertEqual(argv, ["/Applications/oMLX.app/Contents/MacOS/omlx-cli", "start", "--no-wait"])
             self.assertNotIn("start-key", " ".join(argv))
             joined = " ".join(argv)
             self.assertNotIn("omlx_key", joined.lower())
+
+    def test_request_omlx_start_rejects_fast_nonzero_exit(self):
+        process = unittest.mock.Mock()
+        process.communicate.return_value = ("", "unrecognized arguments: --no-wait\n")
+        process.returncode = 2
+        with patch.object(manage.subprocess, "Popen", return_value=process):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(OSError):
+                manage.request_omlx_start("/opt/homebrew/bin/omlx")
+            self.assertIn("unrecognized arguments", stderr.getvalue())
+            self.assertNotIn("start-key", stderr.getvalue())
+
+    def test_request_omlx_start_leaves_slow_cli_running(self):
+        process = unittest.mock.Mock()
+        process.communicate.side_effect = subprocess.TimeoutExpired(cmd="omlx", timeout=2)
+        with patch.object(manage.subprocess, "Popen", return_value=process):
+            manage.request_omlx_start("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
 
     def test_maybe_start_omlx_requests_start_after_grace_and_respects_interval(self):
         config = {"omlx_autostart": True}
@@ -433,7 +483,7 @@ class ManageTests(unittest.TestCase):
                 manage.maybe_start_omlx(config, 1, state)
                 manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS, state)
                 manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS + 5, state)
-            self.assertEqual(stderr.getvalue().count("oMLX CLI is not on PATH"), 1)
+            self.assertEqual(stderr.getvalue().count("oMLX CLI was not found; will look again later."), 1)
             start.assert_not_called()
 
     def test_maybe_start_omlx_notifies_failure_and_applies_interval(self):
@@ -451,3 +501,18 @@ class ManageTests(unittest.TestCase):
             notify.assert_called_once_with("oMLX start failed")
             self.assertEqual(state["next_start_at"], 1 + manage.OMLX_DOWN_GRACE_SECS + manage.OMLX_START_INTERVAL_SECS)
             self.assertIn("oMLX start failed", stderr.getvalue())
+
+    def test_maybe_start_omlx_sets_interval_when_notification_fails(self):
+        config = {"omlx_autostart": True}
+        state = manage.omlx_autostart_state()
+        with patch.object(manage, "omlx_tcp_up", return_value=False), \
+             patch.object(manage, "omlx_cli", return_value="/tmp/omlx"), \
+             patch.object(manage, "omlx_has_pending_inference", return_value=True), \
+             patch.object(manage, "request_omlx_start"), \
+             patch.object(manage, "post_notification", side_effect=OSError("notify")):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                manage.maybe_start_omlx(config, 1, state)
+                manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS, state)
+            self.assertEqual(state["next_start_at"], 1 + manage.OMLX_DOWN_GRACE_SECS + manage.OMLX_START_INTERVAL_SECS)
+            self.assertIn("requested start", stderr.getvalue())
