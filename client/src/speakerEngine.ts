@@ -120,6 +120,8 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       }
       const playing = this.pendingPlayIntent();
       this._currentTime = initialPosition;
+      this.connecting = true;
+      this.stopPoll();
       this.stopLocal(false);
       this.runBackground(op, () => this.loadMac(op, episodeId, artifactHash, initialPosition, playing));
       return;

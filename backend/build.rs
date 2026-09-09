@@ -20,6 +20,8 @@ fn main() {
             dest.to_str().expect("helper dest"),
             "src/speaker_helper.swift",
             "-framework",
+            "AppKit",
+            "-framework",
             "AVFoundation",
             "-framework",
             "CoreMedia",
