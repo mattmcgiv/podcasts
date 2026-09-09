@@ -655,10 +655,10 @@ fn local_worker_reuses_cached_transcript_and_publication() {
             "-y",
         ])
         .arg(&wav)
-        .status();
-    if !ffmpeg.map(|s| s.success()).unwrap_or(false) {
-        return;
-    }
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ffmpeg, "ffmpeg is required to plant fixture audio");
     let db = Database::open_in_memory().unwrap();
     db.execute(
         "INSERT INTO podcasts(id,feed_url,title,is_subscribed,created_at) VALUES(1,'https://example.org/feed','Example',1,0)",
@@ -753,7 +753,7 @@ fn local_worker_reuses_cached_transcript_and_publication() {
 fn backend_follow_ad_removal_and_runtime_refresh() {
     let db = Database::open_in_memory().unwrap();
     db.execute(
-        "INSERT INTO podcasts(id,feed_url,title,created_at) VALUES(1,'https://example.org/feed','S',1)",
+        "INSERT INTO podcasts(id,feed_url,title,is_subscribed,created_at) VALUES(1,'https://example.org/feed','S',0,1)",
         [],
     )
     .unwrap();

@@ -2426,6 +2426,7 @@ mod download_tests {
     #[cfg(unix)]
     #[test]
     fn backend_shutdown_kills_the_whisper_process_group() {
+        let _lock = WHISPER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut child = Command::new("/bin/sleep")
             .arg("30")
             .process_group(0)
@@ -3328,6 +3329,18 @@ mod download_tests {
                     .unwrap();
                 let stepped = step(&backend).unwrap();
                 assert!(stepped);
+                let work = backend.artifacts.url("local/1");
+                let transcripts = fs::read_dir(&work)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("transcript-")
+                    })
+                    .count();
+                assert!(transcripts >= 1);
+                assert!(mock.posts.load(Ordering::SeqCst) >= 1);
             },
         );
         match prev_script {
