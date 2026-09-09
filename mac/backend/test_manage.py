@@ -283,6 +283,7 @@ class ManageTests(unittest.TestCase):
             self.assertEqual(config["whisper_model"], "/models/whisper-large-v3-mlx")
             self.assertEqual(env["PODS_WHISPER_MODEL"], "/models/whisper-large-v3-mlx")
             self.assertEqual(env["PODS_MEMORY_GATE"], "0")
+            self.assertEqual(env["PODS_MEMORY_GATE_NOTIFY"], "1")
             self.assertEqual(env["PODS_MEMORY_WHISPER_DEFER_BELOW_BYTES"], "1")
             self.assertEqual(env["PODS_MEMORY_WHISPER_RESUME_ABOVE_BYTES"], "2")
             self.assertEqual(env["PODS_MEMORY_OMLX_DEFER_BELOW_BYTES"], "3")

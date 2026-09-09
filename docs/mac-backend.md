@@ -190,7 +190,7 @@ Automatic processing retries at most four failed attempts. Then the job stage is
 `memory_busy` does not consume an attempt. It retries in 60-120 seconds.
 The memory gate defers Whisper below 8 GiB available (resume at 10 GiB) and oMLX work below 24 GiB (resume at 32 GiB).
 Kernel pressure `warn` or `critical` defers both bands and stops an in-flight Whisper process group.
-Notification Center posts `Transcription` or `Classification` paused or resumed copy on each transition.
+Notification Center posts one `Transcription` or `Classification` paused banner and one resumed banner per kind. Repeats while that kind stays paused or resumed are suppressed, including after a backend restart. Live banners use `PODS_MEMORY_GATE_NOTIFY=1` from `manage.py`.
 Merge `memory_gate` and the four byte keys into the existing `mac.json`. Do not replace that file.
 A plist-only `PODS_MEMORY_GATE` does not survive `manage.py agent`.
 New jobs precede ordinary retries. An explicit `retry` command still takes precedence.

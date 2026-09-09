@@ -255,7 +255,7 @@ Job error is `memory_busy`. It does not consume a failure attempt. Retry is 60â€
 
 If kernel pressure hits `warn` or `critical` while Whisper is already running, the backend stops that process group. Completed 180 s chunk files remain. Classification that already holds the oMLX lock is not cancelled.
 
-`GET /api/status` includes a `memory` object with both gates. macOS Notification Center posts `{work} paused due to {cause}` and `{work} resumed due to available memory` on each gate transition. Causes are low memory, warning-level memory pressure, critical memory pressure, and a memory sample failure.
+`GET /api/status` includes a `memory` object with both gates. macOS Notification Center posts one `{work} paused due to {cause}` banner when a kind becomes deferred, and one `{work} resumed due to available memory` banner when it returns to open. The same pause or resume does not repeat while that kind stays in that state, including after a backend restart. Causes are low memory, warning-level memory pressure, critical memory pressure, and a memory sample failure. Live banners require `PODS_MEMORY_GATE_NOTIFY=1` from `python3 mac/backend/manage.py`; do not put that key only on the launchd plist.
 
 Merge these keys into the existing `~/.config/podcasts/mac.json` (mode 0600). Keep `desec_token`, `acme_email`, `whisper_model`, and optional `omlx_key`. Do not replace the file with a memory-only object.
 
