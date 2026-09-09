@@ -464,6 +464,7 @@ describe("BrowserSpeakerEngine", () => {
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(1000);
     vi.useRealTimers();
+    expect(current.cast.connected).toBe(true);
     expect(current.cast.error ?? "").not.toMatch(/disconnected|Tap Mac/);
     pending.resolve(status({
       episode_id: 2,

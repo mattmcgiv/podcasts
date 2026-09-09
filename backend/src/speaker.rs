@@ -1192,6 +1192,28 @@ mod tests {
             helper_path.contains(".app/Contents/MacOS/"),
             "helper must run from an app bundle, got {helper_path}"
         );
+        let app_name = std::path::Path::new(&helper_path)
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let stem = app_name.strip_suffix(".app").unwrap_or("");
+        assert_eq!(stem.len(), 64, "must reuse the canonical helper bundle, got {app_name}");
+        assert!(
+            stem.chars().all(|c| c.is_ascii_hexdigit()),
+            "must reuse the canonical helper bundle, got {app_name}"
+        );
+        let reused = HelperTransport::new().expect("reuse helper cache");
+        reused.load(&short, 0.0, 1.0, true).expect("load from cached bundle");
+        let reused_path = process_path(reused.child_pid().expect("reused pid")).expect("reused path");
+        assert_eq!(
+            std::path::Path::new(&helper_path).parent().unwrap().parent().unwrap().parent().unwrap(),
+            std::path::Path::new(&reused_path).parent().unwrap().parent().unwrap().parent().unwrap(),
+            "second extract must reuse the signed bundle"
+        );
+        drop(reused);
         helper.play().expect("play");
         let start = Instant::now();
         let mut saw_end = false;

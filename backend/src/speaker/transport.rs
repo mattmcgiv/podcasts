@@ -710,52 +710,33 @@ fn extract_helper() -> Result<PathBuf, Error> {
             .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
         let app = dir.join(format!("{hash}.app"));
         let dest = app.join("Contents/MacOS/pods-speaker-helper");
-        if helper_bundle_ready(&app, &hash)? {
+        if helper_bundle_ready(&app, &hash) {
             return Ok(dest);
         }
         let staging = dir.join(format!("{hash}.{}.app", uuid::Uuid::new_v4().simple()));
         let staging_macos = staging.join("Contents/MacOS");
         let staging_bin = staging_macos.join("pods-speaker-helper");
-        if let Err(error) = (|| -> Result<(), Error> {
-            std::fs::create_dir_all(&staging_macos)
-                .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
-            std::fs::write(&staging_bin, HELPER_BIN)
-                .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&staging_bin, std::fs::Permissions::from_mode(0o700))
-                    .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
-            }
-            if hash_file(&staging_bin)? != hash {
-                return Err(Error::Invalid("Mac speaker failed to start.".into()));
-            }
-            std::fs::write(staging.join("Contents/Info.plist"), HELPER_PLIST)
-                .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
-            adhoc_sign(&staging)?;
-            Ok(())
-        })() {
+        if let Err(error) = write_signed_helper_bundle(&staging, &staging_bin, &hash) {
             let _ = std::fs::remove_dir_all(&staging);
-            if helper_bundle_ready(&app, &hash)? {
+            if helper_bundle_ready(&app, &hash) {
                 return Ok(dest);
             }
             return Err(error);
         }
-        if helper_bundle_ready(&app, &hash)? {
+        if helper_bundle_ready(&app, &hash) {
             let _ = std::fs::remove_dir_all(&staging);
             return Ok(dest);
         }
-        let _ = std::fs::remove_dir_all(&app);
+        if !helper_bundle_ready(&app, &hash) {
+            let _ = std::fs::remove_dir_all(&app);
+        }
         match std::fs::rename(&staging, &app) {
             Ok(()) => Ok(dest),
             Err(_) => {
-                if helper_bundle_ready(&app, &hash)? {
-                    let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_dir_all(&staging);
+                if helper_bundle_ready(&app, &hash) {
                     Ok(dest)
-                } else if staging_bin.is_file() {
-                    Ok(staging_bin)
                 } else {
-                    let _ = std::fs::remove_dir_all(&staging);
                     Err(Error::Invalid("Mac speaker failed to start.".into()))
                 }
             }
@@ -764,9 +745,38 @@ fn extract_helper() -> Result<PathBuf, Error> {
 }
 
 #[cfg(target_os = "macos")]
-fn helper_bundle_ready(app: &Path, hash: &str) -> Result<bool, Error> {
+fn write_signed_helper_bundle(staging: &Path, staging_bin: &Path, hash: &str) -> Result<(), Error> {
+    std::fs::create_dir_all(staging_bin.parent().unwrap())
+        .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    std::fs::write(staging_bin, HELPER_BIN)
+        .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staging_bin, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    }
+    if hash_file(staging_bin)? != hash {
+        return Err(Error::Invalid("Mac speaker failed to start.".into()));
+    }
+    std::fs::write(staging.join("Contents/Info.plist"), HELPER_PLIST)
+        .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    let resources = staging.join("Contents/Resources");
+    std::fs::create_dir_all(&resources)
+        .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    std::fs::write(resources.join("embed.sha256"), hash)
+        .map_err(|_| Error::Invalid("Mac speaker failed to start.".into()))?;
+    adhoc_sign(staging)
+}
+
+#[cfg(target_os = "macos")]
+fn helper_bundle_ready(app: &Path, hash: &str) -> bool {
     let dest = app.join("Contents/MacOS/pods-speaker-helper");
-    Ok(dest.is_file() && app.join("Contents/Info.plist").is_file() && hash_file(&dest)? == hash)
+    let plist = app.join("Contents/Info.plist");
+    let marker = app.join("Contents/Resources/embed.sha256");
+    dest.is_file()
+        && plist.is_file()
+        && std::fs::read_to_string(marker).ok().as_deref() == Some(hash)
 }
 
 #[cfg(target_os = "macos")]
