@@ -194,6 +194,19 @@ impl PostedStates {
     }
 }
 
+fn apply_posted_to_states(states: &mut KindStates, posted: PostedStates) {
+    if let Some(state) = posted.whisper {
+        if state != GateState::Disabled {
+            states.whisper = state;
+        }
+    }
+    if let Some(state) = posted.omlx {
+        if state != GateState::Disabled {
+            states.omlx = state;
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
 struct ProductionGate {
     states: KindStates,
@@ -345,7 +358,9 @@ pub fn evaluate() -> MemoryReport {
             let snapshot = sample_live();
             let mut gate = PRODUCTION_STATES.lock().unwrap_or_else(|e| e.into_inner());
             if !gate.persist_loaded {
-                gate.posted = load_posted();
+                let posted = load_posted();
+                apply_posted_to_states(&mut gate.states, posted);
+                gate.posted = posted;
                 gate.persist_loaded = true;
             }
             let gate = &mut *gate;
@@ -920,6 +935,16 @@ fn set_test_states_open() {
 }
 
 #[cfg(test)]
+fn simulate_test_restart() {
+    TEST_INJECT.with(|cell| {
+        if let Some(inject) = cell.borrow_mut().as_mut() {
+            inject.states = KindStates::open();
+            apply_posted_to_states(&mut inject.states, inject.posted);
+        }
+    });
+}
+
+#[cfg(test)]
 fn evaluate_injected() -> Option<MemoryReport> {
     TEST_INJECT.with(|cell| {
         let mut inject = cell.borrow_mut();
@@ -1238,6 +1263,50 @@ mod tests {
                 evaluate();
                 let again = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
                 assert_eq!(again.len(), 6);
+            },
+        );
+    }
+
+    #[test]
+    fn restart_in_hysteresis_band_does_not_resume() {
+        with_test_memory(
+            TestMemory {
+                snapshot: snap(gib(32), PressureLevel::Normal, false),
+                ..TestMemory::default()
+            },
+            || {
+                evaluate();
+                set_test_snapshot(snap(gib(7), PressureLevel::Normal, false));
+                evaluate();
+                assert_eq!(
+                    TEST_NOTIFICATIONS.with(|cell| cell.borrow().len()),
+                    2
+                );
+                simulate_test_restart();
+                set_test_snapshot(snap(gib(9), PressureLevel::Normal, false));
+                let mid = evaluate();
+                assert_eq!(mid.whisper.state, GateState::Deferred);
+                assert_eq!(mid.omlx.state, GateState::Deferred);
+                assert_eq!(mid.whisper.last_reason, Some("hysteresis"));
+                assert_eq!(
+                    TEST_NOTIFICATIONS.with(|cell| cell.borrow().len()),
+                    2
+                );
+                simulate_test_restart();
+                set_test_snapshot(snap(gib(28), PressureLevel::Normal, false));
+                let high = evaluate();
+                assert_eq!(high.whisper.state, GateState::Open);
+                assert_eq!(high.omlx.state, GateState::Deferred);
+                assert_eq!(high.omlx.last_reason, Some("hysteresis"));
+                let posted = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
+                assert_eq!(
+                    posted,
+                    [
+                        "Transcription paused due to low memory",
+                        "Classification paused due to low memory",
+                        "Transcription resumed due to available memory",
+                    ]
+                );
             },
         );
     }
