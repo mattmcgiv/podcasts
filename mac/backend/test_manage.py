@@ -398,32 +398,50 @@ class ManageTests(unittest.TestCase):
 
     def test_request_omlx_start_uses_no_wait_and_keeps_secrets_off_argv(self):
         process = unittest.mock.Mock()
-        process.communicate.return_value = ("", "")
+        process.poll.return_value = 0
         process.returncode = 0
         with patch.object(manage.subprocess, "Popen", return_value=process) as popen:
             manage.request_omlx_start("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
             argv = popen.call_args[0][0]
             self.assertEqual(argv, ["/Applications/oMLX.app/Contents/MacOS/omlx-cli", "start", "--no-wait"])
+            self.assertIs(popen.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertIsNot(popen.call_args.kwargs["stderr"], subprocess.PIPE)
             self.assertNotIn("start-key", " ".join(argv))
             joined = " ".join(argv)
             self.assertNotIn("omlx_key", joined.lower())
 
     def test_request_omlx_start_rejects_fast_nonzero_exit(self):
-        process = unittest.mock.Mock()
-        process.communicate.return_value = ("", "unrecognized arguments: --no-wait\n")
-        process.returncode = 2
-        with patch.object(manage.subprocess, "Popen", return_value=process):
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / "omlx-cli"
+            cli.write_text("#!/bin/sh\necho unrecognized arguments: --no-wait >&2\nexit 2\n")
+            os.chmod(cli, 0o755)
             stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr), self.assertRaises(OSError):
-                manage.request_omlx_start("/opt/homebrew/bin/omlx")
+            with patch.object(manage, "OMLX_FAST_FAIL_SECS", 5), \
+                 contextlib.redirect_stderr(stderr), self.assertRaises(OSError):
+                manage.request_omlx_start(str(cli))
             self.assertIn("unrecognized arguments", stderr.getvalue())
             self.assertNotIn("start-key", stderr.getvalue())
 
+    def test_request_omlx_start_replaces_invalid_stderr_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / "omlx-cli"
+            cli.write_bytes(b"#!/bin/sh\nprintf '\\xff\\xfe bad\\n' >&2\nexit 2\n")
+            os.chmod(cli, 0o755)
+            stderr = io.StringIO()
+            with patch.object(manage, "OMLX_FAST_FAIL_SECS", 5), \
+                 contextlib.redirect_stderr(stderr), self.assertRaises(OSError):
+                manage.request_omlx_start(str(cli))
+            self.assertIn("bad", stderr.getvalue())
+
     def test_request_omlx_start_leaves_slow_cli_running(self):
         process = unittest.mock.Mock()
-        process.communicate.side_effect = subprocess.TimeoutExpired(cmd="omlx", timeout=2)
-        with patch.object(manage.subprocess, "Popen", return_value=process):
+        process.poll.return_value = None
+        with patch.object(manage, "OMLX_FAST_FAIL_SECS", 0), \
+             patch.object(manage.subprocess, "Popen", return_value=process) as popen:
             manage.request_omlx_start("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
+            process.communicate.assert_not_called()
+            self.assertIs(popen.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertIsNot(popen.call_args.kwargs["stderr"], subprocess.PIPE)
 
     def test_maybe_start_omlx_requests_start_after_grace_and_respects_interval(self):
         config = {"omlx_autostart": True}
@@ -516,3 +534,17 @@ class ManageTests(unittest.TestCase):
                 manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS, state)
             self.assertEqual(state["next_start_at"], 1 + manage.OMLX_DOWN_GRACE_SECS + manage.OMLX_START_INTERVAL_SECS)
             self.assertIn("requested start", stderr.getvalue())
+
+    def test_maybe_start_omlx_applies_interval_on_any_start_error(self):
+        config = {"omlx_autostart": True}
+        state = manage.omlx_autostart_state()
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        with patch.object(manage, "omlx_tcp_up", return_value=False), \
+             patch.object(manage, "omlx_cli", return_value="/tmp/omlx"), \
+             patch.object(manage, "omlx_has_pending_inference", return_value=True), \
+             patch.object(manage, "request_omlx_start", side_effect=error), \
+             patch.object(manage, "post_notification") as notify:
+            manage.maybe_start_omlx(config, 1, state)
+            manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS, state)
+            notify.assert_called_once_with("oMLX start failed")
+            self.assertEqual(state["next_start_at"], 1 + manage.OMLX_DOWN_GRACE_SECS + manage.OMLX_START_INTERVAL_SECS)

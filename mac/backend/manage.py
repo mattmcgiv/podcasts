@@ -13,6 +13,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -27,7 +28,7 @@ PATH = "/opt/homebrew/bin:/usr/local/bin:" + str(Path.home() / ".local/bin") + "
 OMLX_LOOPBACK = ("127.0.0.1", 8000)
 OMLX_DOWN_GRACE_SECS = 60
 OMLX_START_INTERVAL_SECS = 15 * 60
-OMLX_START_WAIT_SECS = 2
+OMLX_FAST_FAIL_SECS = 0.3
 OMLX_APP_CLI = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
 
 
@@ -277,20 +278,26 @@ def post_notification(body):
 
 
 def request_omlx_start(cli):
-    # Wait briefly for a fast argparse failure. A real app CLI import can exceed
-    # this window; leave that child running and do not block DNS/Caddy.
-    process = subprocess.Popen([cli, "start", "--no-wait"], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               start_new_session=True, env=dict(os.environ, PATH=PATH), text=True)
+    # Poll for a fast argparse failure. Do not attach PIPE to a child this
+    # manager will abandon. stdout is discarded. stderr goes to a temp file.
+    stderr = tempfile.TemporaryFile()
     try:
-        stdout, stderr = process.communicate(timeout=OMLX_START_WAIT_SECS)
-    except subprocess.TimeoutExpired:
-        return
-    if process.returncode:
-        text = (stderr or stdout or "").strip()
-        if text:
-            print(text.splitlines()[0][:300], file=sys.stderr)
-        raise OSError("oMLX start failed")
+        process = subprocess.Popen([cli, "start", "--no-wait"], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=stderr,
+                                   start_new_session=True, env=dict(os.environ, PATH=PATH))
+        deadline = time.monotonic() + OMLX_FAST_FAIL_SECS
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if process.poll() is None:
+            return
+        stderr.seek(0)
+        text = stderr.read().decode("utf-8", errors="replace").strip()
+        if process.returncode:
+            if text:
+                print(text.splitlines()[0][:300], file=sys.stderr)
+            raise OSError("oMLX start failed")
+    finally:
+        stderr.close()
 
 
 def maybe_start_omlx(config, now, state):
@@ -317,7 +324,7 @@ def maybe_start_omlx(config, now, state):
     try:
         request_omlx_start(cli)
         requested = True
-    except OSError:
+    except Exception:
         requested = False
         print("oMLX start failed.", file=sys.stderr)
     state["next_start_at"] = now + OMLX_START_INTERVAL_SECS
