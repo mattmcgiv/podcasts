@@ -286,3 +286,25 @@ class ManageTests(unittest.TestCase):
             self.assertEqual(env["PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES"], "4")
             memory_env = {key: env[key] for key in env if key.startswith("PODS_MEMORY")}
             self.assertNotIn("placeholder-token", str(memory_env))
+
+    def test_launch_starts_the_release_backend_binary(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            current = Path(directory) / "current"
+            current.mkdir()
+            (current / "pods-backend").write_text("")
+            (Path(directory) / "data").mkdir()
+            with patch.object(manage, "read_config", return_value={"whisper_model": "/models/w"}), \
+                 patch.object(manage, "wifi_address", return_value=None), \
+                 patch.object(manage.signal, "signal"), \
+                 patch.object(manage, "stop_process"), \
+                 patch.object(manage.subprocess, "Popen") as popen, \
+                 patch.object(manage.time, "sleep", side_effect=KeyboardInterrupt):
+                process = unittest.mock.Mock()
+                process.poll.return_value = None
+                process.pid = 99
+                popen.return_value = process
+                with self.assertRaises(KeyboardInterrupt):
+                    manage.launch()
+                argv = popen.call_args[0][0]
+                self.assertEqual(argv[0], str(current.resolve() / "pods-backend"))
+                self.assertEqual(argv[1], str(Path(directory) / "data/pods.sqlite"))

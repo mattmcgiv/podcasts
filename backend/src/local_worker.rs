@@ -15,6 +15,9 @@ use std::{
 };
 
 #[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
+
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 pub const MODEL: &str = "DeepSeek-V4-Flash-0731-2.4bit-mixed";
@@ -532,6 +535,54 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(unix)]
+static WHISPER_PGID: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+fn install_whisper_shutdown() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            whisper_shutdown as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            whisper_shutdown as *const () as libc::sighandler_t,
+        );
+    });
+}
+
+#[cfg(unix)]
+extern "C" fn whisper_shutdown(sig: libc::c_int) {
+    kill_registered_whisper_group();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(unix)]
+fn register_whisper_pgid(pgid: libc::pid_t) {
+    install_whisper_shutdown();
+    WHISPER_PGID.store(pgid, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn clear_whisper_pgid(pgid: libc::pid_t) {
+    let _ = WHISPER_PGID.compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn kill_registered_whisper_group() {
+    let pgid = WHISPER_PGID.swap(0, Ordering::SeqCst);
+    if pgid > 1 {
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
+        }
+    }
+}
+
 fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     {
@@ -542,6 +593,15 @@ fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> 
             .process_group(0)
             .spawn()
             .map_err(failure)?;
+        let pgid = child.id() as libc::pid_t;
+        register_whisper_pgid(pgid);
+        struct ClearPgid(libc::pid_t);
+        impl Drop for ClearPgid {
+            fn drop(&mut self) {
+                clear_whisper_pgid(self.0);
+            }
+        }
+        let _clear = ClearPgid(pgid);
         loop {
             match child.try_wait().map_err(failure)? {
                 Some(status) if status.success() => return Ok(()),
@@ -2327,6 +2387,21 @@ mod download_tests {
                 assert!(crate::memory_gate::is_busy_error(&error));
             },
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_shutdown_kills_the_whisper_process_group() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        register_whisper_pgid(child.id() as libc::pid_t);
+        kill_registered_whisper_group();
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        assert_eq!(WHISPER_PGID.load(Ordering::SeqCst), 0);
     }
 
     struct NotificationRow {

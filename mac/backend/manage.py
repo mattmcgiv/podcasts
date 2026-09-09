@@ -213,7 +213,7 @@ def backend_env(config):
 
 def launch():
     config = read_config()
-    (STATE / "current").resolve(strict=True)
+    release = (STATE / "current").resolve(strict=True)
     env = backend_env(config)
     config_credentials = Path.home() / ".config/podcasts/credentials.env"
     if config_credentials.is_file():
