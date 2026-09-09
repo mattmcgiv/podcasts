@@ -9,6 +9,7 @@ import plistlib
 import secrets
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -23,6 +24,9 @@ CONFIG = Path(os.environ.get("PODS_CONFIG_FILE", str(Path.home() / ".config/podc
 DOMAIN = "sync.pods.mcgiv.dev"
 MODEL_REVISION = "49e6aa286ad60c14352c404340ded53710378a11"
 PATH = "/opt/homebrew/bin:/usr/local/bin:" + str(Path.home() / ".local/bin") + ":" + str(Path.home() / ".cargo/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin"
+OMLX_LOOPBACK = ("127.0.0.1", 8000)
+OMLX_DOWN_GRACE_SECS = 60
+OMLX_START_INTERVAL_SECS = 15 * 60
 
 
 def read_config():
@@ -211,6 +215,86 @@ def backend_env(config):
     return env
 
 
+def omlx_autostart_enabled(config):
+    return config.get("omlx_autostart") not in (None, False, 0, "0")
+
+
+def omlx_autostart_state():
+    return {"down_since": None, "next_start_at": 0, "cli_missing_logged": False}
+
+
+def omlx_tcp_up(timeout=0.5):
+    try:
+        with socket.create_connection(OMLX_LOOPBACK, timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def omlx_has_pending_inference(path):
+    if not path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
+            row = db.execute(
+                "SELECT 1 FROM browser_pending_jobs WHERE stage NOT IN ('blocked','review') "
+                "AND (stage IN ('classifying','ad_boundaries','show_notes') OR error='omlx_busy') LIMIT 1"
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def omlx_cli():
+    return shutil.which("omlx", path=PATH)
+
+
+def post_notification(body):
+    script = f"display notification {json.dumps(body)} with title {json.dumps('Pods')}"
+    subprocess.Popen(["/usr/bin/osascript", "-e", script], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def request_omlx_start(cli):
+    # Fire and forget. `omlx start` imports a heavy runtime; do not block DNS/Caddy.
+    subprocess.Popen([cli, "start", "--no-wait"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, env=dict(os.environ, PATH=PATH))
+
+
+def maybe_start_omlx(config, now, state):
+    if not omlx_autostart_enabled(config):
+        return
+    if omlx_tcp_up():
+        state["down_since"] = None
+        return
+    if state["down_since"] is None:
+        state["down_since"] = now
+        return
+    if now - state["down_since"] < OMLX_DOWN_GRACE_SECS:
+        return
+    if now < state["next_start_at"]:
+        return
+    if not omlx_has_pending_inference(STATE / "data/pods.sqlite"):
+        return
+    cli = omlx_cli()
+    if not cli:
+        if not state["cli_missing_logged"]:
+            print("oMLX CLI is not on PATH; autostart disabled for this process.", file=sys.stderr)
+            state["cli_missing_logged"] = True
+        return
+    try:
+        request_omlx_start(cli)
+    except OSError:
+        print("oMLX start failed.", file=sys.stderr)
+        post_notification("oMLX start failed")
+        state["next_start_at"] = now + OMLX_START_INTERVAL_SECS
+        return
+    print("oMLX not responding; requested start.", file=sys.stderr)
+    post_notification("oMLX start requested")
+    state["next_start_at"] = now + OMLX_START_INTERVAL_SECS
+
+
 def launch():
     config = read_config()
     release = (STATE / "current").resolve(strict=True)
@@ -227,6 +311,7 @@ def launch():
     dns_previous = object()
     next_dns = 0
     next_certificate = time.time() + 12 * 3600
+    omlx_state = omlx_autostart_state()
     stop = False
     def terminate(_signum, _frame):
         nonlocal stop
@@ -273,6 +358,7 @@ https://{DOMAIN}:8443 {{
                 except Exception:
                     print("Certificate renewal failed.", file=sys.stderr)
                 next_certificate = time.time() + 12 * 3600
+            maybe_start_omlx(config, time.time(), omlx_state)
             time.sleep(5)
     finally:
         for child in (proxy, backend):

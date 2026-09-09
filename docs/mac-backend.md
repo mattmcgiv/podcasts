@@ -268,6 +268,8 @@ Create `~/.config/podcasts/mac.json` with mode `0600`:
 }
 ```
 
+Optional: set `"omlx_autostart": true` on that same object if the Mac manager should request `omlx start --no-wait` when loopback port 8000 is down. The request waits 60 seconds of continuous downtime, requires pending classification or show-notes work, and then waits 15 minutes before another request. It does not restart a live server. Restart the agent after that change. Rollback: set `"omlx_autostart": false` or remove the key, then restart the agent.
+
 Never put real tokens in Git, chat, the client, or shell arguments.
 The service reads the oMLX key from `~/.pi/agent/models.json`. It does not invoke Pi.
 An optional `omlx_key` in the private configuration overrides that source.

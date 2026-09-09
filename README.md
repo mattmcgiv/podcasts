@@ -226,6 +226,20 @@ Rollback: set `PODS_OMLX_LOCK=0`, stop using the wrapper, leave oMLX settings an
 
 This code does not create a LaunchAgent, lock daemon, or other mysterious background process.
 
+### oMLX autostart
+
+The Mac manager can request the existing oMLX menu-bar app to start its loopback HTTP server when that port is down.
+
+This is off by default. Merge `"omlx_autostart": true` into `~/.config/podcasts/mac.json` and restart the agent. Do not put the flag only on the launchd plist. `python3 mac/backend/manage.py agent` rewrites the plist and drops extra env keys.
+
+A TCP check of `127.0.0.1:8000` is the liveness probe. Occupied oMLX, a held cooperative lock, and HTTP 503 are live. Those cases do not trigger a start. `open -a oMLX` is not enough when the app is already up with the server stopped. The manager calls `omlx start --no-wait` and does not call `omlx serve` or `omlx restart`.
+
+Start runs only when eligible pending work is in `classifying`, `ad_boundaries`, or `show_notes`, or the job error is `omlx_busy`. Queued, downloading, and transcribing jobs do not start oMLX. Played, archived, unsubscribed, and blocked jobs do not start it.
+
+The manager waits 60 seconds of continuous downtime, then 15 minutes between start requests. The CLI spawn is asynchronous so DNS and Caddy keep their 5-second loop. If `omlx` is not on `PATH`, the manager logs once and stops for that process. Notification Center posts `oMLX start requested` or `oMLX start failed`. Logs and argv never include the API key.
+
+Rollback: set `"omlx_autostart": false` or remove the key, then restart the agent.
+
 ### Memory-aware inference deferral
 
 The Mac backend stays up for HTTPS, sync, and speaker when unified memory is tight. It defers only Whisper transcription and oMLX classification or show notes.
