@@ -58,6 +58,17 @@ def job_rows(db):
 
 
 class ManageTests(unittest.TestCase):
+    def test_spawn_grouped_keeps_the_gui_session_for_the_backend(self):
+        with patch.object(manage.subprocess, "Popen") as popen:
+            popen.return_value = unittest.mock.Mock()
+            manage.spawn_grouped(["backend"], {"PATH": "/bin"}, same_session=True)
+            self.assertEqual(popen.call_args.args[0], ["backend"])
+            self.assertIs(popen.call_args.kwargs.get("preexec_fn"), os.setpgrp)
+            self.assertNotIn("start_new_session", popen.call_args.kwargs)
+            manage.spawn_grouped(["caddy"], {"PATH": "/bin"})
+            self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+            self.assertNotIn("preexec_fn", popen.call_args.kwargs)
+
     def test_backup_includes_committed_wal_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             source, dest = Path(directory) / "live.sqlite", Path(directory) / "backup.sqlite"
@@ -311,6 +322,8 @@ class ManageTests(unittest.TestCase):
                 argv = popen.call_args[0][0]
                 self.assertEqual(argv[0], str(current.resolve() / "pods-backend"))
                 self.assertEqual(argv[1], str(Path(directory) / "data/pods.sqlite"))
+                self.assertIs(popen.call_args.kwargs.get("preexec_fn"), os.setpgrp)
+                self.assertNotIn("start_new_session", popen.call_args.kwargs)
 
     def test_launch_ticks_omlx_autostart(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):

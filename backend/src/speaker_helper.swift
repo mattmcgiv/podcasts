@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreMedia
 import Darwin
@@ -5,9 +6,13 @@ import Foundation
 
 /// Headless AVFoundation player. JSON lines on stdin, JSON lines on stdout.
 /// Rust owns authorization and path validation. This process only plays local files.
+/// NSApplication is required so AVPlayer can attach to the default output device.
 @main
 enum PodsSpeakerHelper {
     static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.finishLaunching()
         setbuf(stdout, nil)
         setbuf(stderr, nil)
         let engine = Engine()
@@ -17,7 +22,7 @@ enum PodsSpeakerHelper {
             }
             engine.quit()
         }
-        RunLoop.main.run()
+        app.run()
     }
 }
 
@@ -39,7 +44,9 @@ final class Engine: NSObject {
     override init() {
         super.init()
         player.volume = 1
+        player.isMuted = false
         player.actionAtItemEnd = .pause
+        player.automaticallyWaitsToMinimizeStalling = false
         if #available(macOS 12.0, *) {
             player.preventsDisplaySleepDuringVideoPlayback = false
         }
@@ -92,6 +99,7 @@ final class Engine: NSObject {
         let position = max(0, doubleValue(body["position"]) ?? 0)
         requestedRate = normalizedRate(floatValue(body["rate"]) ?? 1)
         muted = boolValue(body["mute"])
+        player.isMuted = muted
         player.volume = muted ? 0 : 1
 
         guard let path = body["path"] as? String, isLocalFilePath(path) else {
@@ -111,6 +119,7 @@ final class Engine: NSObject {
 
         let item = AVPlayerItem(url: url)
         observe(item, generation: generation, id: id)
+        player.isMuted = muted
         player.volume = muted ? 0 : 1
         let finishLoad: () -> Void = { [weak self] in
             guard let self, self.loadGeneration == generation, self.finishedLoadGeneration != generation else { return }
@@ -157,8 +166,13 @@ final class Engine: NSObject {
         }
         ended = false
         lastError = nil
+        player.isMuted = muted
         player.volume = muted ? 0 : 1
-        player.playImmediately(atRate: requestedRate)
+        player.rate = requestedRate
+        if player.rate == 0 {
+            player.play()
+            player.rate = requestedRate
+        }
         startTick()
         emit(type: "ack", id: id, generation: generation, error: nil)
     }

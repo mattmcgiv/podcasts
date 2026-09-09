@@ -1167,6 +1167,16 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn process_path(pid: i32) -> Option<String> {
+        let mut buf = [0u8; 4096];
+        let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if n <= 0 {
+            return None;
+        }
+        std::str::from_utf8(&buf[..n as usize]).ok().map(str::to_owned)
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn helper_plays_synthetic_wav_silently_and_cleans_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -1177,6 +1187,33 @@ mod tests {
         let helper = HelperTransport::new().expect("extract helper");
         let first = helper.load(&short, 0.0, 1.0, true).expect("load short");
         assert!(first.duration > 0.2, "first load must report real duration");
+        let helper_path = process_path(helper.child_pid().expect("helper pid")).expect("helper path");
+        assert!(
+            helper_path.contains(".app/Contents/MacOS/"),
+            "helper must run from an app bundle, got {helper_path}"
+        );
+        let app_name = std::path::Path::new(&helper_path)
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let stem = app_name.strip_suffix(".app").unwrap_or("");
+        assert_eq!(stem.len(), 64, "must reuse the canonical helper bundle, got {app_name}");
+        assert!(
+            stem.chars().all(|c| c.is_ascii_hexdigit()),
+            "must reuse the canonical helper bundle, got {app_name}"
+        );
+        let reused = HelperTransport::new().expect("reuse helper cache");
+        reused.load(&short, 0.0, 1.0, true).expect("load from cached bundle");
+        let reused_path = process_path(reused.child_pid().expect("reused pid")).expect("reused path");
+        assert_eq!(
+            std::path::Path::new(&helper_path).parent().unwrap().parent().unwrap().parent().unwrap(),
+            std::path::Path::new(&reused_path).parent().unwrap().parent().unwrap().parent().unwrap(),
+            "second extract must reuse the signed bundle"
+        );
+        drop(reused);
         helper.play().expect("play");
         let start = Instant::now();
         let mut saw_end = false;

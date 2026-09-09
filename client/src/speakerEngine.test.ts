@@ -421,6 +421,65 @@ describe("BrowserSpeakerEngine", () => {
     expect(current.cast.error ?? "").not.toMatch(/Tap Mac/);
   });
 
+  it("does not let a disconnected poll steal an in-flight Mac episode load", async () => {
+    const pending = deferred<SpeakerStatus>();
+    let loads = 0;
+    const load = vi.fn(() => {
+      loads += 1;
+      if (loads === 1) {
+        return Promise.resolve(status({
+          generation: 1,
+          paused: false,
+          position: 8,
+          session_id: "sess-test",
+          connected: true,
+        }));
+      }
+      return pending.promise;
+    });
+    let live = false;
+    const { client } = fakeClient({
+      load,
+      status: async () => {
+        if (!live) return status({ connected: false, generation: 0, session_id: null, available: true });
+        return status({
+          connected: false,
+          generation: 1,
+          session_id: null,
+          available: true,
+          paused: true,
+          position: 8,
+        });
+      },
+    });
+    engine = new BrowserSpeakerEngine({ client, sessionId: "sess-test" });
+    const current = engine;
+    current.castConnect();
+    await Promise.resolve();
+    current.loadSource("https://h.example/one.m4a", 8, 1, "aa".repeat(32));
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    live = true;
+    current.loadSource("https://h.example/two.m4a", 4, 2, "bb".repeat(32));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1000);
+    vi.useRealTimers();
+    expect(current.cast.connected).toBe(true);
+    expect(current.cast.error ?? "").not.toMatch(/disconnected|Tap Mac/);
+    pending.resolve(status({
+      episode_id: 2,
+      artifact_hash: "bb".repeat(32),
+      generation: 2,
+      position: 4,
+      paused: false,
+      session_id: "sess-test",
+      connected: true,
+    }));
+    await waitFor(() => expect(current.cast.connected).toBe(true));
+    expect(current.currentTime).toBe(4);
+    expect(current.cast.error ?? "").not.toMatch(/disconnected|Tap Mac/);
+  });
+
   it("does not start local audio when disconnect is not acknowledged", async () => {
     const { client } = fakeClient({
       disconnect: async () => {

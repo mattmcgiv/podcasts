@@ -364,7 +364,11 @@ def launch():
     try:
         while not stop:
             if backend is None or backend.poll() is not None:
-                backend = subprocess.Popen([str(release / "pods-backend"), str(STATE / "data/pods.sqlite")], env=env, start_new_session=True)
+                backend = spawn_grouped(
+                    [str(release / "pods-backend"), str(STATE / "data/pods.sqlite")],
+                    env,
+                    same_session=True,
+                )
             address = wifi_address()
             if address != previous or (address and proxy and proxy.poll() is not None):
                 if proxy:
@@ -384,7 +388,7 @@ https://{DOMAIN}:8443 {{
     reverse_proxy 127.0.0.1:18180
 }}
 ''')
-                    proxy = subprocess.Popen(["caddy", "run", "--config", str(caddyfile)], env=env, start_new_session=True)
+                    proxy = spawn_grouped(["caddy", "run", "--config", str(caddyfile)], env)
                 previous = address
             if address != dns_previous and time.time() >= next_dns:
                 try:
@@ -410,6 +414,15 @@ https://{DOMAIN}:8443 {{
         for child in (proxy, backend):
             if child:
                 stop_process(child)
+
+
+def spawn_grouped(command, env, *, same_session=False):
+    # A new process group lets stop_process signal ffmpeg descendants.
+    # The backend must stay in this LaunchAgent GUI session so AVPlayer can
+    # reach the default output device. setsid() breaks that path.
+    if same_session:
+        return subprocess.Popen(command, env=env, preexec_fn=os.setpgrp)
+    return subprocess.Popen(command, env=env, start_new_session=True)
 
 
 def stop_process(child):
