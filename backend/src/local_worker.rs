@@ -2891,9 +2891,7 @@ mod download_tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if !made {
-            return;
-        }
+        assert!(made, "ffmpeg is required to plant fixture audio");
         fs::copy(&wav, &source).unwrap();
         let hash = hex::encode(Sha256::digest(&fs::read(&source).unwrap()));
         let work = source.parent().unwrap();
@@ -3232,12 +3230,12 @@ mod download_tests {
                 let _ = chat_json(&permit, "hello");
             },
         );
-        let _ = storage_status(&backend);
-        let _ = model_request_body("p", None);
-        let _ = model_request_body("p", Some(json!({"type":"object"})));
-        kill_registered_whisper_group();
-        register_whisper_pgid(0);
-        clear_whisper_pgid(0);
+        assert!(storage_status(&backend).get("used").is_some());
+        assert_eq!(model_request_body("p", None)["model"], MODEL);
+        assert_eq!(
+            model_request_body("p", Some(json!({"type":"object"})))["response_format"]["type"],
+            "json_schema"
+        );
     }
 
     #[test]
@@ -3259,9 +3257,7 @@ mod download_tests {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if !made {
-            return;
-        }
+        assert!(made, "ffmpeg is required to plant download audio");
         let wav_bytes = fs::read(&wav).unwrap();
         let url = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3330,7 +3326,8 @@ mod download_tests {
                         [],
                     )
                     .unwrap();
-                let _ = step(&backend);
+                let stepped = step(&backend).unwrap();
+                assert!(stepped);
             },
         );
         match prev_script {
@@ -3342,6 +3339,11 @@ mod download_tests {
     #[test]
     fn step_refresh_storage_legacy_cache_and_notes_skip() {
         let (backend, _temp) = local_job_backend();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::from_millis(0),
+        );
         backend
             .db
             .execute(
@@ -3356,7 +3358,15 @@ mod download_tests {
                 [],
             )
             .unwrap();
-        let _ = step(&backend);
+        crate::omlx_lock::with_test_lock_env(
+            lock_dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                step(&backend).unwrap();
+            },
+        );
         let requested = backend
             .db
             .scalar_string(
@@ -3389,8 +3399,23 @@ mod download_tests {
             .artifacts
             .prepare_dest("episodes/1/audio.mp3")
             .unwrap();
-        fs::write(&legacy, b"fixture-audio").unwrap();
-        let hash = hex::encode(Sha256::digest(b"fixture-audio"));
+        let made = Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1:sample_rate=16000",
+                "-y",
+            ])
+            .arg(&legacy)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(made, "ffmpeg is required to plant legacy audio");
+        let hash = hex::encode(Sha256::digest(&fs::read(&legacy).unwrap()));
         backend
             .db
             .execute(
@@ -3416,6 +3441,11 @@ mod download_tests {
         .unwrap();
         atomic_json(
             &work.join(format!("refined-{run}.json")),
+            &json!([{"segment_id":"s0","label":"content","evidence":"Hello there."}]),
+        )
+        .unwrap();
+        atomic_json(
+            &work.join(format!("labels-{classifier_run}.json")),
             &json!([{"segment_id":"s0","label":"content","evidence":"Hello there."}]),
         )
         .unwrap();
@@ -3450,7 +3480,15 @@ mod download_tests {
                 [],
             )
             .unwrap();
-        let _ = process(&backend, 1, "https://example.org/original.mp3");
+        crate::omlx_lock::with_test_lock_env(
+            lock_dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                process(&backend, 1, "https://example.org/original.mp3").unwrap();
+            },
+        );
         assert!(source.is_file());
     }
 

@@ -94,15 +94,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_local_model_returns_without_panic() {
-        let code = check_local_model();
-        assert!(code == 0 || code == 1);
-    }
-
-    #[test]
     fn launch_backend_serves_http_on_loopback() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("pods.sqlite");
+        let prev_local = std::env::var("PODS_LOCAL").ok();
+        let prev_auth = std::env::var("PODS_AUTH_MODE").ok();
         std::env::set_var("PODS_LOCAL", "0");
         std::env::set_var("PODS_AUTH_MODE", "off");
         let (backend, listener) = launch_backend(db, "127.0.0.1:0");
@@ -110,5 +106,13 @@ mod tests {
         assert!(addr.port() != 0);
         backend.stop_runtime();
         drop(listener);
+        match prev_local {
+            Some(value) => std::env::set_var("PODS_LOCAL", value),
+            None => std::env::remove_var("PODS_LOCAL"),
+        }
+        match prev_auth {
+            Some(value) => std::env::set_var("PODS_AUTH_MODE", value),
+            None => std::env::remove_var("PODS_AUTH_MODE"),
+        }
     }
 }

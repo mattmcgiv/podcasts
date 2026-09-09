@@ -287,7 +287,11 @@ mod tests {
                 std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+        let prev_path = std::env::var("PATH").unwrap();
+        let prev_fake = std::env::var("PODS_FAKE_WAV").ok();
+        let prev_ffmpeg = std::env::var("PODS_FFMPEG").ok();
+        let prev_parakeet = std::env::var("PODS_PARAKEET_BIN").ok();
+        std::env::set_var("PATH", format!("{}:{}", bin.display(), prev_path));
         std::env::set_var("PODS_FAKE_WAV", wav.to_str().unwrap());
         std::env::set_var("PODS_FFMPEG", ffmpeg.to_str().unwrap());
         std::env::set_var("PODS_PARAKEET_BIN", parakeet.to_str().unwrap());
@@ -310,8 +314,19 @@ mod tests {
         std::fs::write(&ffprobe, "#!/bin/sh\necho 0.5\n").unwrap();
         std::fs::write(&parakeet, "#!/bin/sh\necho '{}'\n").unwrap();
         assert!(transcribe_wav(&wav).is_err());
-        let (status, _) = exchange(b"POST /transcribe HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n");
-        assert!(status == 400 || status == 500 || status == 0);
+        std::env::set_var("PATH", prev_path);
+        match prev_fake {
+            Some(value) => std::env::set_var("PODS_FAKE_WAV", value),
+            None => std::env::remove_var("PODS_FAKE_WAV"),
+        }
+        match prev_ffmpeg {
+            Some(value) => std::env::set_var("PODS_FFMPEG", value),
+            None => std::env::remove_var("PODS_FFMPEG"),
+        }
+        match prev_parakeet {
+            Some(value) => std::env::set_var("PODS_PARAKEET_BIN", value),
+            None => std::env::remove_var("PODS_PARAKEET_BIN"),
+        }
     }
 }
 

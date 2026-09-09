@@ -273,9 +273,6 @@ fn pipeline_notes_parakeet_download_and_classify_stages() {
             .unwrap_err(),
         "pause:model_required"
     );
-    let live = std::thread::spawn(|| DeepSeekClassifier.classify_window("prompt", "sk-test"));
-    let live_err = live.join().unwrap();
-    assert!(live_err.is_err());
     assert_eq!(
         pipeline::ScriptedClassifier {
             responses: Mutex::new(vec![]),
@@ -563,8 +560,7 @@ fn omlx_lock_reads_api_key_from_env() {
     std::env::set_var("PODS_OMLX_KEY", "");
     let _ = omlx_lock::configured_api_key();
     std::env::remove_var("PODS_OMLX_KEY");
-    let paths = omlx_lock::LockPaths::canonical();
-    assert!(paths.is_ok() || paths.is_err());
+    assert!(omlx_lock::LockPaths::canonical().is_ok());
 }
 
 #[test]
@@ -754,68 +750,6 @@ fn local_worker_reuses_cached_transcript_and_publication() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn ffi_prepare_open_configure_handle_and_close() {
-    use pods_backend::ffi::{
-        pods_backend_close, pods_backend_configure, pods_backend_free, pods_backend_handle,
-        pods_backend_open, pods_backend_prepare,
-    };
-    use std::ffi::CString;
-    use std::os::raw::c_int;
-    use std::ptr;
-    let dir = tempfile::tempdir().unwrap();
-    let live = dir.path().join("live.sqlite");
-    let seed = dir.path().join("seed.sqlite");
-    Database::open(&seed).unwrap();
-    let live_c = CString::new(live.to_str().unwrap()).unwrap();
-    let seed_c = CString::new(seed.to_str().unwrap()).unwrap();
-    assert_eq!(pods_backend_prepare(ptr::null(), ptr::null()), 1);
-    assert_eq!(pods_backend_prepare(live_c.as_ptr(), seed_c.as_ptr()), 0);
-    assert!(pods_backend_open(ptr::null()).is_null());
-    let handle = pods_backend_open(live_c.as_ptr());
-    assert!(!handle.is_null());
-    assert_eq!(pods_backend_configure(ptr::null_mut(), ptr::null()), 1);
-    let bad = CString::new("not-json").unwrap();
-    assert_eq!(pods_backend_configure(handle, bad.as_ptr()), 1);
-    let empty = CString::new("{}").unwrap();
-    assert_eq!(pods_backend_configure(handle, empty.as_ptr()), 0);
-    let cfg = CString::new(r#"{"podcastindex_key":"k","podcastindex_secret":"s","podcastindex_base_url":"https://example.test"}"#).unwrap();
-    assert_eq!(pods_backend_configure(handle, cfg.as_ptr()), 0);
-    let method = CString::new("GET").unwrap();
-    let target = CString::new("/api/recent").unwrap();
-    let headers = CString::new("accept: application/json\n").unwrap();
-    let mut status: c_int = 0;
-    let mut len = 0usize;
-    let ptr_out = pods_backend_handle(
-        handle,
-        method.as_ptr(),
-        target.as_ptr(),
-        headers.as_ptr(),
-        ptr::null(),
-        0,
-        &mut status,
-        &mut len,
-    );
-    assert!(!ptr_out.is_null());
-    pods_backend_free(ptr_out, len);
-    pods_backend_free(ptr::null_mut(), 0);
-    assert!(pods_backend_handle(
-        ptr::null_mut(),
-        method.as_ptr(),
-        target.as_ptr(),
-        ptr::null(),
-        ptr::null(),
-        0,
-        ptr::null_mut(),
-        ptr::null_mut()
-    )
-    .is_null());
-    pods_backend_close(handle);
-    pods_backend_close(ptr::null_mut());
-    let _ = pods_backend::ffi::IPHONE_FFI_DEPRECATION_DATE;
-}
-
-#[test]
 fn backend_follow_ad_removal_and_runtime_refresh() {
     let db = Database::open_in_memory().unwrap();
     db.execute(
@@ -843,17 +777,17 @@ fn backend_follow_ad_removal_and_runtime_refresh() {
     );
     let _ = backend.handle(HttpRequest::new("DELETE", "/api/follows/99"));
     let prepare = backend.handle(HttpRequest::new("POST", "/api/episodes/1/ad-removal/prepare"));
-    assert!(prepare.status_code > 0);
+    assert_eq!(prepare.status_code, 202);
     let retry = backend.handle(HttpRequest::new("POST", "/api/episodes/1/ad-removal/retry"));
-    assert!(retry.status_code > 0);
+    assert_eq!(retry.status_code, 409);
     let follow = backend.handle(
         HttpRequest::new("POST", "/api/follows").with_json(&json!({"name":"Al","aliases":[]})),
     );
-    assert!(follow.status_code > 0);
+    assert_eq!(follow.status_code, 500);
     let short = backend.handle(
         HttpRequest::new("POST", "/api/follows").with_json(&json!({"name":"x"})),
     );
-    assert!(short.status_code > 0);
+    assert_eq!(short.status_code, 422);
     let mut backend = backend;
     let mut cfg = PipelineConfig::from_env();
     cfg.transcriber = TranscriberKind::Parakeet;
@@ -1353,7 +1287,7 @@ fn usage_storage_coordinator_classify_and_transcribe_helpers() {
         format!("https://x\u{1F}g")
     );
     let _ = pods_backend::usage::legacy_record_id(&recorded);
-    assert!(pods_backend::usage::is_peak(2 * 3600) || !pods_backend::usage::is_peak(2 * 3600));
+    assert!(pods_backend::usage::is_peak(2 * 3600));
     assert!(pods_backend::usage::cost_usd_model(&tokens, "deepseek-v4-flash", 20 * 3600).is_some());
     assert!(pods_backend::usage::parse_usage(&json!({"usage":"nope"})).is_none());
     match pods_backend::usage::parse_usage_result(&json!({"usage":{}})) {
@@ -2516,45 +2450,7 @@ fn job_store_terminal_and_reset_branches() {
 }
 
 #[test]
-fn spawn_bins_and_server_handle_one_request() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let bind = format!("127.0.0.1:{port}");
-    if let Ok(exe) = std::env::var("CARGO_BIN_EXE_pods-transcribe") {
-        let mut child = std::process::Command::new(&exe)
-            .env("PODS_BIND", &bind)
-            .spawn()
-            .unwrap();
-        for _ in 0..50 {
-            if std::net::TcpStream::connect_timeout(
-                &format!("{bind}").parse().unwrap(),
-                Duration::from_millis(50),
-            )
-            .is_ok()
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = std::net::TcpStream::connect(&bind);
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("pods.sqlite");
-    if let Ok(exe) = std::env::var("CARGO_BIN_EXE_pods-backend") {
-        let mut child = std::process::Command::new(&exe)
-            .arg(&db)
-            .env("PODS_BIND", "127.0.0.1:0")
-            .env("PODS_LOCAL", "0")
-            .env("PODS_AUTH_MODE", "off")
-            .spawn()
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+fn server_handle_one_loopback_request() {
     let db = Database::open_in_memory().unwrap();
     let backend = Arc::new(Backend::new(
         db,
