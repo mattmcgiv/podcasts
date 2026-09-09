@@ -183,3 +183,135 @@ fn write_http(stream: &mut TcpStream, status: u16, body: &Value) -> Result<(), S
     stream.write_all(&payload).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    fn exchange(payload: &[u8]) -> (u16, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle(stream).unwrap();
+        });
+        let mut client = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
+        client.write_all(payload).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut buf = Vec::new();
+        let mut c = client;
+        std::io::Read::read_to_end(&mut c, &mut buf).unwrap();
+        server.join().unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, text.into_owned())
+    }
+
+    #[test]
+    fn env_or_uses_fallback_and_set_value() {
+        assert_eq!(env_or("PODS_TRANSCRIBE_TEST_MISSING", "fb"), "fb");
+        std::env::set_var("PODS_TRANSCRIBE_TEST_MISSING", "set");
+        assert_eq!(env_or("PODS_TRANSCRIBE_TEST_MISSING", "fb"), "set");
+        std::env::remove_var("PODS_TRANSCRIBE_TEST_MISSING");
+    }
+
+    #[test]
+    fn handle_rejects_invalid_incomplete_and_wrong_route() {
+        let (status, body) = exchange(b"GET /nope HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(status, 404);
+        assert!(body.contains("not found"));
+        let (status, _) = exchange(b"!!!\r\n\r\n");
+        assert_eq!(status, 400);
+        let body = br#"{"audio_path":"/nope.wav"}"#;
+        let header = format!(
+            "POST /transcribe HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut payload = header.into_bytes();
+        payload.extend_from_slice(body);
+        let (status, text) = exchange(&payload);
+        assert_eq!(status, 500);
+        assert!(text.contains("missing") || text.contains("error"));
+    }
+
+    #[test]
+    fn transcribe_missing_file_and_write_http() {
+        let err = transcribe(Path::new("/no/such/audio.wav")).unwrap_err();
+        assert!(err.contains("missing"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            write_http(&mut stream, 200, &json!({"ok":true})).unwrap();
+        });
+        let mut client = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut client, &mut buf).unwrap();
+        server.join().unwrap();
+        assert!(String::from_utf8_lossy(&buf).contains("200 OK"));
+    }
+
+    #[test]
+    fn transcribe_runs_fake_ffmpeg_ffprobe_and_parakeet() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let wav = dir.path().join("fixture.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let ffmpeg = bin.join("ffmpeg");
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nout=\"$1\"\nfor a in \"$@\"; do out=\"$a\"; done\nif [ \"$out\" = \"-\" ]; then echo out_time_us=1000000; exit 0; fi\ncp \"$PODS_FAKE_WAV\" \"$out\"\n",
+        )
+        .unwrap();
+        let ffprobe = bin.join("ffprobe");
+        std::fs::write(&ffprobe, "#!/bin/sh\necho 0.5\n").unwrap();
+        let parakeet = bin.join("parakeet-cli");
+        std::fs::write(
+            &parakeet,
+            "#!/bin/sh\necho '{\"words\":[{\"word\":\"hi\",\"start\":0.0,\"end\":0.2}]}'\n",
+        )
+        .unwrap();
+        for p in [&ffmpeg, &ffprobe, &parakeet] {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()));
+        std::env::set_var("PODS_FAKE_WAV", wav.to_str().unwrap());
+        std::env::set_var("PODS_FFMPEG", ffmpeg.to_str().unwrap());
+        std::env::set_var("PODS_PARAKEET_BIN", parakeet.to_str().unwrap());
+        let src = dir.path().join("src.mp3");
+        std::fs::write(&src, b"data").unwrap();
+        let words = transcribe(&src).unwrap();
+        assert_eq!(words[0]["word"], "hi");
+        assert!(wav_duration_secs(&wav).unwrap() > 0.0);
+        let words = transcribe_wav(&wav).unwrap();
+        assert_eq!(words[0].text, "hi");
+        std::fs::write(&ffprobe, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(wav_duration_secs(&wav).is_err());
+        std::fs::write(&ffmpeg, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(transcribe(&src).unwrap_err().contains("ffmpeg"));
+        std::fs::write(
+            &ffmpeg,
+            "#!/bin/sh\nout=\"$1\"\nfor a in \"$@\"; do out=\"$a\"; done\ncp \"$PODS_FAKE_WAV\" \"$out\"\n",
+        )
+        .unwrap();
+        std::fs::write(&ffprobe, "#!/bin/sh\necho 0.5\n").unwrap();
+        std::fs::write(&parakeet, "#!/bin/sh\necho '{}'\n").unwrap();
+        assert!(transcribe_wav(&wav).is_err());
+        let (status, _) = exchange(b"POST /transcribe HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n");
+        assert!(status == 400 || status == 500 || status == 0);
+    }
+}
+

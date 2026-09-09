@@ -228,6 +228,41 @@ mod tests {
     }
 
     #[test]
+    fn write_response_serializes_remaining_status_reasons() {
+        for (code, reason) in [
+            (201, "Created"),
+            (202, "Accepted"),
+            (204, "No Content"),
+            (403, "Forbidden"),
+            (409, "Conflict"),
+            (422, "Unprocessable Entity"),
+            (500, "Error"),
+        ] {
+            let raw = serialize_response(HttpResponse {
+                status_code: code,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            });
+            assert_eq!(status_line(&raw), format!("HTTP/1.1 {code} {reason}"));
+        }
+    }
+
+    #[test]
+    fn parse_request_rejects_malformed_headers_and_lengths() {
+        assert!(matches!(parse_request(b"\xff\r\n\r\n"), ParseResult::Invalid(_)));
+        assert!(matches!(parse_request(b"\r\n\r\n"), ParseResult::Invalid(_)));
+        assert!(matches!(parse_request(b"GET\r\n\r\n"), ParseResult::Invalid(_)));
+        assert!(matches!(
+            parse_request(b"GET / HTTP/1.1\r\nContent-Length: -3\r\n\r\n"),
+            ParseResult::Invalid(_)
+        ));
+        assert!(matches!(
+            parse_request(b"GET / HTTP/1.1\r\nContent-Length: xyz\r\n\r\n"),
+            ParseResult::Invalid(_)
+        ));
+    }
+
+    #[test]
     fn write_response_keeps_unauthorized_reason_for_passkey_failures() {
         let raw = serialize_response(HttpResponse {
             status_code: 401,

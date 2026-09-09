@@ -105,10 +105,27 @@ pub fn storage_status(backend: &Backend) -> Value {
     }
     let root = backend.artifacts.url("");
     let used = size(&root);
-    let limit = std::env::var("PODS_STORAGE_LIMIT_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(100 * 1024 * 1024 * 1024);
+    let limit = {
+        #[cfg(test)]
+        {
+            let test_limit = TEST_STORAGE_LIMIT.with(|c| c.get());
+            if test_limit > 0 {
+                test_limit
+            } else {
+                std::env::var("PODS_STORAGE_LIMIT_BYTES")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(100 * 1024 * 1024 * 1024)
+            }
+        }
+        #[cfg(not(test))]
+        {
+            std::env::var("PODS_STORAGE_LIMIT_BYTES")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(100 * 1024 * 1024 * 1024)
+        }
+    };
     let free = Command::new("df")
         .arg("-Pk")
         .arg(&root)
@@ -538,6 +555,17 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
 #[cfg(unix)]
 static WHISPER_PGID: AtomicI32 = AtomicI32::new(0);
 
+#[cfg(test)]
+static WHISPER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static TEST_STORAGE_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[cfg(unix)]
 fn install_whisper_shutdown() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -584,6 +612,8 @@ fn kill_registered_whisper_group() {
 }
 
 fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> Result<(), Error> {
+    #[cfg(test)]
+    let _whisper_test_lock = WHISPER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(unix)]
     {
         let mut child = Command::new(python)
@@ -2015,6 +2045,10 @@ mod download_tests {
                 }
             }
         }
+        if unescaped.contains("Create 1-3 factual podcast chapters") {
+            return json!({"chapters":[{"segment_id":"s0","title":"Hello","summary":"A short summary."}]})
+                .to_string();
+        }
         json!({"ok":true}).to_string()
     }
 
@@ -2772,6 +2806,652 @@ mod download_tests {
             .unwrap();
         assert_eq!(max_id - min_id + 1, NOTIFICATION_HISTORY_LIMIT);
         assert_eq!(min_id, 2);
+    }
+
+    #[test]
+    fn whisper_script_success_and_failure_and_download_errors() {
+        let (backend, temp) = local_job_backend();
+        let source = backend.artifacts.url("local/1/source.audio");
+        let script_ok = temp.path().join("ok.py");
+        fs::write(
+            &script_ok,
+            "import json,sys\njson.dump([{\"id\":\"s0\",\"start\":0.0,\"end\":1.0,\"text\":\"Hello there.\"}], open(sys.argv[2],'w'))\n",
+        )
+        .unwrap();
+        let dest = temp.path().join("out.json");
+        run_whisper_child("python3", script_ok.to_str().unwrap(), &source, &dest).unwrap();
+        assert!(dest.is_file());
+        let script_bad = temp.path().join("bad.py");
+        fs::write(&script_bad, "import sys\nsys.exit(2)\n").unwrap();
+        assert!(run_whisper_child("python3", script_bad.to_str().unwrap(), &source, &dest).is_err());
+        let missing = temp.path().join("missing.audio");
+        let err = download_source(&backend, "http://127.0.0.1:1/nope", &missing).unwrap_err();
+        assert!(err.to_string().contains("download") || err.to_string().contains("transport") || err.to_string().contains("audio"));
+        let url_500 = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
+            });
+            format!("http://{addr}/a")
+        };
+        assert!(download_source(&backend, &url_500, &missing).is_err());
+        let url_416 = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
+            });
+            format!("http://{addr}/a")
+        };
+        assert!(download_source(&backend, &url_416, &missing).is_err());
+    }
+
+    #[test]
+    fn process_cached_transcript_classifies_renders_and_attempts_notes() {
+        let (backend, _temp) = local_job_backend();
+        let source = backend.artifacts.url("local/1/source.audio");
+        let wav = source.with_extension("wav");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2:sample_rate=16000",
+                "-y",
+            ])
+            .arg(&wav)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            return;
+        }
+        fs::copy(&wav, &source).unwrap();
+        let hash = hex::encode(Sha256::digest(&fs::read(&source).unwrap()));
+        let work = source.parent().unwrap();
+        let segments = vec![
+            Segment {
+                id: "s0".into(),
+                start: 0.0,
+                end: 1.0,
+                text: "Hello there friends.".into(),
+            },
+            Segment {
+                id: "s1".into(),
+                start: 1.0,
+                end: 2.0,
+                text: "This is the rest of the show.".into(),
+            },
+        ];
+        atomic_json(&work.join(format!("transcript-{hash}.json")), &segments).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::from_millis(0),
+        );
+        crate::omlx_lock::with_test_lock_env(
+            dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                backend
+                    .db
+                    .execute(
+                        "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
+                        [],
+                    )
+                    .unwrap();
+                assert!(step(&backend).unwrap());
+                assert!(mock.posts.load(Ordering::SeqCst) >= 1);
+            },
+        );
+    }
+
+    #[test]
+    fn classify_window_repair_and_unexpected_download_status() {
+        let segments = four_segments();
+        let err = classify_window_with(&segments, 0, 2, 0, |_, _| Err(failure("nope"))).unwrap_err();
+        assert!(err.to_string().contains("nope"));
+        let mut calls = 0;
+        let labels = classify_window_with(&segments, 0, 2, 0, |_, _| {
+            calls += 1;
+            Ok(json!({"blocks":[
+                {"first":"s0","last":"s1","label":"ad"},
+                {"first":"s0","last":"s1","label":"content"}
+            ]}))
+        })
+        .unwrap();
+        assert_eq!(labels.len(), 2);
+        assert!(calls >= 1);
+        let (backend, temp) = local_job_backend();
+        let dest = temp.path().join("unexpected.audio");
+        let url = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata");
+                    return;
+                }
+            });
+            format!("http://{addr}/x")
+        };
+        assert!(download_source(&backend, &url, &dest).is_err());
+        let url_incomplete = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc");
+                    return;
+                }
+            });
+            format!("http://{addr}/y")
+        };
+        assert!(download_source(&backend, &url_incomplete, &temp.path().join("short.audio")).is_err());
+        TEST_STORAGE_LIMIT.with(|c| c.set(8));
+        let url_big = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nxxxxxxxx");
+                    return;
+                }
+            });
+            format!("http://{addr}/z")
+        };
+        assert!(download_source(&backend, &url_big, &temp.path().join("big.audio")).is_err());
+        TEST_STORAGE_LIMIT.with(|c| c.set(0));
+        let resume_ok = temp.path().join("resume-ok.audio");
+        fs::write(resume_ok.with_extension("part"), b"abc").unwrap();
+        let url_206 = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-10/11\r\nETag: \"abc\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\ndefghijk",
+                    );
+                    return;
+                }
+            });
+            format!("http://{addr}/r")
+        };
+        fs::write(
+            resume_ok.with_extension("download.json"),
+            serde_json::to_vec(&json!({"url": url_206, "etag": "\"abc\""})).unwrap(),
+        )
+        .unwrap();
+        let _ = download_source(&backend, &url_206, &resume_ok);
+        let url_bad_range = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/11\r\nETag: \"abc\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd",
+                    );
+                    return;
+                }
+            });
+            format!("http://{addr}/q")
+        };
+        let resume_bad = temp.path().join("resume-bad.audio");
+        fs::write(resume_bad.with_extension("part"), b"abc").unwrap();
+        fs::write(
+            resume_bad.with_extension("download.json"),
+            serde_json::to_vec(&json!({"url": url_bad_range, "etag": "\"abc\""})).unwrap(),
+        )
+        .unwrap();
+        assert!(download_source(&backend, &url_bad_range, &resume_bad).is_err());
+    }
+
+    #[test]
+    fn persist_busy_require_capacity_download_success_and_notes() {
+        let (backend, temp) = local_job_backend();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
+                [],
+            )
+            .unwrap();
+        persist_busy(&backend, 1, "omlx_busy", 30).unwrap();
+        let retry = backend
+            .db
+            .scalar_i64("SELECT next_retry_at FROM browser_jobs WHERE episode_id=1", [])
+            .unwrap();
+        assert!(retry.unwrap() > 0);
+        let _ = require_capacity(&backend, 1);
+        TEST_STORAGE_LIMIT.with(|c| c.set(1));
+        let limited = require_capacity(&backend, 32 * 1024 * 1024).is_err();
+        TEST_STORAGE_LIMIT.with(|c| c.set(0));
+        assert!(limited);
+        let schema = labels_schema(&[Segment {
+            id: "s0".into(),
+            start: 0.0,
+            end: 1.0,
+            text: "Hello there.".into(),
+        }]);
+        assert!(schema["properties"]["labels"]["minItems"].as_u64() == Some(1));
+        let prompt = classification_prompt(
+            &[Segment {
+                id: "s0".into(),
+                start: 0.0,
+                end: 1.0,
+                text: "Hello there.".into(),
+            }],
+            0,
+            1,
+            0,
+        );
+        assert!(prompt.contains("CORE_IDS"));
+        assert!(validate_segments(&[]).is_err());
+        assert!(validate_segments(&[Segment {
+            id: "s0".into(),
+            start: 1.0,
+            end: 0.5,
+            text: "bad".into(),
+        }])
+        .is_err());
+        let dest = temp.path().join("downloaded.audio");
+        let payload = b"audio-bytes-ok";
+        let url = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = payload.to_vec();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: {}\r\nETag: \"abc\"\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                    return;
+                }
+            });
+            format!("http://{addr}/a")
+        };
+        download_source(&backend, &url, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+
+        let mismatch = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-10/11\r\nETag: \"other\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\nabcdefgh",
+                    );
+                    return;
+                }
+            });
+            format!("http://{addr}/b")
+        };
+        let resume_dest = temp.path().join("resume.audio");
+        fs::write(resume_dest.with_extension("part"), b"abc").unwrap();
+        fs::write(
+            resume_dest.with_extension("download.json"),
+            serde_json::to_vec(&json!({"url": mismatch, "etag": "\"abc\""})).unwrap(),
+        )
+        .unwrap();
+        assert!(download_source(&backend, &mismatch, &resume_dest).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::from_millis(0),
+        );
+        crate::omlx_lock::with_test_lock_env(
+            dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                let permit =
+                    crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)
+                        .unwrap();
+                let segments = vec![Segment {
+                    id: "s0".into(),
+                    start: 0.0,
+                    end: 1.0,
+                    text: "Hello there.".into(),
+                }];
+                let labels = vec![Label {
+                    segment_id: "s0".into(),
+                    label: "content".into(),
+                    evidence: "Hello there.".into(),
+                }];
+                let timeline = vec![Interval {
+                    original_start: 0.0,
+                    original_end: 1.0,
+                    processed_start: 0.0,
+                }];
+                let notes = generate_notes(&segments, &labels, &timeline, &permit).unwrap();
+                assert!(notes.as_array().is_some_and(|a| !a.is_empty()));
+                let ads = vec![Label {
+                    segment_id: "s0".into(),
+                    label: "ad".into(),
+                    evidence: "Hello there.".into(),
+                }];
+                assert!(generate_notes(&segments, &ads, &timeline, &permit).is_err());
+                let _ = chat_json(&permit, "hello");
+            },
+        );
+        let _ = storage_status(&backend);
+        let _ = model_request_body("p", None);
+        let _ = model_request_body("p", Some(json!({"type":"object"})));
+        kill_registered_whisper_group();
+        register_whisper_pgid(0);
+        clear_whisper_pgid(0);
+    }
+
+    #[test]
+    fn process_downloads_then_transcribes_with_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let wav = temp.path().join("tone.wav");
+        let made = Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2:sample_rate=16000",
+                "-y",
+            ])
+            .arg(&wav)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            return;
+        }
+        let wav_bytes = fs::read(&wav).unwrap();
+        let url = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = wav_bytes.clone();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while Instant::now() < deadline {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut buf = [0; 2048];
+                    let _ = stream.read(&mut buf);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: {}\r\nETag: \"wav\"\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                    return;
+                }
+            });
+            format!("http://{addr}/episode.mp3")
+        };
+        let db = crate::Database::open_in_memory().unwrap();
+        db.execute("INSERT INTO podcasts(id,feed_url,title,created_at) VALUES(1,'https://example.org/feed','Example',0)",[]).unwrap();
+        db.execute(
+            "INSERT INTO episodes(id,podcast_id,guid,title,audio_url,published_at) VALUES(1,1,'g','Episode',?,1)",
+            rusqlite::params![url],
+        )
+        .unwrap();
+        let mut backend = Backend::with_data_root(
+            db,
+            Arc::new(crate::MockFeedFetcher::default()),
+            Arc::new(crate::DisabledDirectory),
+            Some(temp.path().to_owned()),
+        );
+        backend.local = true;
+        let script = temp.path().join("whisper.py");
+        fs::write(
+            &script,
+            "import json,sys\njson.dump([{\"id\":\"s0\",\"start\":0.0,\"end\":1.0,\"text\":\"Hello there friends.\"},{\"id\":\"s1\",\"start\":1.0,\"end\":2.0,\"text\":\"This is the rest of the show.\"}], open(sys.argv[2],'w'))\n",
+        )
+        .unwrap();
+        let _env = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_script = std::env::var("PODS_TRANSCRIBE_SCRIPT").ok();
+        std::env::set_var("PODS_TRANSCRIBE_SCRIPT", script.to_str().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::from_millis(0),
+        );
+        crate::omlx_lock::with_test_lock_env(
+            dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                backend
+                    .db
+                    .execute(
+                        "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
+                        [],
+                    )
+                    .unwrap();
+                let _ = step(&backend);
+            },
+        );
+        match prev_script {
+            Some(value) => std::env::set_var("PODS_TRANSCRIBE_SCRIPT", value),
+            None => std::env::remove_var("PODS_TRANSCRIBE_SCRIPT"),
+        }
+    }
+
+    #[test]
+    fn step_refresh_storage_legacy_cache_and_notes_skip() {
+        let (backend, _temp) = local_job_backend();
+        backend
+            .db
+            .execute(
+                "UPDATE podcasts SET is_subscribed=1 WHERE id=1",
+                [],
+            )
+            .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('browser_refresh_requested','true')",
+                [],
+            )
+            .unwrap();
+        let _ = step(&backend);
+        let requested = backend
+            .db
+            .scalar_string(
+                "SELECT value FROM settings WHERE key='browser_refresh_requested'",
+                [],
+            )
+            .unwrap();
+        assert_ne!(requested.as_deref(), Some("true"));
+
+        TEST_STORAGE_LIMIT.with(|c| c.set(1));
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts,next_retry_at) VALUES(1,'queued',0,0) ON CONFLICT(episode_id) DO UPDATE SET stage='queued',attempts=0,next_retry_at=0,error=NULL",
+                [],
+            )
+            .unwrap();
+        let blocked = !step(&backend).unwrap();
+        TEST_STORAGE_LIMIT.with(|c| c.set(0));
+        assert!(blocked);
+
+        let (backend, _temp) = local_job_backend();
+        backend
+            .db
+            .execute("UPDATE podcasts SET is_subscribed=1 WHERE id=1", [])
+            .unwrap();
+        let source = backend.artifacts.url("local/1/source.audio");
+        let _ = fs::remove_file(&source);
+        let legacy = backend
+            .artifacts
+            .prepare_dest("episodes/1/audio.mp3")
+            .unwrap();
+        fs::write(&legacy, b"fixture-audio").unwrap();
+        let hash = hex::encode(Sha256::digest(b"fixture-audio"));
+        backend
+            .db
+            .execute(
+                "INSERT INTO ad_removal_jobs(id,episode_id,podcast_id,stage,attempt_count,enrolled_at,updated_at,audio_relative_path,audio_sha256) VALUES('j',1,1,'downloaded',0,1,1,'episodes/1/audio.mp3',?)",
+                rusqlite::params![hash],
+            )
+            .unwrap();
+        let work = source.parent().unwrap();
+        let segments = vec![Segment {
+            id: "s0".into(),
+            start: 0.0,
+            end: 1.0,
+            text: "Hello there.".into(),
+        }];
+        let transcript_hash = hex::encode(Sha256::digest(serde_json::to_vec(&segments).unwrap()));
+        let run = cached_run_id(&hash, &transcript_hash);
+        let classifier_run = cached_classifier_run_id(&hash, &transcript_hash);
+        atomic_json(&work.join(format!("transcript-{hash}.json")), &segments).unwrap();
+        atomic_json(
+            &work.join(format!("window-{classifier_run}-0.json")),
+            &json!([{"segment_id":"s0","label":"content","evidence":"Hello there."}]),
+        )
+        .unwrap();
+        atomic_json(
+            &work.join(format!("refined-{run}.json")),
+            &json!([{"segment_id":"s0","label":"content","evidence":"Hello there."}]),
+        )
+        .unwrap();
+        let manifest = Manifest {
+            version: 1,
+            episode_id: 1,
+            hash: "aa".repeat(32),
+            source_hash: hash.clone(),
+            bytes: 8,
+            duration: 1.0,
+            chunk_size: 1024,
+            chunks: vec!["aa".repeat(32)],
+            timeline: vec![Interval {
+                original_start: 0.0,
+                original_end: 1.0,
+                processed_start: 0.0,
+            }],
+            model: MODEL.into(),
+            pipeline_version: run,
+        };
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_publications(episode_id,manifest_json,notes_json,published_at) VALUES(1,?,'[{\"id\":\"s0\"}]',1)",
+                rusqlite::params![serde_json::to_string(&manifest).unwrap()],
+            )
+            .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
+                [],
+            )
+            .unwrap();
+        let _ = process(&backend, 1, "https://example.org/original.mp3");
+        assert!(source.is_file());
     }
 
     fn local_job_backend() -> (Backend, tempfile::TempDir) {
