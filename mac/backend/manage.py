@@ -202,6 +202,8 @@ def backend_env(config):
                PODS_ORIGIN="https://pods.mcgiv.dev", PODS_RP_ID="pods.mcgiv.dev", PODS_BROWSER_ORIGIN="https://pods.mcgiv.dev",
                PODS_RESET_KEY_FILE=str(STATE / "reset.key"), PODS_PYTHON=str(release / "runtime/.venv/bin/python"),
                PODS_TRANSCRIBE_SCRIPT=str(release / "runtime/transcribe.py"),
+               PODS_STATE_DIR=str(STATE),
+               PODS_MEMORY_GATE_NOTIFY="1",
                PODS_WHISPER_MODEL=config.get("whisper_model", str(Path.home() / "models/whisper-large-v3-mlx")))
     if config.get("omlx_key"):
         env["PODS_OMLX_KEY"] = config["omlx_key"]

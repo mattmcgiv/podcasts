@@ -4,6 +4,11 @@
 //! low or macOS memory pressure is warn/critical. Does not pause HTTP, sync,
 //! speaker, RSS, download, refine, or ffmpeg.
 //!
+//! Notification Center posts one pause banner and one resume banner per kind.
+//! Repeats while that kind stays paused or resumed are suppressed, including
+//! after a backend restart. Live `osascript` posts require
+//! `PODS_MEMORY_GATE_NOTIFY=1` from `manage.py`.
+//!
 //! No new crates. libc is already pinned for flock(2).
 
 use crate::error::Error;
@@ -160,8 +165,61 @@ impl KindStates {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PostedStates {
+    whisper: Option<GateState>,
+    omlx: Option<GateState>,
+}
+
+impl PostedStates {
+    const fn empty() -> Self {
+        Self {
+            whisper: None,
+            omlx: None,
+        }
+    }
+
+    fn get(self, kind: InferenceKind) -> Option<GateState> {
+        match kind {
+            InferenceKind::Whisper => self.whisper,
+            InferenceKind::Omlx => self.omlx,
+        }
+    }
+
+    fn set(&mut self, kind: InferenceKind, state: GateState) {
+        match kind {
+            InferenceKind::Whisper => self.whisper = Some(state),
+            InferenceKind::Omlx => self.omlx = Some(state),
+        }
+    }
+}
+
+fn apply_posted_to_states(states: &mut KindStates, posted: PostedStates) {
+    if let Some(state) = posted.whisper {
+        if state != GateState::Disabled {
+            states.whisper = state;
+        }
+    }
+    if let Some(state) = posted.omlx {
+        if state != GateState::Disabled {
+            states.omlx = state;
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
-static PRODUCTION_STATES: Mutex<KindStates> = Mutex::new(KindStates::open());
+struct ProductionGate {
+    states: KindStates,
+    posted: PostedStates,
+    persist_loaded: bool,
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+static PRODUCTION_STATES: Mutex<ProductionGate> = Mutex::new(ProductionGate {
+    states: KindStates::open(),
+    posted: PostedStates::empty(),
+    persist_loaded: false,
+});
 
 pub fn parse_gate_config(
     gate: Option<&str>,
@@ -298,11 +356,15 @@ pub fn evaluate() -> MemoryReport {
         #[cfg(target_os = "macos")]
         {
             let snapshot = sample_live();
-            apply_with_states(
-                config,
-                snapshot,
-                &mut PRODUCTION_STATES.lock().unwrap_or_else(|e| e.into_inner()),
-            )
+            let mut gate = PRODUCTION_STATES.lock().unwrap_or_else(|e| e.into_inner());
+            if !gate.persist_loaded {
+                let posted = load_posted();
+                apply_posted_to_states(&mut gate.states, posted);
+                gate.posted = posted;
+                gate.persist_loaded = true;
+            }
+            let gate = &mut *gate;
+            apply_with_states(config, snapshot, &mut gate.states, &mut gate.posted)
         }
     }
 }
@@ -341,6 +403,7 @@ fn apply_with_states(
     config: GateConfig,
     snapshot: MemorySnapshot,
     states: &mut KindStates,
+    posted: &mut PostedStates,
 ) -> MemoryReport {
     if !config.enabled {
         *states = KindStates {
@@ -361,19 +424,19 @@ fn apply_with_states(
         &snapshot,
         states.get(InferenceKind::Omlx),
     );
-    log_transition(
+    announce_transition(
         InferenceKind::Whisper,
-        states.whisper,
         whisper.state,
         &snapshot,
         whisper.last_reason,
+        posted,
     );
-    log_transition(
+    announce_transition(
         InferenceKind::Omlx,
-        states.omlx,
         omlx.state,
         &snapshot,
         omlx.last_reason,
+        posted,
     );
     states.whisper = whisper.state;
     states.omlx = omlx.state;
@@ -427,20 +490,24 @@ fn decide_kind(
     }
 }
 
-fn log_transition(
+fn announce_transition(
     kind: InferenceKind,
-    previous: GateState,
     next: GateState,
     snapshot: &MemorySnapshot,
     reason: Option<&str>,
+    posted: &mut PostedStates,
 ) {
-    if previous == next {
+    if next == GateState::Disabled {
+        return;
+    }
+    if posted.get(kind) == Some(next) {
         return;
     }
     let label = match kind {
         InferenceKind::Whisper => "whisper",
         InferenceKind::Omlx => "omlx",
     };
+    let from = posted.get(kind).unwrap_or(GateState::Open);
     if next == GateState::Deferred {
         eprintln!(
             "memory gate {label} deferred: available_bytes={} pressure={} reason={}",
@@ -448,16 +515,18 @@ fn log_transition(
             snapshot.pressure.as_str(),
             reason.unwrap_or("unknown")
         );
-    } else if next == GateState::Open {
+    } else if next == GateState::Open && from == GateState::Deferred {
         eprintln!(
             "memory gate {label} open: available_bytes={} pressure={}",
             snapshot.available_bytes,
             snapshot.pressure.as_str()
         );
     }
-    if let Some(body) = notification_copy(kind, previous, next, reason) {
+    if let Some(body) = notification_copy(kind, from, next, reason) {
         post_notification(&body);
     }
+    posted.set(kind, next);
+    persist_posted(*posted);
 }
 
 fn work_name(kind: InferenceKind) -> &'static str {
@@ -509,6 +578,9 @@ fn post_notification(body: &str) {
     }
     #[cfg(all(target_os = "macos", not(test)))]
     {
+        if std::env::var("PODS_MEMORY_GATE_NOTIFY").ok().as_deref() != Some("1") {
+            return;
+        }
         let script = format!(
             "display notification {} with title {}",
             applescript_literal(body),
@@ -526,6 +598,87 @@ fn post_notification(body: &str) {
     {
         let _ = body;
     }
+}
+
+fn format_posted(posted: PostedStates) -> String {
+    let mut lines = String::new();
+    for kind in [InferenceKind::Whisper, InferenceKind::Omlx] {
+        let Some(state) = posted.get(kind) else {
+            continue;
+        };
+        if state == GateState::Disabled {
+            continue;
+        }
+        let label = match kind {
+            InferenceKind::Whisper => "whisper",
+            InferenceKind::Omlx => "omlx",
+        };
+        lines.push_str(label);
+        lines.push('=');
+        lines.push_str(state.as_str());
+        lines.push('\n');
+    }
+    lines
+}
+
+fn parse_posted(text: &str) -> PostedStates {
+    let mut posted = PostedStates::empty();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let state = match value.trim() {
+            "open" => GateState::Open,
+            "deferred" => GateState::Deferred,
+            _ => continue,
+        };
+        match key.trim() {
+            "whisper" => posted.whisper = Some(state),
+            "omlx" => posted.omlx = Some(state),
+            _ => {}
+        }
+    }
+    posted
+}
+
+fn persist_posted(posted: PostedStates) {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        if std::env::var("PODS_MEMORY_GATE_NOTIFY").ok().as_deref() != Some("1") {
+            return;
+        }
+        let Some(path) = notify_state_path() else {
+            return;
+        };
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, format_posted(posted)).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+    #[cfg(not(all(target_os = "macos", not(test))))]
+    {
+        let _ = posted;
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn load_posted() -> PostedStates {
+    let Some(path) = notify_state_path() else {
+        return PostedStates::empty();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_posted(&text),
+        Err(_) => PostedStates::empty(),
+    }
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn notify_state_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("PODS_STATE_DIR")?;
+    if dir.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(dir).join("memory-gate-notify"))
 }
 
 fn mix_u64(mut z: u64) -> u64 {
@@ -693,6 +846,7 @@ struct TestInject {
     snapshot: MemorySnapshot,
     config: GateConfig,
     states: KindStates,
+    posted: PostedStates,
 }
 
 #[cfg(test)]
@@ -755,6 +909,7 @@ pub fn with_test_memory<R>(cfg: TestMemory, f: impl FnOnce() -> R) -> R {
                 omlx_resume_above_bytes: cfg.omlx_resume_above_bytes,
             },
             states: KindStates::open(),
+            posted: PostedStates::empty(),
         });
         TEST_NOTIFICATIONS.with(|cell| cell.borrow_mut().clear());
     });
@@ -771,6 +926,25 @@ pub fn set_test_snapshot(snapshot: MemorySnapshot) {
 }
 
 #[cfg(test)]
+fn set_test_states_open() {
+    TEST_INJECT.with(|cell| {
+        if let Some(inject) = cell.borrow_mut().as_mut() {
+            inject.states = KindStates::open();
+        }
+    });
+}
+
+#[cfg(test)]
+fn simulate_test_restart() {
+    TEST_INJECT.with(|cell| {
+        if let Some(inject) = cell.borrow_mut().as_mut() {
+            inject.states = KindStates::open();
+            apply_posted_to_states(&mut inject.states, inject.posted);
+        }
+    });
+}
+
+#[cfg(test)]
 fn evaluate_injected() -> Option<MemoryReport> {
     TEST_INJECT.with(|cell| {
         let mut inject = cell.borrow_mut();
@@ -779,6 +953,7 @@ fn evaluate_injected() -> Option<MemoryReport> {
             inject.config,
             inject.snapshot.clone(),
             &mut inject.states,
+            &mut inject.posted,
         ))
     })
 }
@@ -1044,6 +1219,111 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn pause_and_resume_banners_fire_once_per_kind() {
+        with_test_memory(
+            TestMemory {
+                snapshot: snap(gib(32), PressureLevel::Normal, false),
+                ..TestMemory::default()
+            },
+            || {
+                evaluate();
+                set_test_snapshot(snap(gib(7), PressureLevel::Normal, false));
+                evaluate();
+                evaluate();
+                status_json();
+                set_test_states_open();
+                evaluate();
+                let paused = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
+                assert_eq!(
+                    paused,
+                    [
+                        "Transcription paused due to low memory",
+                        "Classification paused due to low memory",
+                    ]
+                );
+                set_test_snapshot(snap(gib(32), PressureLevel::Normal, false));
+                evaluate();
+                evaluate();
+                set_test_states_open();
+                evaluate();
+                let posted = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
+                assert_eq!(
+                    posted,
+                    [
+                        "Transcription paused due to low memory",
+                        "Classification paused due to low memory",
+                        "Transcription resumed due to available memory",
+                        "Classification resumed due to available memory",
+                    ]
+                );
+                set_test_snapshot(snap(gib(7), PressureLevel::Normal, false));
+                evaluate();
+                let again = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
+                assert_eq!(again.len(), 6);
+            },
+        );
+    }
+
+    #[test]
+    fn restart_in_hysteresis_band_does_not_resume() {
+        with_test_memory(
+            TestMemory {
+                snapshot: snap(gib(32), PressureLevel::Normal, false),
+                ..TestMemory::default()
+            },
+            || {
+                evaluate();
+                set_test_snapshot(snap(gib(7), PressureLevel::Normal, false));
+                evaluate();
+                assert_eq!(
+                    TEST_NOTIFICATIONS.with(|cell| cell.borrow().len()),
+                    2
+                );
+                simulate_test_restart();
+                set_test_snapshot(snap(gib(9), PressureLevel::Normal, false));
+                let mid = evaluate();
+                assert_eq!(mid.whisper.state, GateState::Deferred);
+                assert_eq!(mid.omlx.state, GateState::Deferred);
+                assert_eq!(mid.whisper.last_reason, Some("hysteresis"));
+                assert_eq!(
+                    TEST_NOTIFICATIONS.with(|cell| cell.borrow().len()),
+                    2
+                );
+                simulate_test_restart();
+                set_test_snapshot(snap(gib(28), PressureLevel::Normal, false));
+                let high = evaluate();
+                assert_eq!(high.whisper.state, GateState::Open);
+                assert_eq!(high.omlx.state, GateState::Deferred);
+                assert_eq!(high.omlx.last_reason, Some("hysteresis"));
+                let posted = TEST_NOTIFICATIONS.with(|cell| cell.borrow().clone());
+                assert_eq!(
+                    posted,
+                    [
+                        "Transcription paused due to low memory",
+                        "Classification paused due to low memory",
+                        "Transcription resumed due to available memory",
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn parse_posted_reads_open_and_deferred_and_ignores_junk() {
+        let parsed = parse_posted("whisper=deferred\nomlx=open\ngarbage\nwhisper=nope\n");
+        assert_eq!(parsed.whisper, Some(GateState::Deferred));
+        assert_eq!(parsed.omlx, Some(GateState::Open));
+        let empty = parse_posted("");
+        assert_eq!(empty, PostedStates::empty());
+        let formatted = format_posted(PostedStates {
+            whisper: Some(GateState::Deferred),
+            omlx: Some(GateState::Open),
+        });
+        assert_eq!(formatted, "whisper=deferred\nomlx=open\n");
+        assert_eq!(parse_posted(&formatted).omlx, Some(GateState::Open));
     }
 
     #[test]
