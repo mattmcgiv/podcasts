@@ -188,9 +188,9 @@ def import_library(source):
     print(json.dumps({"imported": backup(source, destination)}))
 
 
-def launch():
-    config = read_config()
-    release = (STATE / "current").resolve(strict=True)
+def backend_env(config):
+    # Merge extra keys into the existing mac.json object. Do not replace that file.
+    release = STATE / "current"
     env = dict(os.environ, PATH=PATH, PODS_LOCAL="1", PODS_AUTH_MODE="passkey", PODS_BIND="127.0.0.1:18180",
                PODS_ORIGIN="https://pods.mcgiv.dev", PODS_RP_ID="pods.mcgiv.dev", PODS_BROWSER_ORIGIN="https://pods.mcgiv.dev",
                PODS_RESET_KEY_FILE=str(STATE / "reset.key"), PODS_PYTHON=str(release / "runtime/.venv/bin/python"),
@@ -198,6 +198,23 @@ def launch():
                PODS_WHISPER_MODEL=config.get("whisper_model", str(Path.home() / "models/whisper-large-v3-mlx")))
     if config.get("omlx_key"):
         env["PODS_OMLX_KEY"] = config["omlx_key"]
+    if "memory_gate" in config:
+        env["PODS_MEMORY_GATE"] = "0" if config["memory_gate"] in (False, 0, "0") else "1"
+    if "memory_whisper_defer_below_bytes" in config:
+        env["PODS_MEMORY_WHISPER_DEFER_BELOW_BYTES"] = str(int(config["memory_whisper_defer_below_bytes"]))
+    if "memory_whisper_resume_above_bytes" in config:
+        env["PODS_MEMORY_WHISPER_RESUME_ABOVE_BYTES"] = str(int(config["memory_whisper_resume_above_bytes"]))
+    if "memory_omlx_defer_below_bytes" in config:
+        env["PODS_MEMORY_OMLX_DEFER_BELOW_BYTES"] = str(int(config["memory_omlx_defer_below_bytes"]))
+    if "memory_omlx_resume_above_bytes" in config:
+        env["PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES"] = str(int(config["memory_omlx_resume_above_bytes"]))
+    return env
+
+
+def launch():
+    config = read_config()
+    (STATE / "current").resolve(strict=True)
+    env = backend_env(config)
     config_credentials = Path.home() / ".config/podcasts/credentials.env"
     if config_credentials.is_file():
         # Only directory credentials are accepted; never source a shell script.

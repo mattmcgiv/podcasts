@@ -261,3 +261,28 @@ class ManageTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT stage,error,next_retry_at,priority,attempts FROM browser_jobs WHERE episode_id=3").fetchone(),
                                  ("queued", None, 0, 1, 0))
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM browser_jobs").fetchone()[0], 3)
+
+    def test_backend_env_merges_memory_keys_and_keeps_existing_config(self):
+        # Merge keys into the existing config dict. Do not replace mac.json.
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            config = {
+                "desec_token": "placeholder-token",
+                "acme_email": "ops@example.com",
+                "whisper_model": "/models/whisper-large-v3-mlx",
+                "memory_gate": False,
+                "memory_whisper_defer_below_bytes": 1,
+                "memory_whisper_resume_above_bytes": 2,
+                "memory_omlx_defer_below_bytes": 3,
+                "memory_omlx_resume_above_bytes": 4,
+            }
+            env = manage.backend_env(config)
+            self.assertEqual(config["desec_token"], "placeholder-token")
+            self.assertEqual(config["whisper_model"], "/models/whisper-large-v3-mlx")
+            self.assertEqual(env["PODS_WHISPER_MODEL"], "/models/whisper-large-v3-mlx")
+            self.assertEqual(env["PODS_MEMORY_GATE"], "0")
+            self.assertEqual(env["PODS_MEMORY_WHISPER_DEFER_BELOW_BYTES"], "1")
+            self.assertEqual(env["PODS_MEMORY_WHISPER_RESUME_ABOVE_BYTES"], "2")
+            self.assertEqual(env["PODS_MEMORY_OMLX_DEFER_BELOW_BYTES"], "3")
+            self.assertEqual(env["PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES"], "4")
+            memory_env = {key: env[key] for key in env if key.startswith("PODS_MEMORY")}
+            self.assertNotIn("placeholder-token", str(memory_env))

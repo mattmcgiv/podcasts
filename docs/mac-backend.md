@@ -187,6 +187,12 @@ Only processed episodes appear in Listen. An empty Listen screen does not mean t
 Audio downloads permit 15 redirects. Failed automatic jobs use exponential retry delays, from five minutes to six hours.
 Automatic processing retries at most four failed attempts. Then the job stage is `blocked` and the episode remains unavailable.
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
+`memory_busy` does not consume an attempt. It retries in 60-120 seconds.
+The memory gate defers Whisper below 8 GiB available (resume at 10 GiB) and oMLX work below 24 GiB (resume at 32 GiB).
+Kernel pressure `warn` or `critical` defers both bands and stops an in-flight Whisper process group.
+Notification Center posts `Transcription` or `Classification` paused or resumed copy on each transition.
+Merge `memory_gate` and the four byte keys into the existing `mac.json`. Do not replace that file.
+A plist-only `PODS_MEMORY_GATE` does not survive `manage.py agent`.
 New jobs precede ordinary retries. An explicit `retry` command still takes precedence.
 
 The public refresh client keeps the 120-second caller signal.
@@ -373,6 +379,7 @@ Automatic processing retries at most four failed attempts. Then the job stage is
 A blocked episode remains unavailable. It does not wait for operator labels.
 
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
+`memory_busy` does not consume an attempt. It retries in 60-120 seconds.
 
 The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
 It does not accept corrected labels.

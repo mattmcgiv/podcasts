@@ -226,6 +226,37 @@ Rollback: set `PODS_OMLX_LOCK=0`, stop using the wrapper, leave oMLX settings an
 
 This code does not create a LaunchAgent, lock daemon, or other mysterious background process.
 
+### Memory-aware inference deferral
+
+The Mac backend stays up for HTTPS, sync, and speaker when unified memory is tight. It defers only Whisper transcription and oMLX classification or show notes.
+
+Default bands, absolute bytes:
+
+| Work | Defer | Resume |
+| --- | --- | --- |
+| Transcription | below 8 GiB available, or memory pressure `warn`/`critical` | 10 GiB and pressure `normal` |
+| Classification and show notes | below 24 GiB available, or memory pressure `warn`/`critical` | 32 GiB and pressure `normal` |
+
+Job error is `memory_busy`. It does not consume a failure attempt. Retry is 60–120 seconds. Downloads, ffmpeg, RSS, and HTTP stay ungated.
+
+If kernel pressure hits `warn` or `critical` while Whisper is already running, the backend stops that process group. Completed 180 s chunk files remain. Classification that already holds the oMLX lock is not cancelled.
+
+`GET /api/status` includes a `memory` object with both gates. macOS Notification Center posts `{work} paused due to {cause}` and `{work} resumed due to available memory` on each gate transition. Causes are low memory, warning-level memory pressure, critical memory pressure, and a memory sample failure.
+
+Merge these keys into the existing `~/.config/podcasts/mac.json` (mode 0600). Keep `desec_token`, `acme_email`, `whisper_model`, and optional `omlx_key`. Do not replace the file with a memory-only object.
+
+```json
+"memory_gate": true,
+"memory_whisper_defer_below_bytes": 8589934592,
+"memory_whisper_resume_above_bytes": 10737418240,
+"memory_omlx_defer_below_bytes": 25769803776,
+"memory_omlx_resume_above_bytes": 34359738368
+```
+
+Rollback: set `"memory_gate": false` on that same object, then restart the agent. Do not put `PODS_MEMORY_GATE` only on the launchd plist. `python3 mac/backend/manage.py agent` rewrites the plist and drops extra env keys.
+
+If oMLX loads weights on the first POST instead of at process start, raise `memory_omlx_defer_below_bytes` to 96 GiB (`103079215104`).
+
 ### Ad removal (optional)
 
 Ad removal is off by default. In Settings:

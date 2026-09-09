@@ -96,10 +96,11 @@ fn with_gap_at(segments: &mut [Segment], index: usize, start: f64) {
 
 #[test]
 fn boundary_algorithm_version_identifies_gap_discourse_trim() {
-    assert!(VERSION.contains("v22"));
+    assert!(VERSION.contains("v23"));
     assert!(VERSION.contains("binary"));
     assert!(VERSION.contains("gap8"));
     assert!(VERSION.contains("discourse"));
+    assert!(!VERSION.contains("v22"));
     assert!(!VERSION.contains("v21"));
     assert!(!VERSION.contains("v20"));
     assert!(!VERSION.contains("v19"));
