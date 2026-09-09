@@ -123,7 +123,8 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
             conn.query_row("SELECT revision FROM browser_clock", [], |r| r.get(0))?;
         return Ok(HttpResponse::json(
             json!({"available":true,"revision":revision,"pending":pending,"failed":failed,
-            "model":crate::local_worker::MODEL,"storage":crate::local_worker::storage_status(backend)}),
+            "model":crate::local_worker::MODEL,"storage":crate::local_worker::storage_status(backend),
+            "memory":crate::memory_gate::status_json()}),
             200,
         ));
     }
@@ -328,7 +329,8 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     Ok(
         json!({"version":1,"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
         "settings":settings,"versions":versions,"refresh_status":refresh_status,"notifications":notifications,
-        "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":crate::local_worker::storage_status(backend)}}),
+        "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":crate::local_worker::storage_status(backend),
+            "memory":crate::memory_gate::status_json()}}),
     )
 }
 

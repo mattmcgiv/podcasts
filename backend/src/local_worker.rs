@@ -11,8 +11,14 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::Command,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 pub const MODEL: &str = "DeepSeek-V4-Flash-0731-2.4bit-mixed";
 // Checkpoint versions name the complete classify algorithm, including repair,
@@ -165,14 +171,18 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         }
         Err(error) => {
             if crate::omlx_lock::is_busy_error(&error) {
-                let delay = crate::omlx_lock::busy_retry_delay_secs(episode);
-                backend.db.execute(
-                    "UPDATE browser_jobs SET error=?,next_retry_at=? WHERE episode_id=?",
-                    params![
-                        crate::omlx_lock::OMLX_BUSY,
-                        crate::db::now_unix() + delay,
-                        episode
-                    ],
+                persist_busy(
+                    backend,
+                    episode,
+                    crate::omlx_lock::OMLX_BUSY,
+                    crate::omlx_lock::busy_retry_delay_secs(episode),
+                )?;
+            } else if crate::memory_gate::is_busy_error(&error) {
+                persist_busy(
+                    backend,
+                    episode,
+                    crate::memory_gate::MEMORY_BUSY,
+                    crate::memory_gate::busy_retry_delay_secs(episode),
                 )?;
             } else {
                 let failed_stage = job_stage(backend, episode)?;
@@ -204,6 +214,14 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         }
     }
     Ok(true)
+}
+
+fn persist_busy(backend: &Backend, episode: i64, error: &str, delay: i64) -> Result<(), Error> {
+    backend.db.execute(
+        "UPDATE browser_jobs SET error=?,next_retry_at=? WHERE episode_id=?",
+        params![error, crate::db::now_unix() + delay, episode],
+    )?;
+    Ok(())
 }
 
 fn stage(backend: &Backend, id: i64, name: &str) -> Result<(), Error> {
@@ -354,18 +372,11 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     if !cached_transcript {
         require_capacity(backend, 32 * 1024 * 1024)?;
         stage(backend, id, "transcribing")?;
+        crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
         let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
         let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
             .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
-        let status = Command::new(python)
-            .arg(script)
-            .arg(source)
-            .arg(&transcript_file)
-            .status()
-            .map_err(failure)?;
-        if !status.success() {
-            return Err(failure("local transcription failed"));
-        }
+        run_whisper_child(&python, &script, source, &transcript_file)?;
     }
     let read_transcript = || {
         let segments: Vec<Segment> =
@@ -395,6 +406,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         })?
     } else {
         stage(backend, id, "classifying")?;
+        crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
         let permit =
             crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
         let mut labels = Vec::new();
@@ -508,6 +520,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         return Ok(());
     }
     stage(backend, id, "show_notes")?;
+    crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
     let notes_permit = crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
     let notes = generate_notes(&segments, &labels, &manifest.timeline, &notes_permit)?;
     drop(notes_permit);
@@ -520,6 +533,122 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         Ok(())
     })?;
     Ok(())
+}
+
+#[cfg(unix)]
+static WHISPER_PGID: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+fn install_whisper_shutdown() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            whisper_shutdown as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            whisper_shutdown as *const () as libc::sighandler_t,
+        );
+    });
+}
+
+#[cfg(unix)]
+extern "C" fn whisper_shutdown(sig: libc::c_int) {
+    kill_registered_whisper_group();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(unix)]
+fn register_whisper_pgid(pgid: libc::pid_t) {
+    install_whisper_shutdown();
+    WHISPER_PGID.store(pgid, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn clear_whisper_pgid(pgid: libc::pid_t) {
+    let _ = WHISPER_PGID.compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn kill_registered_whisper_group() {
+    let pgid = WHISPER_PGID.swap(0, Ordering::SeqCst);
+    if pgid > 1 {
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
+        }
+    }
+}
+
+fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        let mut child = Command::new(python)
+            .arg(script)
+            .arg(source)
+            .arg(dest)
+            .process_group(0)
+            .spawn()
+            .map_err(failure)?;
+        let pgid = child.id() as libc::pid_t;
+        register_whisper_pgid(pgid);
+        struct ClearPgid(libc::pid_t);
+        impl Drop for ClearPgid {
+            fn drop(&mut self) {
+                clear_whisper_pgid(self.0);
+            }
+        }
+        let _clear = ClearPgid(pgid);
+        loop {
+            match child.try_wait().map_err(failure)? {
+                Some(status) if status.success() => return Ok(()),
+                Some(_) => return Err(failure("local transcription failed")),
+                None => {
+                    if crate::memory_gate::should_preempt_whisper() {
+                        preempt_process_group(&mut child);
+                        return Err(Error::Upstream(crate::memory_gate::MEMORY_BUSY.into()));
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let status = Command::new(python)
+            .arg(script)
+            .arg(source)
+            .arg(dest)
+            .status()
+            .map_err(failure)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(failure("local transcription failed"))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn preempt_process_group(child: &mut std::process::Child) {
+    let pid = child.id() as libc::pid_t;
+    unsafe {
+        libc::killpg(pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    unsafe {
+        libc::killpg(pid, libc::SIGKILL);
+    }
+    let _ = child.wait();
 }
 
 fn download_source(backend: &Backend, url: &str, source: &Path) -> Result<(), Error> {
@@ -2078,6 +2207,201 @@ mod download_tests {
                 let _ = child.wait();
             },
         );
+    }
+
+    fn memory_snapshot(
+        available: u64,
+        pressure: crate::memory_gate::PressureLevel,
+    ) -> crate::memory_gate::MemorySnapshot {
+        crate::memory_gate::MemorySnapshot {
+            available_bytes: available,
+            total_bytes: 128 * 1024 * 1024 * 1024,
+            pressure,
+            sampled_at: 1,
+            sample_failed: false,
+        }
+    }
+
+    #[test]
+    fn memory_busy_transcribe_does_not_consume_attempts() {
+        let (backend, _temp) = local_job_backend();
+        let dest = backend
+            .artifacts
+            .prepare_dest("local/1/source.audio")
+            .unwrap();
+        let hash = hex::encode(Sha256::digest(b"fixture-audio"));
+        fs::remove_file(
+            dest.parent()
+                .unwrap()
+                .join(format!("transcript-{hash}.json")),
+        )
+        .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
+                [],
+            )
+            .unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        crate::omlx_lock::with_test_lock_env(
+            lock_dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::memory_gate::with_test_memory(
+                    crate::memory_gate::TestMemory {
+                        snapshot: memory_snapshot(
+                            7 * 1024 * 1024 * 1024,
+                            crate::memory_gate::PressureLevel::Normal,
+                        ),
+                        ..crate::memory_gate::TestMemory::default()
+                    },
+                    || {
+                        assert!(step(&backend).unwrap());
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_i64(
+                                    "SELECT attempts FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap(),
+                            Some(0)
+                        );
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_string(
+                                    "SELECT error FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap()
+                                .as_deref(),
+                            Some(crate::memory_gate::MEMORY_BUSY)
+                        );
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_string(
+                                    "SELECT stage FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap()
+                                .as_deref(),
+                            Some("transcribing")
+                        );
+                        assert_eq!(notification_rows(&backend).len(), 0);
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn memory_busy_classify_skips_lock_and_keeps_attempts() {
+        let (backend, _temp) = local_job_backend();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',2)",
+                [],
+            )
+            .unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        crate::omlx_lock::with_test_lock_env(
+            lock_dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::memory_gate::with_test_memory(
+                    crate::memory_gate::TestMemory {
+                        snapshot: memory_snapshot(
+                            12 * 1024 * 1024 * 1024,
+                            crate::memory_gate::PressureLevel::Normal,
+                        ),
+                        ..crate::memory_gate::TestMemory::default()
+                    },
+                    || {
+                        assert!(step(&backend).unwrap());
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_i64(
+                                    "SELECT attempts FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap(),
+                            Some(2)
+                        );
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_string(
+                                    "SELECT error FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap()
+                                .as_deref(),
+                            Some(crate::memory_gate::MEMORY_BUSY)
+                        );
+                        assert_eq!(
+                            backend
+                                .db
+                                .scalar_string(
+                                    "SELECT stage FROM browser_jobs WHERE episode_id=1",
+                                    []
+                                )
+                                .unwrap()
+                                .as_deref(),
+                            Some("classifying")
+                        );
+                        assert!(crate::omlx_lock::lock_available(
+                            &crate::omlx_lock::LockPaths::in_dir(lock_dir.path())
+                        ));
+                        assert_eq!(notification_rows(&backend).len(), 0);
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn whisper_child_preempts_on_pressure() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("sleep.py");
+        fs::write(&script, "import time\ntime.sleep(30)\n").unwrap();
+        let dest = dir.path().join("out.json");
+        crate::memory_gate::with_test_memory(
+            crate::memory_gate::TestMemory {
+                snapshot: memory_snapshot(
+                    32 * 1024 * 1024 * 1024,
+                    crate::memory_gate::PressureLevel::Warn,
+                ),
+                ..crate::memory_gate::TestMemory::default()
+            },
+            || {
+                let error =
+                    run_whisper_child("python3", script.to_str().unwrap(), dir.path(), &dest)
+                        .unwrap_err();
+                assert!(crate::memory_gate::is_busy_error(&error));
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_shutdown_kills_the_whisper_process_group() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        register_whisper_pgid(child.id() as libc::pid_t);
+        kill_registered_whisper_group();
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+        assert_eq!(WHISPER_PGID.load(Ordering::SeqCst), 0);
     }
 
     struct NotificationRow {
