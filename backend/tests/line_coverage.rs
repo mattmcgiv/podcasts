@@ -18,13 +18,38 @@ use pods_backend::{
     Error, HttpRequest, MockFeedFetcher,
 };
 use serde_json::json;
-use sha2::Digest;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static ENV: Mutex<()> = Mutex::new(());
+
+struct EnvRestore {
+    pairs: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvRestore {
+    fn capture(keys: &'static [&'static str]) -> Self {
+        Self {
+            pairs: keys
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect(),
+        }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, previous) in &self.pairs {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
 
 fn serve_once(status: &str, headers: &str, body: &[u8]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -173,6 +198,11 @@ fn directory_client_parses_credentials_and_search_payloads() {
 #[test]
 fn directory_from_env_and_disabled_appearance_default() {
     let _guard = ENV.lock().unwrap();
+    let _env = EnvRestore::capture(&[
+        "PODCASTINDEX_KEY",
+        "PODCASTINDEX_SECRET",
+        "PODCASTINDEX_BASE_URL",
+    ]);
     std::env::remove_var("PODCASTINDEX_KEY");
     std::env::remove_var("PODCASTINDEX_SECRET");
     assert!(PodcastIndexClient::from_env().is_none());
@@ -183,9 +213,6 @@ fn directory_from_env_and_disabled_appearance_default() {
     std::env::set_var("PODCASTINDEX_SECRET", "s");
     std::env::set_var("PODCASTINDEX_BASE_URL", "https://example.test/api/");
     assert!(PodcastIndexClient::from_env().is_some());
-    std::env::remove_var("PODCASTINDEX_KEY");
-    std::env::remove_var("PODCASTINDEX_SECRET");
-    std::env::remove_var("PODCASTINDEX_BASE_URL");
     let err = DisabledDirectory
         .search_appearances("person")
         .unwrap_err();
@@ -232,6 +259,7 @@ fn feeds_parse_dates_durations_and_http_fetcher() {
 #[test]
 fn pipeline_notes_parakeet_download_and_classify_stages() {
     let _guard = ENV.lock().unwrap();
+    let _env = EnvRestore::capture(&["PODS_TRANSCRIBER", "PODS_PARAKEET_URL"]);
     std::env::set_var("PODS_TRANSCRIBER", "parakeet");
     std::env::set_var("PODS_PARAKEET_URL", "http://127.0.0.1:9/transcribe");
     let config = PipelineConfig::from_env();
@@ -447,6 +475,14 @@ fn parse_parakeet_empty_is_error() -> bool {
 #[test]
 fn auth_webauthn_env_cookies_and_scripted_errors() {
     let _guard = ENV.lock().unwrap();
+    let _env = EnvRestore::capture(&[
+        "PODS_RESET_KEY",
+        "PODS_RESET_KEY_FILE",
+        "PODS_AUTH_MODE",
+        "PODS_ORIGIN",
+        "PODS_RP_ID",
+        "PODS_TRUSTED_ORIGINS",
+    ]);
     let engine = WebauthnEngine::new("pods.mcgiv.dev", "https://pods.mcgiv.dev").unwrap();
     let (options, state) = engine.start_registration(&["zz".into(), "aa".into()]).unwrap();
     assert!(options.get("publicKey").is_some() || options.get("rp").is_some() || !options.is_null());
@@ -502,9 +538,6 @@ fn auth_webauthn_env_cookies_and_scripted_errors() {
     let db = Database::open_in_memory().unwrap();
     assert!(!auth::enrolled(&db).unwrap());
     assert!(!auth::valid_session(&db, None).unwrap());
-    std::env::remove_var("PODS_AUTH_MODE");
-    std::env::remove_var("PODS_RESET_KEY");
-    std::env::remove_var("PODS_RESET_KEY_FILE");
 }
 
 #[test]
@@ -555,6 +588,7 @@ fn bluetooth_mac_keys_and_live_memory_status() {
 #[test]
 fn omlx_lock_reads_api_key_from_env() {
     let _guard = ENV.lock().unwrap();
+    let _env = EnvRestore::capture(&["PODS_OMLX_KEY"]);
     std::env::set_var("PODS_OMLX_KEY", "test-omlx-key");
     assert_eq!(omlx_lock::configured_api_key().unwrap(), "test-omlx-key");
     std::env::set_var("PODS_OMLX_KEY", "");
@@ -604,6 +638,22 @@ fn browser_status_search_and_local_worker_step() {
     assert_eq!(backend.handle(req).status_code, 200);
     let stepped = pods_backend::local_worker::step(&backend);
     assert!(stepped.is_ok());
+    let (stage, error): (String, Option<String>) = {
+        let conn = backend.db.lock().unwrap();
+        conn.query_row(
+            "SELECT stage, error FROM browser_jobs WHERE episode_id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(stage, "retry");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("unsupported audio URL")),
+        "ftp audio must fail before acquire_pods, error={error:?}"
+    );
 }
 
 fn enroll_session(backend: &Backend) -> String {
@@ -637,116 +687,6 @@ fn enroll_session(backend: &Backend) -> String {
         .nth(1)
         .unwrap()
         .to_string()
-}
-
-#[test]
-fn local_worker_reuses_cached_transcript_and_publication() {
-    let temp = tempfile::tempdir().unwrap();
-    let wav = temp.path().join("tone.wav");
-    let ffmpeg = std::process::Command::new("ffmpeg")
-        .args([
-            "-nostdin",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=2:sample_rate=16000",
-            "-y",
-        ])
-        .arg(&wav)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    assert!(ffmpeg, "ffmpeg is required to plant fixture audio");
-    let db = Database::open_in_memory().unwrap();
-    db.execute(
-        "INSERT INTO podcasts(id,feed_url,title,is_subscribed,created_at) VALUES(1,'https://example.org/feed','Example',1,0)",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO episodes(id,podcast_id,guid,title,audio_url,published_at) VALUES(1,1,'g','Episode','https://example.org/a.mp3',1)",
-        [],
-    )
-    .unwrap();
-    let backend = Backend::with_data_root(
-        db,
-        Arc::new(MockFeedFetcher::default()),
-        Arc::new(DisabledDirectory),
-        Some(temp.path().to_owned()),
-    );
-    let source = backend
-        .artifacts
-        .prepare_dest("local/1/source.audio")
-        .unwrap();
-    std::fs::copy(&wav, &source).unwrap();
-    let (source_hash, _) = ArtifactStore::hash_file(&source).unwrap();
-    let segments = vec![pods_backend::local_worker::Segment {
-        id: "s0".into(),
-        start: 0.0,
-        end: 2.0,
-        text: "Hello from a fixture transcript.".into(),
-    }];
-    pods_backend::local_worker::validate_segments(&segments).unwrap();
-    let work = source.parent().unwrap();
-    std::fs::write(
-        work.join(format!("transcript-{source_hash}.json")),
-        serde_json::to_vec(&segments).unwrap(),
-    )
-    .unwrap();
-    let transcript_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(&segments).unwrap()));
-    let classifier_run =
-        pods_backend::local_worker::cached_classifier_run_id(&source_hash, &transcript_hash);
-    let run = pods_backend::local_worker::cached_run_id(&source_hash, &transcript_hash);
-    let labels = vec![pods_backend::local_worker::Label {
-        segment_id: "s0".into(),
-        label: "content".into(),
-        evidence: "editorial speech".into(),
-    }];
-    std::fs::write(
-        work.join(format!("labels-{classifier_run}.json")),
-        serde_json::to_vec(&labels).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        work.join(format!("refined-{run}.json")),
-        serde_json::to_vec(&labels).unwrap(),
-    )
-    .unwrap();
-    let manifest = pods_backend::browser::Manifest {
-        version: 1,
-        episode_id: 1,
-        hash: "deadbeef".into(),
-        source_hash: source_hash.clone(),
-        bytes: 8,
-        duration: 2.0,
-        chunk_size: 1024,
-        chunks: vec!["deadbeef".into()],
-        timeline: vec![pods_backend::browser::Interval {
-            original_start: 0.0,
-            original_end: 2.0,
-            processed_start: 0.0,
-        }],
-        model: pods_backend::local_worker::MODEL.into(),
-        pipeline_version: run,
-    };
-    backend
-        .db
-        .execute(
-            "INSERT INTO browser_publications(episode_id,manifest_json,notes_json,published_at) VALUES(1,?,'[{\"title\":\"n\"}]',1)",
-            rusqlite::params![serde_json::to_string(&manifest).unwrap()],
-        )
-        .unwrap();
-    backend
-        .db
-        .execute(
-            "INSERT INTO browser_jobs(episode_id,stage,attempts,next_retry_at,priority) VALUES(1,'queued',0,0,1)",
-            [],
-        )
-        .unwrap();
-    let did = pods_backend::local_worker::step(&backend).unwrap();
-    assert!(did);
 }
 
 #[test]
@@ -1610,6 +1550,7 @@ fn memory_gate_auth_login_feeds_directory_and_show_notes() {
     assert!(feeds::parse_feed(b"not xml").is_err());
     assert!(feeds::parse_feed(b"<rss></rss>").is_err());
 
+    let _index_env = EnvRestore::capture(&["PODCASTINDEX_KEY", "PODCASTINDEX_SECRET"]);
     std::env::remove_var("PODCASTINDEX_KEY");
     std::env::remove_var("PODCASTINDEX_SECRET");
     let _ = PodcastIndexClient::from_default_locations();
@@ -1617,8 +1558,6 @@ fn memory_gate_auth_login_feeds_directory_and_show_notes() {
     std::env::set_var("PODCASTINDEX_KEY", "k");
     std::env::set_var("PODCASTINDEX_SECRET", "s");
     assert!(PodcastIndexClient::from_default_locations().is_some());
-    std::env::remove_var("PODCASTINDEX_KEY");
-    std::env::remove_var("PODCASTINDEX_SECRET");
 
     let notes = pods_backend::show_notes::ShowNotesService::default();
     let generated = notes
