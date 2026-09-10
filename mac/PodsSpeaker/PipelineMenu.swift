@@ -71,8 +71,14 @@ struct PipelineRepository {
         }
         defer { sqlite3_close(database) }
         sqlite3_busy_timeout(database, 100)
+        var columns: OpaquePointer?
+        var hasProgress = false
+        if sqlite3_prepare_v2(database, "SELECT completed_units,total_units FROM browser_pending_jobs LIMIT 0", -1, &columns, nil) == SQLITE_OK {
+            hasProgress = true
+        }
+        sqlite3_finalize(columns)
         let sql = """
-            SELECT j.episode_id, e.title, p.title, j.stage, j.error
+            SELECT j.episode_id, e.title, p.title, j.stage, j.error, \(hasProgress ? "j.completed_units,j.total_units" : "NULL,NULL")
             FROM browser_pending_jobs j JOIN episodes e ON e.id=j.episode_id
             JOIN podcasts p ON p.id=e.podcast_id
             ORDER BY j.priority DESC, e.published_at, e.id
@@ -93,7 +99,8 @@ struct PipelineRepository {
             items.append(PipelineEpisode(id: String(episodeID), episodeId: episodeID,
                 title: string(1) ?? "Untitled episode", podcastTitle: string(2) ?? "Podcast",
                 stage: string(3) ?? "queued", blockingReason: nil, lastErrorMessage: string(4),
-                completedUnits: nil, totalUnits: nil))
+                completedUnits: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 5)),
+                totalUnits: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 6))))
         }
     }
 }
@@ -333,13 +340,6 @@ private struct PipelineProgressBar: View {
                 Capsule().fill(Color.white.opacity(0.1))
                 if let progress {
                     Capsule().fill(PipelineTheme.blue).frame(width: geometry.size.width * progress)
-                } else {
-                    TimelineView(.animation(minimumInterval: 0.04, paused: paused)) { context in
-                        let phase = paused ? 0.0 : (sin(context.date.timeIntervalSinceReferenceDate * 1.6) + 1) / 2
-                        Capsule().fill(PipelineTheme.blue.opacity(paused ? 0.4 : 0.9))
-                            .frame(width: geometry.size.width * 0.28)
-                            .offset(x: geometry.size.width * 0.72 * phase)
-                    }
                 }
             }.clipShape(Capsule())
         }

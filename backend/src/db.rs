@@ -14,6 +14,7 @@ impl Database {
         conn.execute_batch(include_str!("schema.sql"))?;
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
+        migrate_browser_progress(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -25,6 +26,7 @@ impl Database {
         conn.execute_batch(include_str!("schema.sql"))?;
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
+        migrate_browser_progress(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -66,6 +68,29 @@ impl Database {
         let mut stmt = conn.prepare(sql)?;
         Ok(stmt.query_row(params, |row| row.get::<_, String>(0)).optional()?)
     }
+}
+
+fn migrate_browser_progress(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for name in ["completed_units", "total_units"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('browser_jobs') WHERE name=?",
+            [name], |row| row.get(0))?;
+        if exists == 0 {
+            conn.execute(&format!("ALTER TABLE browser_jobs ADD COLUMN {name} INTEGER"), [])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn browser_progress_migrates_existing_jobs_idempotently() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE browser_jobs(episode_id INTEGER PRIMARY KEY,stage TEXT); INSERT INTO browser_jobs VALUES(1,'transcribing');").unwrap();
+    migrate_browser_progress(&conn).unwrap();
+    conn.execute("UPDATE browser_jobs SET completed_units=180,total_units=200", []).unwrap();
+    migrate_browser_progress(&conn).unwrap();
+    let values: (String, i64, i64) = conn.query_row("SELECT stage,completed_units,total_units FROM browser_jobs", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(values, ("transcribing".into(),180,200));
 }
 
 pub fn now_unix() -> i64 {

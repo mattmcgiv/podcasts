@@ -184,7 +184,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     }
     match process(backend, episode, &url) {
         Ok(()) => {
-            backend.db.execute("UPDATE browser_jobs SET stage='ready',error=NULL,next_retry_at=? WHERE episode_id=?",params![crate::db::now_unix()+300,episode])?;
+            backend.db.execute("UPDATE browser_jobs SET stage='ready',error=NULL,completed_units=1,total_units=1,next_retry_at=? WHERE episode_id=?",params![crate::db::now_unix()+300,episode])?;
         }
         Err(error) => {
             if crate::omlx_lock::is_busy_error(&error) {
@@ -243,8 +243,16 @@ fn persist_busy(backend: &Backend, episode: i64, error: &str, delay: i64) -> Res
 
 fn stage(backend: &Backend, id: i64, name: &str) -> Result<(), Error> {
     backend.db.execute(
-        "UPDATE browser_jobs SET stage=?,error=NULL WHERE episode_id=?",
+        "UPDATE browser_jobs SET stage=?,error=NULL,completed_units=NULL,total_units=NULL WHERE episode_id=?",
         params![name, id],
+    )?;
+    Ok(())
+}
+
+fn progress(backend: &Backend, id: i64, completed: u64, total: u64) -> Result<(), Error> {
+    backend.db.execute(
+        "UPDATE browser_jobs SET completed_units=?,total_units=? WHERE episode_id=?",
+        params![completed.min(total) as i64, total as i64, id],
     )?;
     Ok(())
 }
@@ -323,7 +331,7 @@ fn persist_failed_attempt(
             )?;
         }
         tx.execute(
-            "UPDATE browser_jobs SET stage=?,attempts=attempts+1,error=?,next_retry_at=? WHERE episode_id=?",
+            "UPDATE browser_jobs SET stage=?,attempts=attempts+1,error=?,next_retry_at=?,completed_units=NULL,total_units=NULL WHERE episode_id=?",
             params![outcome, error, crate::db::now_unix() + delay, episode],
         )?;
         Ok(())
@@ -381,7 +389,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         if !matches!(parsed.scheme(), "https" | "http") {
             return Err(failure("unsupported audio URL"));
         }
-        download_source(backend, url, source)?;
+        download_source_with_progress(backend, url, source, |done, total| progress(backend, id, done, total))?;
     }
     let (source_hash, _) = ArtifactStore::hash_file(source).map_err(failure)?;
     let transcript_file = work.join(format!("transcript-{source_hash}.json"));
@@ -391,10 +399,22 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         stage(backend, id, "transcribing")?;
         let _whisper_permit = crate::omlx_lock::prepare_whisper(MODEL)?;
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
+        // Match transcribe.py's source clock, including container padding.
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
+            .arg(source).output().map_err(failure)?;
+        let duration = String::from_utf8_lossy(&probe.stdout).trim().parse::<f64>().map_err(failure)?;
+        if !probe.status.success() || !duration.is_finite() || duration <= 0.0 {
+            return Err(failure("invalid transcription duration"));
+        }
+        let checkpoints = work.join(format!("words-{source_hash}-49e6aa286ad60c14352c404340ded53710378a11"));
         let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
         let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
             .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
-        run_whisper_child(&python, &script, source, &transcript_file)?;
+        run_whisper_child_with_progress(&python, &script, source, &transcript_file, || {
+            let (done, total) = transcription_progress(&checkpoints, duration);
+            progress(backend, id, done, total)
+        })?;
     }
     let read_transcript = || {
         let segments: Vec<Segment> =
@@ -424,6 +444,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         })?
     } else {
         stage(backend, id, "classifying")?;
+        progress(backend, id, 0, segments.len() as u64)?;
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
         let permit =
             crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
@@ -443,6 +464,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
                 batch
             };
             labels.extend(batch);
+            progress(backend, id, end as u64, segments.len() as u64)?;
         }
         drop(permit);
         atomic_json(&labels_file, &labels)?;
@@ -613,7 +635,23 @@ fn kill_registered_whisper_group() {
     }
 }
 
+fn transcription_progress(checkpoints: &Path, duration: f64) -> (u64, u64) {
+    let mut seconds = 0.0;
+    for start in (0..duration.ceil() as u64).step_by(180) {
+        if fs::read(checkpoints.join(format!("{start}.json"))).ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok()).is_some() {
+            seconds += (duration - start as f64).min(180.0);
+        }
+    }
+    ((seconds * 1000.0).round() as u64, (duration * 1000.0).round() as u64)
+}
+
+#[cfg(test)]
 fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> Result<(), Error> {
+    run_whisper_child_with_progress(python, script, source, dest, || Ok(()))
+}
+
+fn run_whisper_child_with_progress(python: &str, script: &str, source: &Path, dest: &Path, mut report: impl FnMut() -> Result<(), Error>) -> Result<(), Error> {
     #[cfg(test)]
     let _whisper_test_lock = WHISPER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[cfg(unix)]
@@ -635,6 +673,10 @@ fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> 
         }
         let _clear = ClearPgid(pgid);
         loop {
+            if let Err(error) = report() {
+                preempt_process_group(&mut child);
+                return Err(error);
+            }
             match child.try_wait().map_err(failure)? {
                 Some(status) if status.success() => return Ok(()),
                 Some(_) => return Err(failure("local transcription failed")),
@@ -683,7 +725,12 @@ fn preempt_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+#[cfg(test)]
 fn download_source(backend: &Backend, url: &str, source: &Path) -> Result<(), Error> {
+    download_source_with_progress(backend, url, source, |_, _| Ok(()))
+}
+
+fn download_source_with_progress(backend: &Backend, url: &str, source: &Path, mut report: impl FnMut(u64, u64) -> Result<(), Error>) -> Result<(), Error> {
     let partial = source.with_extension("part");
     let metadata = source.with_extension("download.json");
     let prior: Value = fs::read(&metadata)
@@ -769,6 +816,9 @@ fn download_source(backend: &Backend, url: &str, source: &Path) -> Result<(), Er
     )?;
     let mut input = response.into_reader();
     let mut received = 0u64;
+    let base = if resumed { offset } else { 0 };
+    if let Some(length) = length { report(base, base + length)?; }
+    let mut last_report = Instant::now();
     let mut buffer = [0u8; 65536];
     loop {
         let count = input
@@ -782,12 +832,17 @@ fn download_source(backend: &Backend, url: &str, source: &Path) -> Result<(), Er
             return Err(failure("audio exceeds storage limit"));
         }
         output.write_all(&buffer[..count]).map_err(failure)?;
+        if last_report.elapsed() >= Duration::from_secs(1) {
+            if let Some(length) = length { report(base + received, base + length)?; }
+            last_report = Instant::now();
+        }
     }
     output.sync_all().map_err(failure)?;
     if received == 0 || length.is_some_and(|n| n != received) {
         return Err(failure("incomplete audio download"));
     }
-    fs::rename(partial, source).map_err(failure)
+    fs::rename(partial, source).map_err(failure)?;
+    report(base + received, base + received)
 }
 
 pub fn validate_segments(segments: &[Segment]) -> Result<(), Error> {
@@ -1587,6 +1642,53 @@ fn distributed_chapters(chapters: Vec<Value>) -> Vec<Value> {
 #[cfg(test)]
 mod download_tests {
     use super::*;
+
+    #[test]
+    fn download_progress_reports_only_known_totals() {
+        let (backend, temp) = local_job_backend();
+        for known in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                stream.read(&mut request).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\n{}Connection: close\r\n\r\naudio", if known { "Content-Length: 5\r\n" } else { "" }).unwrap();
+            });
+            let mut reports = Vec::new();
+            download_source_with_progress(&backend, &format!("http://{address}/audio"), &temp.path().join(format!("{known}.audio")), |done, total| {
+                reports.push((done,total)); Ok(())
+            }).unwrap();
+            server.join().unwrap();
+            assert_eq!(reports, if known { vec![(0,5),(5,5)] } else { vec![(5,5)] });
+        }
+    }
+
+    #[test]
+    fn progress_is_cleared_when_stage_changes() {
+        let (backend, _temp) = local_job_backend();
+        backend.db.execute("INSERT INTO browser_jobs(episode_id,stage) VALUES(1,'transcribing')", []).unwrap();
+        progress(&backend, 1, 180, 200).unwrap();
+        assert_eq!(backend.db.scalar_i64("SELECT completed_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), Some(180));
+        stage(&backend, 1, "classifying").unwrap();
+        assert_eq!(backend.db.scalar_i64("SELECT completed_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), None);
+        assert_eq!(backend.db.scalar_i64("SELECT total_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), None);
+    }
+
+    #[test]
+    fn transcription_progress_counts_durable_core_seconds() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(transcription_progress(temp.path(), 400.5), (0, 400500));
+        atomic_json(&temp.path().join("0.json"), &json!([])).unwrap();
+        atomic_json(&temp.path().join("360.json"), &json!([])).unwrap();
+        atomic_json(&temp.path().join("180.tmp"), &json!([])).unwrap();
+        atomic_json(&temp.path().join("540.json"), &json!([])).unwrap();
+        assert_eq!(transcription_progress(temp.path(), 400.5), (220500, 400500));
+        fs::write(temp.path().join("180.json"), b"broken").unwrap();
+        assert_eq!(transcription_progress(temp.path(), 400.5), (220500, 400500));
+        atomic_json(&temp.path().join("180.json"), &json!([])).unwrap();
+        assert_eq!(transcription_progress(temp.path(), 400.5), (400500, 400500));
+    }
     use std::{
         io::{Read, Write},
         net::TcpListener,

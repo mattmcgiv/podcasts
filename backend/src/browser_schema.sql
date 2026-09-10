@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS browser_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     next_retry_at INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    priority INTEGER NOT NULL DEFAULT 0
+    priority INTEGER NOT NULL DEFAULT 0,
+    completed_units INTEGER,
+    total_units INTEGER
 );
 CREATE TABLE IF NOT EXISTS browser_operations (
     operation_id TEXT PRIMARY KEY,

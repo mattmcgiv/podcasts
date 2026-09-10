@@ -58,6 +58,11 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertEqual(items[1].attentionLabel, "invalid audio")
         XCTAssertNil(items[0].progress)
         XCTAssertEqual(try Data(contentsOf: url), before)
+        XCTAssertEqual(sqlite3_open(url.path, &database), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "ALTER TABLE browser_jobs ADD COLUMN completed_units INTEGER; ALTER TABLE browser_jobs ADD COLUMN total_units INTEGER; UPDATE browser_jobs SET completed_units=180000,total_units=240000 WHERE episode_id=1;", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        let migrated = try PipelineRepository(databaseURL: url).snapshot()
+        XCTAssertEqual(migrated[0].progress, 0.75)
     }
 
     func testPipelineRepositoryDoesNotCreateMissingDatabase() {
