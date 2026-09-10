@@ -7,8 +7,8 @@ struct PodsSpeakerApp: App {
     @StateObject private var bootstrap = SpeakerBootstrap()
 
     var body: some Scene {
-        MenuBarExtra("Pods Speaker", systemImage: "hifispeaker.fill") {
-            SpeakerMenu(player: bootstrap.player, server: bootstrap.server)
+        MenuBarExtra("Pods Pipeline", systemImage: "waveform") {
+            PipelineMenu(player: bootstrap.player, server: bootstrap.server)
         }
         .menuBarExtraStyle(.window)
     }

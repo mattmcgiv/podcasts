@@ -389,6 +389,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     if !cached_transcript {
         require_capacity(backend, 32 * 1024 * 1024)?;
         stage(backend, id, "transcribing")?;
+        let _whisper_permit = crate::omlx_lock::prepare_whisper(MODEL)?;
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
         let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
         let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
@@ -426,6 +427,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
         let permit =
             crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
+        crate::omlx_lock::load_for_classification(&permit, MODEL)?;
         let mut labels = Vec::new();
         for start in (0..segments.len()).step_by(WINDOW_CORE) {
             let end = (start + WINDOW_CORE).min(segments.len());
@@ -1996,7 +1998,9 @@ mod download_tests {
         }
     }
 
-    fn start_mock_omlx(status: Value, post_delay: Duration) -> MockOmlx {
+    fn start_mock_omlx(mut status: Value, post_delay: Duration) -> MockOmlx {
+        status["models_loading"] = json!(0);
+        status["loaded_models"] = json!([]);
         let posts = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2046,7 +2050,9 @@ mod download_tests {
                 }
                 let body =
                     String::from_utf8_lossy(&buffer[header_end.min(buffer.len())..]).into_owned();
-                let payload = if header.starts_with("POST") {
+                let payload = if header.starts_with("POST /v1/models/") {
+                    json!({"status":"ok","model_id":MODEL}).to_string()
+                } else if header.starts_with("POST") {
                     posts_clone.fetch_add(1, Ordering::SeqCst);
                     thread::sleep(post_delay);
                     let content = mock_model_content(&body);
@@ -2312,14 +2318,19 @@ mod download_tests {
             .execute(
                 "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
                 [],
-            )
-            .unwrap();
+        )
+        .unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::ZERO,
+        );
         crate::omlx_lock::with_test_lock_env(
             lock_dir.path(),
             crate::omlx_lock::Occupancy::idle(),
             true,
             || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
                 crate::memory_gate::with_test_memory(
                     crate::memory_gate::TestMemory {
                         snapshot: memory_snapshot(

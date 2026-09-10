@@ -41,6 +41,7 @@ pub const METADATA_FILE_NAME: &str = "mac-inference.json";
 pub const OWNER_PODS: &str = "pods";
 pub const PURPOSE_CLASSIFICATION: &str = "classification";
 pub const PURPOSE_SHOW_NOTES: &str = "show_notes";
+pub const PURPOSE_WHISPER: &str = "speech_to_text";
 pub const DEFAULT_CHAT_URL: &str = "http://127.0.0.1:8000/v1/chat/completions";
 
 const BUSY_RETRY_MIN_SECS: i64 = 30;
@@ -220,6 +221,75 @@ pub fn acquire_pods(purpose: &str, model: &str) -> Result<InferencePermit, Error
     try_acquire(&paths, &claim, probe_occupancy).map_err(Error::from)
 }
 
+/// Keep cooperating inference clients out until the Whisper child exits.
+/// Only unload Pods' model; the shared oMLX server remains running.
+pub fn prepare_whisper(model: &str) -> Result<InferencePermit, Error> {
+    let paths = LockPaths::configured()?;
+    let claim = LockClaim::new(OWNER_PODS, PURPOSE_WHISPER, model)?;
+    // Claim the file lock before probing. A stopped server is safe for
+    // Whisper, but classification's acquire deliberately requires a server.
+    let permit = try_acquire(&paths, &claim, || Ok(Occupancy::idle()))?;
+    // A disabled advisory lock is insufficient authority to unload shared state.
+    if permit.is_disabled() {
+        return Err(LockError::Busy.into());
+    }
+    let Some(status) = read_omlx_status_or_stopped()? else {
+        return Ok(permit);
+    };
+    if model_loaded_idle_from_status(model, &status)? {
+        model_transition(&permit, model, "unload")?;
+        if model_loaded_idle(model)? {
+            return Err(LockError::Busy.into());
+        }
+    }
+    Ok(permit)
+}
+
+pub fn load_for_classification(permit: &InferencePermit, model: &str) -> Result<(), Error> {
+    if permit.purpose() != PURPOSE_CLASSIFICATION {
+        return Err(LockError::Busy.into());
+    }
+    model_transition(permit, model, "load")
+}
+
+fn model_loaded_idle(model: &str) -> Result<bool, Error> {
+    let status = read_omlx_status()?;
+    model_loaded_idle_from_status(model, &status)
+}
+
+fn model_loaded_idle_from_status(model: &str, status: &Value) -> Result<bool, Error> {
+    if occupancy_from_status(&status)?.is_busy()
+        || status["models_loading"].as_u64() != Some(0)
+    {
+        return Err(LockError::Busy.into());
+    }
+    let models = status["loaded_models"].as_array().ok_or(LockError::Busy)?;
+    if models.iter().any(|value| !value.is_string()) {
+        return Err(LockError::Busy.into());
+    }
+    Ok(models.iter().any(|value| value.as_str() == Some(model)))
+}
+
+fn model_transition(_permit: &InferencePermit, model: &str, action: &str) -> Result<(), Error> {
+    validate_metadata_token("model", model)?;
+    let endpoint = url::Url::parse(&configured_chat_url()?)
+        .map_err(|_| LockError::Busy)?
+        .join(&format!("/v1/models/{model}/{action}"))
+        .map_err(|_| LockError::Busy)?;
+    let key = configured_api_key()?;
+    let response = ureq::post(endpoint.as_str())
+        .set("Authorization", &format!("Bearer {key}"))
+        .timeout(Duration::from_secs(180))
+        .call()
+        .map_err(|_| LockError::Busy)?;
+    let status: Value = serde_json::from_str(&response.into_string().map_err(|_| LockError::Busy)?)
+        .map_err(|_| LockError::Busy)?;
+    if status["status"] != "ok" || status["model_id"] != model {
+        return Err(LockError::Busy.into());
+    }
+    Ok(())
+}
+
 pub fn try_acquire(
     paths: &LockPaths,
     claim: &LockClaim,
@@ -385,16 +455,38 @@ fn probe_occupancy() -> Result<Occupancy, LockError> {
 }
 
 fn read_omlx_occupancy() -> Result<Occupancy, LockError> {
+    occupancy_from_status(&read_omlx_status()?)
+}
+
+fn read_omlx_status() -> Result<Value, LockError> {
+    read_omlx_status_or_stopped()?.ok_or(LockError::Busy)
+}
+
+fn read_omlx_status_or_stopped() -> Result<Option<Value>, LockError> {
     let url = configured_status_url().map_err(|_| LockError::Busy)?;
     let key = configured_api_key().map_err(|_| LockError::Busy)?;
-    let response = ureq::get(&url)
+    let response = match ureq::get(&url)
         .set("Authorization", &format!("Bearer {key}"))
         .timeout(Duration::from_secs(5))
-        .call()
-        .map_err(|_| LockError::Busy)?;
+        .call() {
+            Ok(response) => response,
+            Err(error) => {
+                // Only a refused connection establishes that no listener is
+                // available. Timeouts, HTTP failures and bad JSON fail closed.
+                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+                while let Some(cause) = source {
+                    if cause.downcast_ref::<io::Error>()
+                        .is_some_and(|e| e.kind() == io::ErrorKind::ConnectionRefused) {
+                        return Ok(None);
+                    }
+                    source = cause.source();
+                }
+                return Err(LockError::Busy);
+            }
+        };
     let raw: Value = serde_json::from_str(&response.into_string().map_err(|_| LockError::Busy)?)
         .map_err(|_| LockError::Busy)?;
-    occupancy_from_status(&raw)
+    Ok(Some(raw))
 }
 
 pub fn occupancy_from_status(raw: &Value) -> Result<Occupancy, LockError> {
@@ -633,6 +725,160 @@ mod tests {
             "DeepSeek-V4-Flash-0731-2.4bit-mixed",
         )
         .unwrap()
+    }
+
+    // Each response is paired with its expected request, including a second
+    // status read after unload: an HTTP success alone does not prove release.
+    fn lifecycle_server(replies: Vec<(&'static str, Value)>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            for (expected, body) in replies {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    if let Ok((stream, _)) = listener.accept() {
+                        break stream;
+                    }
+                    assert!(Instant::now() < deadline, "missing {expected}");
+                    thread::sleep(Duration::from_millis(5));
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                assert!(request.starts_with(expected), "{request}");
+                assert!(request.contains("Authorization: Bearer test-key"));
+                let payload = body.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+            }
+        });
+        (format!("http://{address}/v1/chat/completions"), worker)
+    }
+
+    fn lifecycle_status(loaded: bool) -> Value {
+        json!({"active_requests":0,"waiting_requests":0,"models_loading":0,
+            "loaded_models": if loaded { vec!["model", "other"] } else { vec!["other"] }})
+    }
+
+    #[test]
+    fn whisper_unloads_holds_lock_then_classification_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", lifecycle_status(true)),
+            ("POST /v1/models/model/unload ", json!({"status":"ok","model_id":"model"})),
+            ("GET /api/status ", lifecycle_status(false)),
+            ("POST /v1/models/model/load ", json!({"status":"ok","model_id":"model"})),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            let paths = LockPaths::in_dir(dir.path());
+            {
+                let whisper = prepare_whisper("model").unwrap();
+                assert_eq!(whisper.purpose(), PURPOSE_WHISPER);
+                assert!(!lock_available(&paths));
+                assert!(acquire_pods(PURPOSE_CLASSIFICATION, "model").is_err());
+                // A bounded child represents Whisper; no model can be loaded
+                // by a cooperating caller until it has exited and we drop.
+                assert!(Command::new("/usr/bin/true").status().unwrap().success());
+            }
+            assert!(lock_available(&paths));
+            let classification = acquire_pods(PURPOSE_CLASSIFICATION, "model").unwrap();
+            load_for_classification(&classification, "model").unwrap();
+            drop(classification);
+            assert!(lock_available(&paths));
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn whisper_transition_failure_releases_permit() {
+        for response in [json!({"status":"error"}), json!({"status":"ok","model_id":"model"})] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut replies = vec![
+                ("GET /api/status ", lifecycle_status(true)),
+                ("POST /v1/models/model/unload ", response.clone()),
+            ];
+            if response["status"] == "ok" {
+                replies.push(("GET /api/status ", lifecycle_status(true)));
+            }
+            let (url, server) = lifecycle_server(replies);
+            with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+                set_test_omlx_endpoint(url, "test-key");
+                assert!(is_busy_error(&prepare_whisper("model").unwrap_err()));
+                assert!(lock_available(&LockPaths::in_dir(dir.path())));
+                assert!(!LockPaths::in_dir(dir.path()).metadata.exists());
+            });
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn whisper_busy_loading_unknown_and_disabled_never_unload() {
+        for status in [
+            json!({"active_requests":1,"waiting_requests":0,"models_loading":0,"loaded_models":["model"]}),
+            json!({"active_requests":0,"waiting_requests":1,"models_loading":0,"loaded_models":["model"]}),
+            json!({"active_requests":0,"waiting_requests":0,"models_loading":1,"loaded_models":["model"]}),
+            json!({"active_requests":0,"waiting_requests":0}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (url, server) = lifecycle_server(vec![("GET /api/status ", status)]);
+            with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+                set_test_omlx_endpoint(url, "test-key");
+                assert!(prepare_whisper("model").is_err());
+                assert!(lock_available(&LockPaths::in_dir(dir.path())));
+            });
+            server.join().unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        with_test_lock_env(dir.path(), Occupancy::idle(), false, || {
+            assert!(prepare_whisper("model").is_err());
+        });
+    }
+
+    #[test]
+    fn already_unloaded_whisper_failure_releases_without_reloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, server) = lifecycle_server(vec![("GET /api/status ", lifecycle_status(false))]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            let result = (|| -> Result<(), Error> {
+                let _permit = prepare_whisper("model")?;
+                Err(Error::Upstream("Whisper failed".into()))
+            })();
+            assert!(result.is_err());
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn unavailable_server_and_failed_load_release_on_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+        drop(listener);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            let permit = prepare_whisper("model").unwrap();
+            assert!(!lock_available(&LockPaths::in_dir(dir.path())));
+            assert!(acquire_pods(PURPOSE_CLASSIFICATION, "model").is_err());
+            drop(permit);
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        let (url, server) = lifecycle_server(vec![(
+            "POST /v1/models/model/load ", json!({"status":"error"}),
+        )]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            let result = (|| -> Result<(), Error> {
+                let permit = acquire_pods(PURPOSE_CLASSIFICATION, "model")?;
+                load_for_classification(&permit, "model")
+            })();
+            assert!(result.is_err());
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        server.join().unwrap();
     }
 
     fn notes_claim() -> LockClaim {
