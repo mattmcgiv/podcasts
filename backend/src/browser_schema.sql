@@ -19,9 +19,10 @@ CREATE TABLE IF NOT EXISTS browser_operations (
     client_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
     payload TEXT NOT NULL,
-    result TEXT NOT NULL,
-    UNIQUE(client_id, sequence)
+    result TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_browser_operations_client_sequence
+    ON browser_operations(client_id, sequence);
 CREATE TABLE IF NOT EXISTS browser_field_versions (
     entity TEXT NOT NULL,
     field TEXT NOT NULL,

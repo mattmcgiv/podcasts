@@ -171,12 +171,15 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
     Err(Error::NotFound)
 }
 
+/// Client-visible publications require finished show notes.
+const NOTES_READY_SQL: &str = "json_array_length(b.notes_json) > 0";
+
 pub fn publication(backend: &Backend, id: i64) -> Result<(Manifest, Value), Error> {
     let conn = backend.db.lock()?;
     let pair: Option<(String, String)> = conn.query_row(
-        "SELECT b.manifest_json,b.notes_json FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
+        &format!("SELECT b.manifest_json,b.notes_json FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
          JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
-         WHERE b.episode_id=? AND (p.is_subscribed=1 OR s.played_at IS NOT NULL OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))",
+         WHERE b.episode_id=? AND {NOTES_READY_SQL} AND (p.is_subscribed=1 OR s.played_at IS NOT NULL OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))"),
         [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
     let (manifest, notes) = pair.ok_or(Error::NotFound)?;
     Ok((
@@ -220,15 +223,23 @@ fn persisted_refresh_status(conn: &rusqlite::Connection) -> Result<Value, Error>
 pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     let (ids, shows, settings, versions, revision, refresh_status) = {
         let conn = backend.db.lock()?;
-        let ids = conn.prepare("SELECT b.episode_id FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
+        let ids = conn.prepare(&format!("SELECT b.episode_id FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
             JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
-            WHERE p.is_subscribed=1 OR s.played_at IS NOT NULL OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id)
-            ORDER BY e.published_at,e.id")?.query_map([], |r| r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
+            WHERE {NOTES_READY_SQL} AND (p.is_subscribed=1 OR s.played_at IS NOT NULL OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))
+            ORDER BY e.published_at,e.id"))?.query_map([], |r| r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?;
+        // One catalog scan. Correlated COUNT(*) per show walks ~20k rows per subscribed podcast.
         let shows = conn.prepare("SELECT p.id,p.feed_url,p.title,p.description,p.image_url,p.site_url,
-            (SELECT COUNT(*) FROM browser_episode_catalog e WHERE e.podcast_id=p.id),
-            (SELECT COUNT(*) FROM browser_episode_catalog e LEFT JOIN episode_state s ON s.episode_id=e.id WHERE e.podcast_id=p.id AND s.played_at IS NULL AND s.archived_at IS NULL),
-            (SELECT COUNT(*) FROM browser_episode_catalog e JOIN browser_publications b ON b.episode_id=e.id LEFT JOIN episode_state s ON s.episode_id=e.id WHERE e.podcast_id=p.id AND s.played_at IS NULL AND s.archived_at IS NULL)
-            FROM podcasts p WHERE is_subscribed=1 ORDER BY title COLLATE NOCASE")?.query_map([], |r| Ok(json!({
+            COALESCE(c.episode_count,0), COALESCE(c.unplayed_count,0), COALESCE(c.ready_count,0)
+            FROM podcasts p LEFT JOIN (
+                SELECT e.podcast_id, COUNT(*) AS episode_count,
+                    SUM(CASE WHEN s.played_at IS NULL AND s.archived_at IS NULL THEN 1 ELSE 0 END) AS unplayed_count,
+                    SUM(CASE WHEN s.played_at IS NULL AND s.archived_at IS NULL AND b.episode_id IS NOT NULL AND json_array_length(b.notes_json) > 0 THEN 1 ELSE 0 END) AS ready_count
+                FROM browser_episode_catalog e
+                LEFT JOIN episode_state s ON s.episode_id=e.id
+                LEFT JOIN browser_publications b ON b.episode_id=e.id
+                GROUP BY e.podcast_id
+            ) c ON c.podcast_id=p.id
+            WHERE p.is_subscribed=1 ORDER BY title COLLATE NOCASE")?.query_map([], |r| Ok(json!({
                 "id":r.get::<_,i64>(0)?,"feed_url":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,
                 "description":r.get::<_,String>(3)?,"image_url":r.get::<_,String>(4)?,"site_url":r.get::<_,String>(5)?,
                 "episode_count":r.get::<_,i64>(6)?,"unplayed_count":r.get::<_,i64>(7)?,
@@ -280,7 +291,7 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
             LEFT JOIN episode_state s ON s.episode_id=e.id WHERE
             (p.is_subscribed=1 OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))
             AND s.played_at IS NULL AND s.archived_at IS NULL
-            AND NOT EXISTS(SELECT 1 FROM browser_publications b WHERE b.episode_id=e.id)
+            AND NOT EXISTS(SELECT 1 FROM browser_publications b WHERE b.episode_id=e.id AND json_array_length(b.notes_json) > 0)
             AND NOT EXISTS(SELECT 1 FROM browser_jobs j WHERE j.episode_id=e.id AND j.stage='blocked')",
             [],
         )?
@@ -334,6 +345,35 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     )
 }
 
+fn queue_browser_back_catalog_trim(tx: &rusqlite::Transaction, podcast_id: i64) -> Result<(), Error> {
+    let mut ids: Vec<i64> = crate::db::setting(tx, "browser_trim_podcast_ids")?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if !ids.contains(&podcast_id) {
+        ids.push(podcast_id);
+    }
+    crate::db::set_setting(
+        tx,
+        "browser_trim_podcast_ids",
+        &serde_json::to_string(&ids).map_err(|e| Error::Invalid(e.to_string()))?,
+    )
+}
+
+fn action_core(action: &Value) -> Value {
+    json!({
+        "id": action.get("id").cloned().unwrap_or(Value::Null),
+        "sequence": action.get("sequence").cloned().unwrap_or(Value::Null),
+        "entity": action.get("entity").cloned().unwrap_or(Value::Null),
+        "field": action.get("field").cloned().unwrap_or(Value::Null),
+        "value": action.get("value").cloned().unwrap_or(Value::Null),
+        "base_revision": action.get("base_revision").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn same_action(stored: &str, action: &Value) -> bool {
+    serde_json::from_str::<Value>(stored).is_ok_and(|original| action_core(&original) == action_core(action))
+}
+
 pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> {
     let client = payload["client_id"]
         .as_str()
@@ -349,10 +389,10 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             let id = action["id"].as_str().filter(|s| !s.is_empty() && s.len()<=128).ok_or_else(||Error::Invalid("operation id required".into()))?;
             let sequence = action["sequence"].as_i64().filter(|v|*v>0).ok_or_else(||Error::Invalid("sequence required".into()))?;
             let raw = action.to_string();
-            let previous: Option<(String,String,String)> = tx.query_row("SELECT client_id,payload,result FROM browser_operations WHERE operation_id=? OR (client_id=? AND sequence=?)",
-                params![id,client,sequence], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            let previous: Option<(String,String,String)> = tx.query_row("SELECT client_id,payload,result FROM browser_operations WHERE operation_id=?",
+                params![id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             if let Some((owner,original,result)) = previous {
-                if owner != client || original != raw { return Err(Error::Conflict("operation identity reused".into())); }
+                if owner != client || !same_action(&original, action) { return Err(Error::Conflict("operation identity reused".into())); }
                 results.push(serde_json::from_str::<Value>(&result).map_err(|_|Error::Invalid("invalid stored operation".into()))?);
                 continue;
             }
@@ -360,9 +400,8 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             let field = action["field"].as_str().ok_or_else(||Error::Invalid("field required".into()))?;
             let base = action["base_revision"].as_i64().ok_or_else(||Error::Invalid("base_revision required".into()))?;
             let revision: i64 = tx.query_row("SELECT revision FROM browser_field_versions WHERE entity=? AND field=?",params![entity,field],|r|r.get(0)).optional()?.unwrap_or(0);
-            let result = if revision != base {
-                json!({"id":id,"status":"conflict","revision":revision})
-            } else {
+            let mut stale = revision != base;
+            if !stale {
                 let value = &action["value"];
                 if entity == "settings" {
                     let mut settings=crate::db::setting(tx,"browser_settings")?.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!({}));
@@ -379,22 +418,34 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                     tx.execute("INSERT INTO podcasts(feed_url,title,created_at,is_subscribed) VALUES(?,?,?,?) ON CONFLICT(feed_url) DO UPDATE SET is_subscribed=excluded.is_subscribed",
                         params![field,url.host_str().unwrap(),crate::db::now_unix(),subscribed])?;
                     crate::db::set_setting(tx,"browser_refresh_requested","true")?;
+                    if subscribed {
+                        let podcast_id: i64 = tx.query_row("SELECT id FROM podcasts WHERE feed_url=?", [field], |r| r.get(0))?;
+                        queue_browser_back_catalog_trim(tx, podcast_id)?;
+                        crate::jobs::JobStore::archive_except_newest_two(tx, podcast_id)?;
+                    }
                 } else {
                     let episode: i64 = entity.parse().map_err(|_|Error::Invalid("invalid episode".into()))?;
-                    let manifest_json: String = tx.query_row("SELECT manifest_json FROM browser_publications WHERE episode_id=?",[episode],|r|r.get(0)).optional()?.ok_or(Error::NotFound)?;
+                    if let Some(manifest_json) = tx.query_row("SELECT manifest_json FROM browser_publications WHERE episode_id=?",[episode],|r|r.get::<_,String>(0)).optional()? {
                     let manifest: Manifest = serde_json::from_str(&manifest_json).map_err(|_|Error::Invalid("invalid manifest".into()))?;
                     tx.execute("INSERT OR IGNORE INTO episode_state(episode_id,updated_at) VALUES(?,?)",params![episode,crate::db::now_unix()])?;
                     match field {
                         "position" => {
                             let seconds = value["seconds"].as_f64().filter(|s|s.is_finite()&&*s>=0.0).ok_or_else(||Error::Invalid("invalid position".into()))?;
                             // Positions carry their artifact's original timeline so reprocessing cannot reinterpret old seconds.
-                            let position_manifest = if value["artifact_hash"].as_str()==Some(manifest.hash.as_str()) { manifest.clone() } else {
-                                let old: String = tx.query_row("SELECT manifest_json FROM browser_artifacts WHERE episode_id=? AND hash=?",params![episode,value["artifact_hash"].as_str().unwrap_or("")],|r|r.get(0)).optional()?.ok_or_else(||Error::Conflict("unknown playback artifact".into()))?;
-                                let old: Manifest = serde_json::from_str(&old).map_err(|_|Error::Invalid("invalid playback artifact".into()))?;
-                                if old.source_hash!=manifest.source_hash {return Err(Error::Conflict("source audio changed".into()));}
-                                old
+                            let position_manifest = if value["artifact_hash"].as_str()==Some(manifest.hash.as_str()) { Some(manifest.clone()) } else {
+                                match tx.query_row("SELECT manifest_json FROM browser_artifacts WHERE episode_id=? AND hash=?",params![episode,value["artifact_hash"].as_str().unwrap_or("")],|r|r.get::<_,String>(0)).optional()? {
+                                    Some(old) => {
+                                        let old: Manifest = serde_json::from_str(&old).map_err(|_|Error::Invalid("invalid playback artifact".into()))?;
+                                        if old.source_hash==manifest.source_hash { Some(old) } else { None }
+                                    }
+                                    None => None,
+                                }
                             };
-                            tx.execute("UPDATE episode_state SET position_secs=?,updated_at=? WHERE episode_id=?",params![original_time(&position_manifest.timeline,seconds),crate::db::now_unix(),episode])?;
+                            if let Some(position_manifest) = position_manifest {
+                                tx.execute("UPDATE episode_state SET position_secs=?,updated_at=? WHERE episode_id=?",params![original_time(&position_manifest.timeline,seconds),crate::db::now_unix(),episode])?;
+                            } else {
+                                stale = true;
+                            }
                         }
                         "played" => {
                             let played = value.as_bool().ok_or_else(||Error::Invalid("invalid played value".into()))?;
@@ -402,7 +453,14 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                         }
                         _ => return Err(Error::Invalid("unsupported field".into())),
                     }
+                    } else {
+                        stale = true;
+                    }
                 }
+            }
+            let result = if stale {
+                json!({"id":id,"status":"conflict","revision":revision})
+            } else {
                 tx.execute("UPDATE browser_clock SET revision=revision+1",[])?;
                 let next: i64 = tx.query_row("SELECT revision FROM browser_clock",[],|r|r.get(0))?;
                 tx.execute("INSERT INTO browser_field_versions VALUES(?,?,?) ON CONFLICT(entity,field) DO UPDATE SET revision=excluded.revision",params![entity,field,next])?;

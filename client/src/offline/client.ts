@@ -28,16 +28,32 @@ export async function clearNotifications(throughId: number): Promise<void> {
 export async function hasLocalLibrary(): Promise<boolean> { return (await state()).snapshot != null; }
 
 const NETWORK_TIMEOUT_MS = 15_000;
+const SYNC_TIMEOUT_MS = 120_000;
 const REFRESH_TIMEOUT_MS = 120_000;
+const ACTION_BATCH = 100;
 
 export async function network<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set("content-type", "application/json");
-  const response = await fetch(`${backendBase()}/api${path}`, { ...init, headers, credentials: "include",
-    signal: init.signal ?? AbortSignal.timeout(NETWORK_TIMEOUT_MS) });
+  const timeoutMs = path === "/sync" || path.startsWith("/sync/") ? SYNC_TIMEOUT_MS : NETWORK_TIMEOUT_MS;
+  let response: Response;
+  try {
+    response = await fetch(`${backendBase()}/api${path}`, { ...init, headers, credentials: "include",
+      signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Error("Mac did not answer in time. Keep Pods open on the same Wi-Fi.");
+    }
+    throw error;
+  }
   if (!response.ok) {
     if (response.status === 401) window.dispatchEvent(new Event("pods-auth-required"));
-    throw new Error(response.status === 401 ? "Sign in when the Mac is available to synchronize." : `Mac request failed (${response.status}).`);
+    let detail = "";
+    try {
+      const body = await response.json() as { error?: string };
+      if (body.error) detail = `: ${body.error}`;
+    } catch { /* Status is enough when the Mac omits a body. */ }
+    throw new Error(response.status === 401 ? "Sign in when the Mac is available to synchronize." : `Mac request failed (${response.status})${detail}.`);
   }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
@@ -69,6 +85,34 @@ export function applyOverlay(snapshot: Snapshot, outbox: Operation[]): Snapshot 
   return copy;
 }
 
+function coalesceOutbox(outbox: Operation[]): Operation[] {
+  const last = new Map<string, Operation>();
+  for (const operation of outbox) {
+    if (operation.conflict != null) continue;
+    last.set(`${operation.entity}:${operation.field}`, operation);
+  }
+  return outbox.filter(operation => operation.conflict != null || last.get(`${operation.entity}:${operation.field}`) === operation);
+}
+
+type SyncAction = { id: string; sequence: number; entity: string; field: string; value: unknown; base_revision: number };
+type ActionResult = { id: string; status: string; revision: number };
+
+async function postActions(clientId: string, actions: SyncAction[]): Promise<ActionResult[]> {
+  if (actions.length === 0) return [];
+  try {
+    const response = await network<{ results: ActionResult[] }>("/sync/actions", {
+      method: "POST", body: JSON.stringify({ client_id: clientId, actions }) });
+    return response.results;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!message.includes("(409)")) throw error;
+    if (actions.length === 1) return [];
+    const results: ActionResult[] = [];
+    for (const action of actions) results.push(...await postActions(clientId, [action]));
+    return results;
+  }
+}
+
 export async function enqueue(entity: string, field: string, value: unknown): Promise<void> {
   await updateState(s => {
     s.outbox.push({ id: crypto.randomUUID(), sequence: ++s.sequence, entity, field, value,
@@ -91,32 +135,41 @@ async function synchronizeOnce(): Promise<void> {
     const snapshot = await network<Snapshot>("/sync");
     validateSnapshot(snapshot);
     await updateState(s => { s.snapshot = adoptSnapshot(s.snapshot, snapshot); });
+    await updateState(s => { s.outbox = coalesceOutbox(s.outbox); });
+    window.dispatchEvent(new Event("pods-offline-changed"));
     const initial = await state();
-    for (const scheduled of initial.outbox) {
+    const queued = initial.outbox.filter(o => o.conflict == null);
+    for (let offset = 0; offset < queued.length; offset += ACTION_BATCH) {
       const current = await state();
-      const operation = current.outbox.find(o => o.id === scheduled.id);
-      if (!operation) continue;
-      if (operation.conflict != null) continue;
-      const response = await network<{ results: { id: string; status: string; revision: number }[] }>("/sync/actions", {
-        method: "POST", body: JSON.stringify({ client_id: current.client_id, actions: [operation] }) });
-      const result = response.results.find(r => r.id === operation.id);
-      if (!result) throw new Error("Mac did not acknowledge an operation.");
-      await updateState(s => {
-        if (result.status === "applied") {
-          // Include the acknowledged change in the snapshot before removing its optimistic overlay.
-          if (s.snapshot) {
-            s.snapshot = applyOverlay(s.snapshot, [operation]);
-            s.snapshot.versions[`${operation.entity}:${operation.field}`] = result.revision;
-          }
-          s.outbox = s.outbox.filter(o => o.id !== operation.id);
-          for (const queued of s.outbox) {
-            if (queued.entity === operation.entity && queued.field === operation.field && queued.conflict == null) queued.base_revision = result.revision;
-          }
-        } else {
-          const pending = s.outbox.find(o => o.id === operation.id);
-          if (pending) pending.conflict = result.revision;
+      const chunk = queued.slice(offset, offset + ACTION_BATCH).map(scheduled => current.outbox.find(o => o.id === scheduled.id))
+        .filter((operation): operation is Operation => operation != null && operation.conflict == null);
+      if (chunk.length === 0) continue;
+      const actions = chunk.map(operation => ({ id: operation.id, sequence: operation.sequence, entity: operation.entity,
+        field: operation.field, value: operation.value, base_revision: operation.base_revision }));
+      const results = await postActions(current.client_id, actions);
+      for (const operation of chunk) {
+        const result = results.find(r => r.id === operation.id);
+        if (!result) {
+          await updateState(s => { s.outbox = s.outbox.filter(o => o.id !== operation.id); });
+          continue;
         }
-      });
+        await updateState(s => {
+          if (result.status === "applied") {
+            // Include the acknowledged change in the snapshot before removing its optimistic overlay.
+            if (s.snapshot) {
+              s.snapshot = applyOverlay(s.snapshot, [operation]);
+              s.snapshot.versions[`${operation.entity}:${operation.field}`] = result.revision;
+            }
+            s.outbox = s.outbox.filter(o => o.id !== operation.id);
+            for (const queuedOp of s.outbox) {
+              if (queuedOp.entity === operation.entity && queuedOp.field === operation.field && queuedOp.conflict == null) queuedOp.base_revision = result.revision;
+            }
+          } else {
+            const pending = s.outbox.find(o => o.id === operation.id);
+            if (pending) pending.conflict = result.revision;
+          }
+        });
+      }
     }
     const latest = await network<Snapshot>("/sync");
     validateSnapshot(latest);
@@ -252,7 +305,8 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     else result = { ...defaultSettings, ...snapshot.settings };
   } else if (route === "/refresh") {
     result = await network("/refresh", { method: "POST", signal: init.signal ?? AbortSignal.timeout(REFRESH_TIMEOUT_MS) });
-    await synchronize();
+    // Await the sync so the snapshot advances, but its conflicts surface via the conflict UI, not as the refresh result.
+    try { await synchronize(); } catch { /* refresh outcome already returned */ }
   }
   else if (route === "/refresh-status") result = cachedRefreshStatus(snapshot.refresh_status);
   else if (route === "/ad-removal/settings") result = { enabled: true, listen_requires_ready: true, classifier_available: true,

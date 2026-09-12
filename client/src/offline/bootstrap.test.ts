@@ -24,12 +24,28 @@ it("registers a module worker and synchronizes on reconnect/foreground", async (
   expect(downloads.sweepStaleDownloads).toHaveBeenCalled();
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   window.dispatchEvent(new Event("online")); window.dispatchEvent(new Event("pods-authenticated"));
+  window.dispatchEvent(new Event("pageshow")); window.dispatchEvent(new Event("focus"));
   await vi.advanceTimersByTimeAsync(60000);
-  expect(client.synchronize).toHaveBeenCalledTimes(count + 3);
+  expect(client.synchronize).toHaveBeenCalledTimes(count + 5);
 });
 it("skips deprecated native mode and fails clearly without service worker support", async () => {
   vi.mocked(client.offlineEnabled).mockReturnValue(false); await bootstrapOffline();
   vi.mocked(client.offlineEnabled).mockReturnValue(true);
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: undefined });
   await expect(bootstrapOffline()).rejects.toThrow("cannot store");
+});
+
+it("retries on a failed sync instead of waiting for the minute interval", async () => {
+  const register = vi.fn().mockResolvedValue({});
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
+  const persist = vi.fn().mockResolvedValue(true);
+  Object.defineProperty(navigator, "storage", { configurable: true, value: { persist } });
+  await bootstrapOffline();
+  const initial = vi.mocked(client.synchronize).mock.calls.length;
+  vi.mocked(client.synchronize).mockRejectedValue(new Error("Mac unavailable"));
+  window.dispatchEvent(new Event("online"));
+  const afterFail = vi.mocked(client.synchronize).mock.calls.length;
+  expect(afterFail).toBeGreaterThan(initial);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFail);
 });

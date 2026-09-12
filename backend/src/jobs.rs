@@ -454,6 +454,20 @@ impl<'a> JobStore<'a> {
         Ok(())
     }
 
+    /// Keep the two newest episodes visible. Archive the rest of a new subscribe.
+    pub fn archive_except_newest_two(conn: &Connection, podcast_id: i64) -> Result<(), rusqlite::Error> {
+        let ts = crate::db::now_unix();
+        conn.execute(
+            "INSERT INTO episode_state (episode_id, archived_at, updated_at) SELECT id, ?, ? FROM episodes WHERE podcast_id = ? ORDER BY published_at DESC, id DESC LIMIT -1 OFFSET 2 ON CONFLICT (episode_id) DO UPDATE SET archived_at = excluded.archived_at, updated_at = excluded.updated_at",
+            params![ts, ts, podcast_id],
+        )?;
+        conn.execute(
+            "DELETE FROM browser_jobs WHERE episode_id IN (SELECT e.id FROM episodes e JOIN episode_state s ON s.episode_id=e.id WHERE e.podcast_id=? AND s.archived_at IS NOT NULL)",
+            params![podcast_id],
+        )?;
+        Self::cleanup_archived_episode_metadata(conn, podcast_id)
+    }
+
     pub fn cancel(&self, job_id: &str) -> Result<Job, JobStoreError> {
         self.transition(job_id, JobStage::Cancelled)
     }

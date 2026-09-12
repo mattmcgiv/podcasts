@@ -243,7 +243,7 @@ def omlx_has_pending_inference(path):
         with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
             row = db.execute(
                 "SELECT 1 FROM browser_pending_jobs WHERE stage NOT IN ('blocked','review') "
-                "AND (error IS NULL OR error!='memory_busy') "
+                "AND (error IS NULL OR error NOT IN ('memory_busy','power_unplugged','power_status_unavailable')) "
                 "AND (stage IN ('classifying','ad_boundaries','show_notes') OR error='omlx_busy') LIMIT 1"
             ).fetchone()
     except sqlite3.Error:

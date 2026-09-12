@@ -722,7 +722,7 @@ mod tests {
         LockClaim::new(
             "pods",
             "classification",
-            "DeepSeek-V4-Flash-0731-2.4bit-mixed",
+            "Qwen3.8-27B-4bit",
         )
         .unwrap()
     }
@@ -882,7 +882,7 @@ mod tests {
     }
 
     fn notes_claim() -> LockClaim {
-        LockClaim::new("pods", "show_notes", "DeepSeek-V4-Flash-0731-2.4bit-mixed").unwrap()
+        LockClaim::new("pods", "show_notes", "Qwen3.8-27B-4bit").unwrap()
     }
 
     fn idle_occupancy() -> Result<Occupancy, LockError> {
@@ -1064,7 +1064,7 @@ mod tests {
         }
         with_test_lock_env(dir.path(), Occupancy::idle(), false, || {
             let permit =
-                acquire_pods("classification", "DeepSeek-V4-Flash-0731-2.4bit-mixed").unwrap();
+                acquire_pods("classification", "Qwen3.8-27B-4bit").unwrap();
             assert!(permit.is_disabled());
             assert!(!paths.metadata.is_file());
         });

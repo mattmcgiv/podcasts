@@ -15,6 +15,7 @@ impl Database {
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
+        migrate_browser_operation_identity(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -27,6 +28,7 @@ impl Database {
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
+        migrate_browser_operation_identity(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -70,6 +72,39 @@ impl Database {
     }
 }
 
+fn migrate_browser_operation_identity(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='browser_operations'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else { return Ok(()) };
+    if !sql.contains("UNIQUE") || !sql.contains("client_id") || !sql.contains("sequence") {
+        return Ok(());
+    }
+    // PRIMARY KEY already implies UNIQUE(operation_id). Only rebuild when sequence
+    // identity is still a unique constraint; retries key off operation_id.
+    if !sql.contains("UNIQUE(client_id, sequence)") && !sql.contains("UNIQUE (client_id, sequence)") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE browser_operations_v2 (
+            operation_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            result TEXT NOT NULL
+        );
+        INSERT INTO browser_operations_v2 SELECT operation_id, client_id, sequence, payload, result FROM browser_operations;
+        DROP TABLE browser_operations;
+        ALTER TABLE browser_operations_v2 RENAME TO browser_operations;
+        CREATE INDEX IF NOT EXISTS idx_browser_operations_client_sequence ON browser_operations(client_id, sequence);",
+    )?;
+    Ok(())
+}
+
 fn migrate_browser_progress(conn: &Connection) -> Result<(), rusqlite::Error> {
     for name in ["completed_units", "total_units"] {
         let exists: i64 = conn.query_row(
@@ -80,6 +115,34 @@ fn migrate_browser_progress(conn: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn browser_operation_identity_drops_sequence_uniqueness() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE browser_operations (
+            operation_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            result TEXT NOT NULL,
+            UNIQUE(client_id, sequence)
+        );
+        INSERT INTO browser_operations VALUES('op1','phone',1,'{}','ok');",
+    )
+    .unwrap();
+    migrate_browser_operation_identity(&conn).unwrap();
+    migrate_browser_operation_identity(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO browser_operations VALUES('op2','phone',1,'{}','ok')",
+        [],
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM browser_operations WHERE client_id='phone' AND sequence=1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]

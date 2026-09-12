@@ -14,7 +14,7 @@ struct PipelineEpisode: Decodable, Identifiable {
     let totalUnits: Int?
 
     var needsAttention: Bool { ["failed", "blocked", "review"].contains(stage) || blockingReason != nil }
-    var isWaiting: Bool { ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy"].contains(lastErrorMessage ?? "") }
+    var isWaiting: Bool { ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy", "power_unplugged", "power_status_unavailable"].contains(lastErrorMessage ?? "") }
     var progress: Double? {
         guard let completedUnits, let totalUnits, totalUnits > 0,
               completedUnits >= 0, completedUnits <= totalUnits else { return nil }
@@ -38,16 +38,39 @@ struct PipelineEpisode: Decodable, Identifiable {
         return lastErrorMessage ?? "Processing failed"
     }
 
-    var isInProgress: Bool { ["downloading", "transcribing", "classifying"].contains(stage) && !needsAttention }
+    var isInProgress: Bool { ["downloading", "transcribing", "classifying", "ad_boundaries", "show_notes"].contains(stage) && !needsAttention }
     var displayStage: String {
         if lastErrorMessage == "memory_busy" { return "\(stageLabel) · paused for memory" }
         if lastErrorMessage == "omlx_busy" { return "\(stageLabel) · waiting for local AI" }
+        if lastErrorMessage == "power_unplugged" { return "\(stageLabel) · paused until plugged in" }
+        if lastErrorMessage == "power_status_unavailable" { return "\(stageLabel) · paused while checking power" }
         return stageLabel
     }
 }
 
 struct PipelinePresentation {
     let items: [PipelineEpisode]
+    var statusSummary: String {
+        let processing = items.filter { !$0.needsAttention && !$0.isWaiting }.count
+        let waiting = items.filter { !$0.needsAttention && $0.isWaiting }.count
+        let attention = items.filter(\.needsAttention).count
+        var parts = ["\(processing) processing", "\(waiting) waiting"]
+        if attention == 1 { parts.append("1 needs attention") }
+        else if attention > 0 { parts.append("\(attention) need attention") }
+        return parts.joined(separator: " · ")
+    }
+    var featuredHeading: String {
+        guard !featured.isEmpty, featured.allSatisfy(\.isWaiting) else { return "PROCESSING NOW" }
+        return "PAUSED"
+    }
+    var processingHeight: CGFloat { CGFloat(max(featured.count, 1) * 118) }
+    var waitingSummary: String {
+        let queued = remaining.filter(\.isWaiting).count
+        let processing = remaining.count - queued
+        if processing > 0 { return "\(processing) processing beyond the cards above · \(queued) waiting" }
+        guard queued > 0 else { return "No episodes queued for later" }
+        return "\(queued) \(queued == 1 ? "episode" : "episodes") queued for later"
+    }
     var featured: [PipelineEpisode] {
         let processing = items.filter { !$0.needsAttention && !$0.isWaiting }
         let paused = items.filter { $0.isInProgress && $0.isWaiting }
@@ -56,6 +79,26 @@ struct PipelinePresentation {
     var remaining: [PipelineEpisode] {
         let visible = Set(featured.map(\.id))
         return items.filter { !$0.needsAttention && !visible.contains($0.id) }
+    }
+}
+
+enum PipelineAttentionDismissals {
+    static let defaultsKey = "dismissedPipelineAttentionEpisodeIDs"
+
+    static func load(from defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: defaultsKey) ?? [])
+    }
+
+    static func save(_ episodeIDs: Set<String>, to defaults: UserDefaults = .standard) {
+        defaults.set(episodeIDs.sorted(), forKey: defaultsKey)
+    }
+
+    static func signature(_ episode: PipelineEpisode) -> String {
+        "\(episode.id)\u{1f}\(episode.lastErrorMessage ?? episode.stage)"
+    }
+
+    static func visibleAttention(in items: [PipelineEpisode], dismissedEpisodeIDs: Set<String>) -> [PipelineEpisode] {
+        items.filter { $0.needsAttention && !dismissedEpisodeIDs.contains(signature($0)) }
     }
 }
 
@@ -150,10 +193,11 @@ private enum PipelineTheme {
 
 struct PipelineMenu: View {
     @StateObject private var monitor = PipelineMonitor()
-    @ObservedObject var player: SpeakerPlayer
-    @ObservedObject var server: CastServer
-    @State private var showSpeaker = false
+    @State private var dismissedAttentionIDs = PipelineAttentionDismissals.load()
     private var presentation: PipelinePresentation { PipelinePresentation(items: monitor.items) }
+    private var attention: [PipelineEpisode] {
+        PipelineAttentionDismissals.visibleAttention(in: monitor.items, dismissedEpisodeIDs: dismissedAttentionIDs)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -164,10 +208,9 @@ struct PipelineMenu: View {
                     .font(.system(size: 11)).foregroundStyle(PipelineTheme.danger)
                     .padding(.bottom, 10)
             }
-            sectionHeading("PROCESSING NOW")
+            sectionHeading(presentation.featuredHeading)
             rule.padding(.top, 9)
-            // An explicit height prevents MenuBarExtra's intrinsic sizing from collapsing
-            // the episode region. Rows also have fixed heights and cannot be compressed.
+            // Keep explicit intrinsic sizing, but reserve only the visible rows.
             VStack(spacing: 0) {
                 if presentation.featured.isEmpty {
                     VStack(spacing: 8) {
@@ -183,42 +226,49 @@ struct PipelineMenu: View {
                         PipelineEpisodeRow(episode: episode, stale: monitor.unavailable, index: index)
                         rule
                     }
-                    Spacer(minLength: 0)
                 }
             }
-            .frame(height: 354)
+            .frame(height: presentation.processingHeight)
             .fixedSize(horizontal: false, vertical: true)
 
             sectionHeading(presentation.remaining.contains(where: { !$0.isWaiting }) ? "MORE IN PIPELINE" : "WAITING")
                 .padding(.top, 14)
-            Text(waitingSummary)
+            Text(presentation.waitingSummary)
                 .font(.system(size: 12)).foregroundStyle(PipelineTheme.muted)
-                .lineLimit(2).frame(height: 30, alignment: .topLeading)
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 7)
-            if let first = monitor.attention.first {
+            if let first = attention.first {
                 HStack(spacing: 14) {
                     Image(systemName: "exclamationmark.circle").font(.system(size: 25))
                         .foregroundStyle(PipelineTheme.danger)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("\(monitor.attention.count) \(monitor.attention.count == 1 ? "item needs" : "items need") attention")
+                        Text("\(attention.count) \(attention.count == 1 ? "item needs" : "items need") attention")
                             .font(.system(size: 13, weight: .medium)).foregroundStyle(PipelineTheme.danger)
                         Text("\(first.podcastTitle) · \(first.attentionLabel)")
                             .font(.system(size: 12)).foregroundStyle(PipelineTheme.muted)
                             .lineLimit(1).help("\(first.title)\n\(first.attentionLabel)")
                     }
                     Spacer(minLength: 0)
+                    Button {
+                        dismiss(first)
+                    } label: {
+                        Text("Dismiss").underline()
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(PipelineTheme.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss attention for \(first.title)")
+                    .help("Permanently dismiss this issue from the pipeline menu")
                 }
                 .padding(.horizontal, 14).frame(height: 58)
                 .background(PipelineTheme.danger.opacity(0.065), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(PipelineTheme.danger.opacity(0.45), lineWidth: 1))
                 .padding(.top, 4)
             }
-            Spacer(minLength: 10)
-            rule.padding(.bottom, 10)
-            footer
         }
         .padding(18)
-        .frame(width: 440, height: 662, alignment: .topLeading)
+        .frame(width: 440, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
         .background(PipelineTheme.background)
         .foregroundStyle(Color(red: 0.94, green: 0.96, blue: 0.98))
         .preferredColorScheme(.dark)
@@ -233,7 +283,7 @@ struct PipelineMenu: View {
                 Text("Pipeline").font(.system(size: 19, weight: .semibold))
                 HStack(spacing: 7) {
                     Circle().fill(monitor.unavailable ? PipelineTheme.muted : PipelineTheme.blue).frame(width: 9, height: 9)
-                    Text("\(monitor.active.count + monitor.waiting.count) active · \(monitor.attention.count) needs attention")
+                    Text(presentation.statusSummary)
                         .font(.system(size: 12)).foregroundStyle(PipelineTheme.muted)
                 }
             }
@@ -241,49 +291,14 @@ struct PipelineMenu: View {
         }
     }
 
-    private var waitingSummary: String {
-        let remaining = presentation.remaining
-        guard !remaining.isEmpty else { return "No more episodes waiting" }
-        let count = remaining.count
-        if remaining.allSatisfy({ $0.lastErrorMessage == "memory_busy" }) {
-            return "\(count) more \(count == 1 ? "episode is" : "episodes are") paused for memory"
-        }
-        return "\(count) more \(count == 1 ? "episode" : "episodes") in the server queue"
-    }
-
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Button { NSWorkspace.shared.open(URL(string: "https://pods.mcgiv.dev")!) } label: {
-                Text("Open Pods").font(.system(size: 14, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
-                    .frame(height: 38)
-            }
-            .buttonStyle(PipelineButtonStyle())
-            Button { Task { await monitor.refresh() } } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 16)).frame(width: 38, height: 38)
-            }
-            .buttonStyle(PipelineButtonStyle()).disabled(monitor.refreshing)
-            .help(monitor.lastUpdated.map { "Updated \($0.formatted(date: .omitted, time: .standard)) · Refresh pipeline" } ?? "Refresh pipeline")
-            Button { showSpeaker.toggle() } label: {
-                Image(systemName: "hifispeaker").font(.system(size: 16)).frame(width: 38, height: 38)
-            }
-            .buttonStyle(PipelineButtonStyle()).help("Speaker controls")
-            .popover(isPresented: $showSpeaker) { SpeakerMenu(player: player, server: server) }
-        }
-    }
-
     private var rule: some View { Rectangle().fill(PipelineTheme.line).frame(height: 1) }
     private func sectionHeading(_ text: String) -> some View {
         Text(text).font(.system(size: 11, weight: .semibold)).tracking(1.5).foregroundStyle(PipelineTheme.muted)
     }
-}
 
-private struct PipelineButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(configuration.isPressed ? Color.white : Color.white.opacity(0.88))
-            .background(Color.white.opacity(configuration.isPressed ? 0.12 : 0.07), in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(PipelineTheme.line, lineWidth: 1))
+    private func dismiss(_ episode: PipelineEpisode) {
+        dismissedAttentionIDs.insert(PipelineAttentionDismissals.signature(episode))
+        PipelineAttentionDismissals.save(dismissedAttentionIDs)
     }
 }
 

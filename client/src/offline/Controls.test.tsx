@@ -55,6 +55,19 @@ it("treats a cached snapshot with no blocked field as zero and ignores review", 
   expect(settings.container.textContent).not.toMatch(/undefined|review/i);
 });
 
+it("shows Syncing while a tap waits on the Mac", async () => {
+  vi.mocked(client.state).mockResolvedValue({ ...emptyState(), lastSync: 1 });
+  let finish: () => void = () => {};
+  vi.mocked(client.synchronize).mockReturnValue(new Promise(resolve => { finish = () => resolve(); }));
+  render(<OfflineSettings />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Syncing…");
+  expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+  finish();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
+  expect(screen.getByRole("status")).toHaveTextContent("Done.");
+});
+
 it("synchronizes, changes limits, signs in, and resolves both conflict choices", async () => {
   const s = emptyState(); s.lastSync = 10000;
   s.outbox = [{ id: "a", sequence: 1, entity: "1", field: "played", value: true, base_revision: 0, conflict: 1 }];

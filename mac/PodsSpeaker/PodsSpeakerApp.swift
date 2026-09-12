@@ -8,7 +8,7 @@ struct PodsSpeakerApp: App {
 
     var body: some Scene {
         MenuBarExtra("Pods Pipeline", systemImage: "waveform") {
-            PipelineMenu(player: bootstrap.player, server: bootstrap.server)
+            PipelineMenu()
         }
         .menuBarExtraStyle(.window)
     }

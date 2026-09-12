@@ -716,12 +716,7 @@ impl Backend {
                 "INSERT INTO feed_http_cache (podcast_id, etag, last_modified) VALUES (?, ?, ?) ON CONFLICT(podcast_id) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified",
                 params![podcast_id, validators.etag, validators.last_modified],
             )?;
-            let ts = db::now_unix();
-            tx.execute(
-                "INSERT INTO episode_state (episode_id, archived_at, updated_at) SELECT id, ?, ? FROM episodes WHERE podcast_id = ? ORDER BY published_at DESC, id DESC LIMIT -1 OFFSET 2 ON CONFLICT (episode_id) DO UPDATE SET archived_at = excluded.archived_at, updated_at = excluded.updated_at",
-                params![ts, ts, podcast_id],
-            )?;
-            JobStore::cleanup_archived_episode_metadata(tx, podcast_id)?;
+            JobStore::archive_except_newest_two(tx, podcast_id)?;
             Ok(podcast_id)
         })?;
         if self.setting("ad_removal_enabled") == Some("true".into()) {

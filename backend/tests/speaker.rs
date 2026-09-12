@@ -58,7 +58,7 @@ fn fixture() -> (Backend, tempfile::TempDir, Manifest, Arc<MemoryTransport>) {
     backend
         .db
         .execute(
-            "INSERT INTO browser_publications VALUES(?,?,'[]',0)",
+            "INSERT INTO browser_publications VALUES(?,?,'[{\"id\":\"n0\",\"title\":\"Intro\",\"summary\":\"Start\"}]',0)",
             rusqlite::params![1, json!(manifest).to_string()],
         )
         .unwrap();

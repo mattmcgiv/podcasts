@@ -5,6 +5,7 @@ pub mod browser;
 pub mod local_worker;
 pub mod memory_gate;
 pub mod omlx_lock;
+pub mod power_gate;
 pub mod classify;
 pub mod coordinator;
 pub mod db;

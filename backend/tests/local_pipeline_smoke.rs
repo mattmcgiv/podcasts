@@ -725,3 +725,168 @@ fn synthetic_audio_through_publication_and_notes() {
         labels.len()
     );
 }
+
+/// Re-runs classification and notes on a saved transcript. Does not transcribe.
+#[test]
+#[ignore = "requires PODS_REAL_AUDIO, PODS_REAL_TRANSCRIPT, local oMLX"]
+fn backtest_saved_transcript_against_baseline() {
+    use sha2::{Digest, Sha256};
+    let source = PathBuf::from(std::env::var("PODS_REAL_AUDIO").unwrap());
+    let transcript = PathBuf::from(std::env::var("PODS_REAL_TRANSCRIPT").unwrap());
+    let baseline_labels = PathBuf::from(std::env::var("PODS_BASELINE_LABELS").unwrap());
+    let baseline_notes: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("PODS_BASELINE_NOTES").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let root = std::env::var("PODS_REAL_EVIDENCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            tempfile::Builder::new()
+                .prefix("pods-backtest-")
+                .tempdir()
+                .unwrap()
+                .keep()
+        });
+    assert!(root
+        .canonicalize()
+        .unwrap()
+        .starts_with(std::env::temp_dir().canonicalize().unwrap()));
+    let db = Database::open(&root.join("acceptance.sqlite")).unwrap();
+    db.execute("INSERT OR IGNORE INTO podcasts(id,feed_url,title,created_at) VALUES(1,'https://example.org/feed','Local backtest',0)",[]).unwrap();
+    db.execute("INSERT OR IGNORE INTO episodes(id,podcast_id,guid,title,audio_url,published_at) VALUES(1,1,'local-backtest','Local backtest','https://example.org/not-fetched',1)",[]).unwrap();
+    let mut backend = Backend::with_data_root(
+        db,
+        Arc::new(MockFeedFetcher::default()),
+        Arc::new(DisabledDirectory),
+        Some(root.clone()),
+    );
+    backend.local = true;
+    let dest = backend
+        .artifacts
+        .prepare_dest("local/1/source.audio")
+        .unwrap();
+    std::fs::copy(&source, &dest).unwrap();
+    let hash = hex::encode(Sha256::digest(std::fs::read(&source).unwrap()));
+    std::fs::copy(
+        &transcript,
+        dest.parent()
+            .unwrap()
+            .join(format!("transcript-{hash}.json")),
+    )
+    .unwrap();
+    backend
+        .db
+        .execute(
+            "UPDATE browser_jobs SET stage='queued',next_retry_at=0 WHERE episode_id=1",
+            [],
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut stage = None;
+    let mut error = None;
+    for _ in 0..40 {
+        pods_backend::local_worker::step(&backend).unwrap();
+        stage = backend
+            .db
+            .scalar_string("SELECT stage FROM browser_jobs WHERE episode_id=1", [])
+            .unwrap();
+        error = backend
+            .db
+            .scalar_string(
+                "SELECT COALESCE(error, '') FROM browser_jobs WHERE episode_id=1",
+                [],
+            )
+            .unwrap();
+        if stage.as_deref() == Some("ready") {
+            break;
+        }
+        if error.as_deref() == Some("omlx_busy") {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            continue;
+        }
+        break;
+    }
+    assert_eq!(
+        stage.as_deref(),
+        Some("ready"),
+        "{error:?}"
+    );
+    let snapshot = pods_backend::browser::snapshot(&backend).unwrap();
+    let episode = &snapshot["episodes"][0];
+    let run = episode["manifest"]["pipeline_version"].as_str().unwrap();
+    let new_labels: Vec<Label> = serde_json::from_slice(
+        &std::fs::read(dest.parent().unwrap().join(format!("refined-{run}.json"))).unwrap(),
+    )
+    .unwrap();
+    let old_labels: Vec<Label> =
+        serde_json::from_slice(&std::fs::read(&baseline_labels).unwrap()).unwrap();
+    assert_eq!(new_labels.len(), old_labels.len());
+    let mismatch: Vec<usize> = new_labels
+        .iter()
+        .zip(&old_labels)
+        .enumerate()
+        .filter(|(_, (a, b))| a.label != b.label)
+        .map(|(i, _)| i)
+        .collect();
+    let ad_ranges = |labels: &[Label]| {
+        let mut ranges = Vec::new();
+        let mut index = 0;
+        while index < labels.len() {
+            if labels[index].label != "ad" {
+                index += 1;
+                continue;
+            }
+            let first = index;
+            while index + 1 < labels.len() && labels[index + 1].label == "ad" {
+                index += 1;
+            }
+            ranges.push((first, index));
+            index += 1;
+        }
+        ranges
+    };
+    let new_notes = episode["show_notes"].as_array().unwrap();
+    let old_notes = baseline_notes.as_array().unwrap();
+    let segments: Vec<Segment> = serde_json::from_slice(&std::fs::read(&transcript).unwrap()).unwrap();
+    let mismatch_samples: Vec<Value> = mismatch
+        .iter()
+        .take(40)
+        .map(|&i| {
+            json!({
+                "index": i,
+                "id": segments.get(i).map(|s| s.id.clone()),
+                "start": segments.get(i).map(|s| s.start),
+                "old": old_labels[i].label,
+                "new": new_labels[i].label,
+                "text": segments.get(i).map(|s| s.text.clone()),
+            })
+        })
+        .collect();
+    let report = json!({
+        "model": MODEL,
+        "reasoning_effort": pods_backend::local_worker::REASONING_EFFORT,
+        "transcript_unchanged": true,
+        "runtime_secs": started.elapsed().as_secs_f64(),
+        "segments": new_labels.len(),
+        "new_ads": new_labels.iter().filter(|l| l.label == "ad").count(),
+        "old_ads": old_labels.iter().filter(|l| l.label == "ad").count(),
+        "label_mismatches": mismatch.len(),
+        "mismatch_indexes": mismatch.iter().take(80).copied().collect::<Vec<_>>(),
+        "mismatch_samples": mismatch_samples,
+        "new_ad_ranges": ad_ranges(&new_labels),
+        "old_ad_ranges": ad_ranges(&old_labels),
+        "new_notes_count": new_notes.len(),
+        "old_notes_count": old_notes.len(),
+        "new_notes": new_notes,
+        "old_notes": old_notes,
+        "manifest_duration": episode["manifest"]["duration"],
+        "old_duration": std::env::var("PODS_BASELINE_DURATION").ok(),
+        "evidence": root.display().to_string(),
+    });
+    std::fs::write(
+        root.join("comparison.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}

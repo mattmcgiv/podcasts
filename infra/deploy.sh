@@ -3,6 +3,7 @@
 # Build the Linux API image and web UI on the laptop, then copy them to the VPS.
 set -eu
 echo "error: the Vultr VPS is retired. Cloudflare Pages serves the client. The Mac host runs the backend." >&2
+echo "error: zip client/dist at the archive root and upload it with browser-harness. See docs/mac-backend.md (Deploy the client)." >&2
 exit 1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${PODS_SSH_HOST:-pods.mcgiv.dev}"

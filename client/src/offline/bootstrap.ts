@@ -11,14 +11,26 @@ export async function bootstrapOffline(): Promise<void> {
     void navigator.serviceWorker.ready.then(() => { window.clearTimeout(timeout); resolve(); }, reject);
   });
   void navigator.storage?.persist?.();
+  let retryTimer: number | null = null;
   const sync = () => {
     if (document.visibilityState === "hidden") {
       void sweepStaleDownloads().catch(() => {});
       return;
     }
-    void synchronize().catch(() => {}).then(() => prefetch()).catch(() => {});
+    void synchronize()
+      .then(() => {
+        void prefetch().catch(() => {});
+        if (retryTimer) window.clearTimeout(retryTimer);
+        retryTimer = null;
+      })
+      .catch(() => {
+        if (retryTimer) window.clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(sync, 5000);
+      });
   };
   document.addEventListener("visibilitychange", sync);
+  window.addEventListener("pageshow", sync);
+  window.addEventListener("focus", sync);
   window.addEventListener("online", sync);
   window.addEventListener("pods-authenticated", sync);
   window.setInterval(sync, 60000);

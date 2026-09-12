@@ -6,7 +6,7 @@ A single-user podcast app for Chrome on iPhone. The browser stores the library a
 
 The current architecture and operating instructions are in [Mac backend and offline browser](docs/mac-backend.md).
 
-The Mac publishes only automatically processed episodes. There is no human review or correction workflow.
+The Mac publishes only automatically processed episodes with finished show notes. There is no human review or correction workflow.
 There is no `prepare-review` command.
 Classification is binary: `ad` or `content`. Mixed or unclear audio is `content`.
 Invalid or disagreeing block JSON fails closed after repair. A last-attempt ad/content overlap publishes those IDs as content.
@@ -21,6 +21,7 @@ It converts rows at or above four attempts to `blocked`. It converts over-limit 
 The upgrade does not alter publications or listening state.
 Source `CLASSIFIER_VERSION` is `pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128`.
 Source `VERSION` is `pods-local-v23-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128`.
+The local oMLX model is `Qwen3.8-27B-4bit` with reasoning effort `low`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.
@@ -41,6 +42,7 @@ They do not prove universal classifier accuracy.
 Broader automatic monitoring remains appropriate.
 There is no manual review or operator labeling.
 The Vultr VPS is retired. Cloudflare Pages serves the client. The Mac host runs the backend.
+To publish the client, see **Deploy the client** in [docs/mac-backend.md](docs/mac-backend.md).
 
 The sections after this notice describe the legacy native app, not the supported deployment.
 
@@ -184,7 +186,7 @@ Use the standard-library wrapper. It acquires the same lock, writes metadata, th
 Put the command after `--` so flags stay with that command:
 
 ```sh
-python3 mac/backend/omlx_inference_lock.py --owner pi --purpose chat --model DeepSeek-V4-Flash-0731-2.4bit-mixed -- pi
+python3 mac/backend/omlx_inference_lock.py --owner pi --purpose chat --model Qwen3.8-27B-4bit -- pi
 python3 mac/backend/omlx_inference_lock.py --owner script --purpose chat --model unspecified -- /usr/bin/python3 ./my_omlx_client.py
 ```
 

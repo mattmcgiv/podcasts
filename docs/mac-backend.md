@@ -16,18 +16,20 @@ There is no public backend tunnel, VPN requirement, or cloud inference fallback.
 | Caddy | Mac Wi-Fi address, port 8443 | HTTPS and loopback proxy |
 | Rust backend | Mac loopback, port 18180 | SQLite library, synchronization, processing queue |
 | Whisper large-v3 FP16 | Mac, MLX | Local transcription with word timestamps |
-| DeepSeek-V4-Flash-0731-2.4bit-mixed | Local oMLX endpoint | Ad classification and show notes |
+| Qwen3.8-27B-4bit (reasoning effort low) | Local oMLX endpoint | Ad classification and show notes |
 
-The client never receives an episode before ad classification and audio rendering finish.
+The client never receives an episode before ad classification, audio rendering, and show notes finish.
 Playback uses an immutable AAC/M4A file with ads physically removed. There is no original-audio fallback or timer-based ad skipping.
 The Mac retains the original audio and a mapping between original and processed timestamps.
-Show notes use processed timestamps. A notes failure does not hide an otherwise complete episode.
+Show notes use processed timestamps. An episode stays unpublished until notes are nonempty.
 
 Whisper large-v3 FP16 is the initial transcription default, not a proven winner on this library.
 Real-episode accuracy comparisons remain necessary before any claim that it is the best local model.
 The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-community/whisper-large-v3-mlx`.
 
 ## Current deployment
+
+The live local inference model is `Qwen3.8-27B-4bit` with reasoning effort `low`.
 
 The installed Mac release is `20260905-123534`.
 The running binary SHA-256 is `2c7d7906f90863d595ae73234e1e7bd474acb6bdf5b2fbed08be92a1e71682ae`.
@@ -141,6 +143,89 @@ The service worker caches versioned app assets. It waits for old tabs to close b
 
 Note: Browser storage holds the library and downloads. Site-data deletion removes that cache.
 
+## Deploy the client
+
+The production site is `https://pods.mcgiv.dev` on an existing Direct Upload Cloudflare Pages project.
+There is no Git integration, Wrangler config, or GitHub Actions deploy.
+
+Deploy only when the user asks to publish the client, or when the task is a production client ship.
+
+Agents ship a zip of `client/dist/` through the Cloudflare dashboard in local Chrome.
+Use browser-harness. Do not run `npm`, `npx`, `node`, or Wrangler on the host.
+Do not run `infra/deploy.sh`. Do not create a new Pages project. Do not change DNS or the custom domain.
+
+### Build
+
+```sh
+dev/up.sh
+dev/check.sh
+dev/sh.sh sh -c "cd /work/client && npm run build"
+```
+
+Do not set `VITE_BASE=./`. That path is for the deprecated iOS bundle.
+
+Confirm `client/dist/` contains `_headers`, `index.html`, `sw.js`, `offline-assets.json`, `manifest.webmanifest`, and hashed files under `assets/`.
+
+### Zip
+
+Zip from inside `client/dist/` so the archive root is the site root.
+A nested `dist/` folder inside the zip is a failed deploy.
+
+```sh
+rm -f /tmp/pods-pages.zip
+( cd client/dist && zip -r /tmp/pods-pages.zip . -x "*.DS_Store" )
+unzip -l /tmp/pods-pages.zip
+```
+
+`unzip -l` must list `index.html`, `_headers`, and `sw.js` at the top level.
+The zip must not contain `node_modules`, source, SQLite, audio, transcripts, models, or credentials.
+
+### Upload with browser-harness
+
+Use the local Chrome profile that already holds the Cloudflare login.
+Do not start a remote Browser Use cloud browser. That session cannot see the host zip.
+
+If Chrome blocks remote debugging, follow the browser-harness skill (`browser-harness mac-approve`).
+If a Cloudflare login wall or account picker appears, stop and ask. Do not type a password.
+
+```sh
+browser-harness <<'PY'
+new_tab("https://dash.cloudflare.com/?to=/:account/workers-and-pages")
+wait_for_load()
+print(page_info())
+PY
+```
+
+Then:
+
+1. Open the existing Pages project whose custom domain is `pods.mcgiv.dev`.
+2. Start **Create a new deployment**.
+3. Choose the **production** environment, not preview.
+4. Upload the zip with `upload_file` on the file input. The path must be absolute:
+
+```python
+upload_file("input[type=file]", "/tmp/pods-pages.zip")
+```
+
+If that selector misses, inspect the accessibility tree and retry. Do not fall back to Wrangler.
+Dashboard labels can change. The invariant is a production deployment of the existing project.
+5. Confirm and wait until the deployment is Success.
+6. Leave project settings, DNS, and the custom domain unchanged.
+
+### Confirm
+
+Public HTML must reference the new hashed files from this build's `client/dist/index.html`.
+
+```sh
+curl -sS https://pods.mcgiv.dev/ | grep -E 'assets/main-|assets/store-'
+```
+
+Public `/sw.js` must keep worker CSP `connect-src` of `'self'` and `https:`.
+The HTML page must keep `connect-src 'self' https://sync.pods.mcgiv.dev:8443`.
+
+Then follow **Activate a client update**.
+Delete `/tmp/pods-pages.zip` after a successful upload.
+
 ## Development and checks
 
 Run all frontend tools inside the isolated container. Never run host `node`, `npm`, or `npx`.
@@ -183,7 +268,7 @@ The browser excludes untouched CDATA duplicates from its catalog and queue. The 
 A duplicate with listening history, an explicit Listen entry, or a publication remains available for reconciliation.
 
 Shows reports total episodes, unplayed episodes, and completed episodes separately. Listen reports pending jobs, retry failures, and blocked automatic failures from the last sync.
-Only processed episodes appear in Listen. An empty Listen screen does not mean that subscriptions were deleted.
+Only processed episodes with finished show notes appear in Listen. An empty Listen screen does not mean that subscriptions were deleted.
 Audio downloads permit 15 redirects. Failed automatic jobs use exponential retry delays, from five minutes to six hours.
 Automatic processing retries at most four failed attempts. Then the job stage is `blocked` and the episode remains unavailable.
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
@@ -302,9 +387,11 @@ Some networks block private-address DNS answers or communication between clients
 Local-network browser permission, DNS availability, and network isolation can prevent synchronization.
 The app remains usable with its existing downloads in those cases.
 
+One-time Pages cutover (already done):
+
 1. Create a direct-upload project in the selected Cloudflare Pages account.
 2. Build the client inside the dev container.
-3. Upload only `client/dist/` through the Cloudflare dashboard.
+3. Zip `client/dist/` at the archive root and upload it through the Cloudflare dashboard. Recurring ships use **Deploy the client**.
 4. Add `pods.mcgiv.dev` as a custom domain in Pages.
 5. Preserve the existing Route53 records for rollback.
 6. At cutover, replace only the `pods.mcgiv.dev` A/AAAA records with the supplied Pages CNAME.
@@ -342,7 +429,7 @@ The processing cap defaults to 100 GiB, with at least 10 GiB of free disk space 
 The worker stops new downloads at the cap. It does not automatically erase original audio or the library.
 The environment variable `PODS_STORAGE_LIMIT_BYTES` changes the processing cap for a direct backend launch.
 
-Note: The installed release is `20260905-123534`.
+Note: The installed release is `20260912-085138`. The live model is `Qwen3.8-27B-4bit` with reasoning effort `low`.
 
 ## Backup and migration
 
@@ -369,7 +456,7 @@ It does not reset existing credentials or sessions. Do not share that URL in cha
 
 ## Automatic processing
 
-Note: Installed `jobs`, `retry`, and the current classifier are in release `20260905-123534`.
+Note: Installed `jobs`, `retry`, and the current classifier are in release `20260912-085138`.
 
 There is no human review or correction workflow. There is no `prepare-review` command.
 
@@ -399,7 +486,7 @@ Transcript text is data, never instructions. Show notes use the same model and s
 
 ## VPS retirement
 
-The Mac release `20260905-123534` is installed and active.
+The Mac release `20260912-085138` is installed and active. The live model is `Qwen3.8-27B-4bit`.
 The public Cloudflare client serves `main-Cp0Opcme.js`, `main-CsV4hKcg.css`, and `store-z4IKHTCH.js`.
 Public service-worker and main JS hashes match the local build.
 Page CSP and worker CSP remained correct.

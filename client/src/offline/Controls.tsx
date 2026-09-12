@@ -20,8 +20,8 @@ export function OfflineSettings() {
     refresh(); window.addEventListener("pods-offline-changed", refresh);
     return () => { active = false; window.removeEventListener("pods-offline-changed", refresh); };
   }, []);
-  async function run(action: () => Promise<void>) {
-    setBusy(true); setStatus("");
+  async function run(action: () => Promise<void>, pending = "") {
+    setBusy(true); setStatus(pending);
     try { await action(); setStatus("Done."); }
     catch (error) { setStatus(error instanceof Error ? error.message : "Mac unavailable."); }
     finally { setBusy(false); }
@@ -33,14 +33,14 @@ export function OfflineSettings() {
     await prefetch();
   }
   if (!local) return <section className="settings-section"><p>Loading offline library…</p></section>;
-  return <section className="settings-section" aria-label="Offline library">
+  return <section className="settings-section" aria-label="Offline library" aria-busy={busy}>
     <h2 className="section-title">Mac and downloads</h2>
     <p className="settings-detail">Sync on the same Wi-Fi as your Mac. Only episodes with completed ad removal appear here.</p>
     <p>{local.lastSync ? `Last sync: ${new Date(local.lastSync).toLocaleString()}` : "Not synchronized yet."} {local.outbox.length} pending changes.</p>
     {local.snapshot?.processing && <p className="settings-detail">At last sync: {counted(local.snapshot.processing.pending, "episode")} pending on Mac, {local.snapshot.processing.failed ?? 0} failed and retrying, {counted(local.snapshot.processing.blocked ?? 0, "episode")} could not be processed automatically.
       {local.snapshot.processing.storage.blocked ? " Mac processing paused: storage limit or low disk space." : ""}</p>}
-    <button type="button" disabled={busy} onClick={() => void run(async () => { await synchronize(); await prefetch(); })}>Sync now</button>
-    <button type="button" disabled={busy} onClick={() => void run(signIn)}>Sign in to Mac</button>
+    <button type="button" disabled={busy} onClick={() => void run(async () => { await synchronize(); await prefetch(); }, "Syncing…")}>Sync now</button>
+    <button type="button" disabled={busy} onClick={() => void run(signIn, "Syncing…")}>Sign in to Mac</button>
     <label>Automatic episodes <input aria-label="Automatic episodes" type="number" min="0" max="1000" value={local.preferences.count}
       onChange={event => void run(() => savePreferences({ ...local.preferences, count: Number(event.target.value) }))} /></label>
     <label>Storage limit (GiB) <input aria-label="Storage limit (GiB)" type="number" min="0.1" step="0.1" value={local.preferences.limit / 1024 ** 3}

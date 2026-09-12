@@ -277,7 +277,7 @@ fn fixture() -> (Backend, tempfile::TempDir, Manifest) {
     backend
         .db
         .execute(
-            "INSERT INTO browser_publications VALUES(?,?,'[]',0)",
+            "INSERT INTO browser_publications VALUES(?,?,'[{\"id\":\"n0\",\"title\":\"Intro\",\"summary\":\"Start\"}]',0)",
             rusqlite::params![1, json!(manifest).to_string()],
         )
         .unwrap();
@@ -286,6 +286,50 @@ fn fixture() -> (Backend, tempfile::TempDir, Manifest) {
 
 fn action(id: &str, sequence: i64, field: &str, value: Value, revision: i64) -> Value {
     json!({"client_id":"phone","actions":[{"id":id,"sequence":sequence,"entity":"1","field":field,"value":value,"base_revision":revision}]})
+}
+
+#[test]
+fn browser_subscribe_keeps_newest_two_episodes() {
+    let (backend, _temp, _) = fixture();
+    backend.db.execute("DELETE FROM browser_publications", []).unwrap();
+    backend.db.execute("DELETE FROM episodes", []).unwrap();
+    apply_actions(
+        &backend,
+        json!({"client_id":"phone","actions":[{
+            "id":"sub","sequence":1,"entity":"subscription","field":"https://example.org/feed",
+            "value":true,"base_revision":0
+        }]}),
+    )
+    .unwrap();
+    for id in 1..=4 {
+        backend
+            .db
+            .execute(
+                "INSERT INTO episodes(id,podcast_id,guid,title,audio_url,published_at) VALUES(?,1,?,?,?,?)",
+                rusqlite::params![id, id.to_string(), format!("Ep{id}"), "invalid://not-fetched", id],
+            )
+            .unwrap();
+    }
+    pods_backend::local_worker::step(&backend).unwrap();
+    let mut ids = backend
+        .db
+        .lock()
+        .unwrap()
+        .prepare("SELECT episode_id FROM browser_jobs ORDER BY episode_id")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    ids.sort();
+    assert_eq!(ids, vec![3, 4]);
+    assert_eq!(
+        backend
+            .db
+            .scalar_i64("SELECT COUNT(*) FROM episode_state WHERE archived_at IS NOT NULL", [])
+            .unwrap(),
+        Some(2)
+    );
 }
 
 #[test]
@@ -723,6 +767,19 @@ fn old_artifact_positions_keep_their_original_timeline() {
 }
 
 #[test]
+fn snapshot_hides_publication_until_show_notes_exist() {
+    let (backend, _temp, _) = fixture();
+    backend
+        .db
+        .execute("UPDATE browser_publications SET notes_json='[]' WHERE episode_id=1", [])
+        .unwrap();
+    let value = snapshot(&backend).unwrap();
+    assert!(value["episodes"].as_array().unwrap().is_empty());
+    assert_eq!(value["shows"][0]["ready_count"], 0);
+    assert_eq!(value["shows"][0]["pending_count"], 2);
+}
+
+#[test]
 fn published_snapshot_never_exposes_original_or_unprocessed_episode() {
     let (backend, _temp, manifest) = fixture();
     let value = snapshot(&backend).unwrap();
@@ -755,10 +812,13 @@ fn published_snapshot_never_exposes_original_or_unprocessed_episode() {
 
 #[test]
 fn operation_retries_are_idempotent_and_collisions_fail() {
-    let (backend, _temp, _) = fixture();
+    let (backend, _temp, manifest) = fixture();
     let payload = action("op1", 1, "played", json!(true), 0);
     let first = apply_actions(&backend, payload.clone()).unwrap();
     assert_eq!(first, apply_actions(&backend, payload).unwrap());
+    let mut extra = action("op1", 1, "played", json!(true), 0);
+    extra["actions"][0]["conflict"] = json!(9);
+    assert_eq!(first, apply_actions(&backend, extra).unwrap());
     assert_eq!(
         backend
             .db
@@ -767,7 +827,44 @@ fn operation_retries_are_idempotent_and_collisions_fail() {
         Some(1)
     );
     assert!(apply_actions(&backend, action("op1", 1, "played", json!(false), 0)).is_err());
-    assert!(apply_actions(&backend, action("another", 1, "played", json!(true), 0)).is_err());
+    let duplicate_sequence = apply_actions(
+        &backend,
+        action(
+            "another",
+            1,
+            "position",
+            json!({"seconds":6,"artifact_hash":manifest.hash}),
+            0,
+        ),
+    )
+    .unwrap();
+    assert_eq!(duplicate_sequence["results"][0]["status"], "applied");
+}
+
+#[test]
+fn stale_playback_artifact_conflicts_without_blocking_later_actions() {
+    let (backend, _temp, manifest) = fixture();
+    let mut batch = action(
+        "stale",
+        1,
+        "position",
+        json!({"seconds":6,"artifact_hash":"c".repeat(64)}),
+        0,
+    );
+    batch["actions"].as_array_mut().unwrap().push(
+        action(
+            "fresh",
+            2,
+            "position",
+            json!({"seconds":2,"artifact_hash":manifest.hash}),
+            0,
+        )["actions"][0]
+            .clone(),
+    );
+    let result = apply_actions(&backend, batch).unwrap();
+    assert_eq!(result["results"][0]["status"], "conflict");
+    assert_eq!(result["results"][1]["status"], "applied");
+    assert_eq!(snapshot(&backend).unwrap()["episodes"][0]["position_secs"], 2.0);
 }
 
 #[test]

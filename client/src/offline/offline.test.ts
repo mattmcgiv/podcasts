@@ -66,7 +66,7 @@ describe("durable local library", () => {
       }));
     });
     expect(await localRequest("/refresh", { method: "POST", signal: controller.signal })).toEqual({ refreshed: 32, errors: 0 });
-    expect(timeout).not.toHaveBeenCalledWith(120_000);
+    expect(timeout).toHaveBeenCalledWith(120_000);
     expect(await localRequest("/refresh-status")).toEqual({
       is_refreshing: false, last_success_at: 456, last_attempt_at: 456, last_source: "manual", last_refreshed: 32, last_errors: 0,
     });
@@ -118,6 +118,14 @@ describe("durable local library", () => {
     });
     expect(await localRequest("/refresh", { method: "POST" })).toEqual({ refreshed: 32, errors: 0 });
     expect(await localRequest("/refresh-status")).toMatchObject({ last_success_at: 123, is_refreshing: false });
+  });
+  it("reports the refresh outcome even when the follow-up sync conflicts", async () => {
+    await seed();
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (String(url).endsWith("/refresh")) return new Response(JSON.stringify({ refreshed: 2, errors: 1 }));
+      throw new DOMException("Conflict", "409");
+    });
+    expect(await localRequest("/refresh", { method: "POST" })).toEqual({ refreshed: 2, errors: 1 });
   });
   it("initializes once and commits concurrent outbox changes without losing operations", async () => {
     expect(offlineEnabled()).toBe(true);
@@ -208,23 +216,55 @@ describe("synchronization", () => {
   it("acknowledges ordered changes, rebases subsequent changes, and retains conflicts", async () => {
     await seed();
     await updateState(s => {
-      s.outbox = [1, 2, 3].map(sequence => ({ id: `op${sequence}`, sequence, entity: sequence === 3 ? "2" : "1", field: "played", value: sequence !== 2, base_revision: 0 }));
+      s.outbox = [
+        { id: "op1", sequence: 1, entity: "1", field: "played", value: true, base_revision: 0 },
+        { id: "op3", sequence: 3, entity: "2", field: "played", value: true, base_revision: 0 },
+      ];
     });
-    const posted: { actions: { base_revision: number }[] }[] = [];
+    const posted: string[] = [];
     vi.mocked(fetch).mockImplementation(async (url, init) => {
       if (String(url).endsWith("/sync/actions")) {
-        const body = JSON.parse(String(init?.body)); posted.push(body);
-        return new Response(JSON.stringify({ results: [{ id: body.actions[0].id, status: body.actions[0].id === "op3" ? "conflict" : "applied", revision: posted.length }] }));
+        const body = JSON.parse(String(init?.body));
+        posted.push(...body.actions.map((action: { id: string }) => action.id));
+        return new Response(JSON.stringify({ results: body.actions.map((action: { id: string }) => ({ id: action.id, status: action.id === "op3" ? "conflict" : "applied", revision: 1 })) }));
       }
       return new Response(JSON.stringify(snapshot()));
     });
     const promise = synchronize(); expect(synchronize()).toBe(promise);
     await promise;
-    expect(posted[1].actions[0].base_revision).toBe(1);
+    expect(posted).toEqual(["op1", "op3"]);
     expect((await state()).outbox).toHaveLength(1);
-    expect((await state()).outbox[0].conflict).toBe(3);
+    expect((await state()).outbox[0].conflict).toBe(1);
     await resolveConflict("op3", false);
     expect((await state()).outbox).toHaveLength(0);
+    expect((await state()).lastSync).not.toBeNull();
+  });
+  it("sends only the latest edit per field and drops a 409 item", async () => {
+    await seed();
+    await updateState(s => {
+      s.outbox = [
+        { id: "old", sequence: 1, entity: "1", field: "played", value: false, base_revision: 0 },
+        { id: "stale", sequence: 2, entity: "1", field: "position", value: { seconds: 1, artifact_hash: "c".repeat(64) }, base_revision: 0 },
+        { id: "last", sequence: 3, entity: "1", field: "played", value: true, base_revision: 0 },
+        { id: "fresh", sequence: 4, entity: "2", field: "played", value: true, base_revision: 0 },
+      ];
+    });
+    const posted: string[][] = [];
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/sync/actions")) {
+        const body = JSON.parse(String(init?.body));
+        const ids = body.actions.map((action: { id: string }) => action.id);
+        posted.push(ids);
+        expect(body.actions[0]).not.toHaveProperty("conflict");
+        if (ids.includes("stale") && ids.length > 1) return new Response(JSON.stringify({ error: "operation identity reused" }), { status: 409 });
+        if (ids.length === 1 && ids[0] === "stale") return new Response(JSON.stringify({ error: "operation identity reused" }), { status: 409 });
+        return new Response(JSON.stringify({ results: ids.filter((id: string) => id !== "stale").map((id: string) => ({ id, status: "applied", revision: 1 })) }));
+      }
+      return new Response(JSON.stringify(snapshot()));
+    });
+    await synchronize();
+    expect(posted.flat()).toEqual(["stale", "last", "fresh", "stale", "last", "fresh"]);
+    expect((await state()).outbox.map(o => o.id)).toEqual([]);
     expect((await state()).lastSync).not.toBeNull();
   });
   it("retains unauthenticated local changes and supports explicit conflict resolution", async () => {

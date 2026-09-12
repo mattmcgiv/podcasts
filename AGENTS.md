@@ -17,12 +17,13 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 - `dev/sh.sh [cmd...]` — exec into the container (interactive shell if no args).
 - `dev/check.sh` — the merge gate: frontend Vitest coverage (≥90% lines, statements, and functions, enforced in `vite.config.ts`).
 - Vite dev server: `:5173`.
+- Client production deploy: **Deploy the client** in `docs/mac-backend.md`. Build in `pods-dev`, zip `client/dist/` at the zip root, then upload that zip with local Chrome through browser-harness in the Cloudflare Pages dashboard. Do not use Wrangler, `npx`, GitHub Actions, or `infra/deploy.sh`. Do not create a new Pages project or change DNS.
 
 ## Default app/runtime
 
 - The browser at `pods.mcgiv.dev` is the supported client. The native iOS app is deprecated; retain its source and data for migration only.
 - The library/API backend is the Rust crate in `backend/` (`Backend::handle`), hosted on the Mac. The browser must work from downloaded data while the Mac is unavailable.
-- The browser synchronizes over local HTTPS when both devices can communicate on the same Wi-Fi. Only processed episodes are published.
+- The browser synchronizes over local HTTPS when both devices can communicate on the same Wi-Fi. Only processed episodes with finished show notes are published.
 - For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.
 - The iPhone client app (Swift), the in-app iPhone "backend" (loopback server + Rust FFI shell), and all iPhone signing/install tooling are **deprecated as of 1 October 2026**. Do not review, extend, or append to `ios/`, `backend/src/ffi.rs`, `backend/include/pods_backend.h`, or `backend/build-ios.sh`. See `ios/DEPRECATED.md`. The code is kept until removal.
 - The still-present iPhone shell serves the Rust backend on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `RustBackend`.
