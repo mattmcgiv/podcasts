@@ -69,7 +69,7 @@ People-following / guest appearances exist in the codebase but stay off by defau
 | `client/` | React UI (runtime deps: `react` + `react-dom` only) |
 | `backend/` | Active library/API (`Backend::handle`). Implement backend changes here. |
 | `ios/` | **Deprecated 1 October 2026.** Frozen iPhone shell and signing/install tooling. See `ios/DEPRECATED.md`. |
-| `mac/` | Mac backend tooling (`mac/backend/`) plus optional **Pods Speaker** |
+| `mac/` | Mac backend tooling (`mac/backend/`) plus the pipeline menu-bar app |
 | `docs/` | Architecture and design notes (browser/Mac backend, ad removal) |
 | `dev/` | Isolated Apple `container` workflow for frontend tooling |
 | `shared/` | Small shared Swift helpers |

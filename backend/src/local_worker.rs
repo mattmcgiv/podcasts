@@ -929,7 +929,8 @@ pub fn validate_segments(segments: &[Segment]) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn classification_prompt(
+#[cfg(test)]
+fn classification_prompt(
     segments: &[Segment],
     start: usize,
     end: usize,
@@ -1549,8 +1550,8 @@ fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     let script = dest.with_extension("filters");
     fs::write(&script, &filters).map_err(failure)?;
     let temp = dest.with_extension("partial.m4a");
-    // FFmpeg 9 removed -filter_complex_script. Pass the graph as an argument.
-    let status = ffmpeg_render_command(source, &filters, &temp)
+    // FFmpeg 9 removed -filter_complex_script. Read the graph from the file.
+    let status = ffmpeg_render_command(source, &script, &temp)
         .status()
         .map_err(failure)?;
     if !status.success() {
@@ -1559,13 +1560,13 @@ fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     fs::rename(temp, dest).map_err(failure)
 }
 
-fn ffmpeg_render_command(source: &Path, filters: &str, temp: &Path) -> Command {
+fn ffmpeg_render_command(source: &Path, script: &Path, temp: &Path) -> Command {
     let mut command = Command::new("ffmpeg");
     command
         .args(["-nostdin", "-v", "error", "-y", "-i"])
         .arg(source)
-        .arg("-filter_complex")
-        .arg(filters)
+        .arg("-/filter_complex")
+        .arg(script)
         .args([
             "-map",
             "[out]",
@@ -1582,7 +1583,8 @@ fn ffmpeg_render_command(source: &Path, filters: &str, temp: &Path) -> Command {
     command
 }
 
-pub fn labels_schema(segments: &[Segment]) -> Value {
+#[cfg(test)]
+fn labels_schema(segments: &[Segment]) -> Value {
     // Constrain provenance separately from the semantic label. The small model
     // need not invent/copy arbitrary quotations while deciding whole ad blocks.
     let variants: Vec<_> = segments
@@ -1903,14 +1905,17 @@ mod download_tests {
     fn render_command_uses_filter_complex_not_removed_script_option() {
         let command = ffmpeg_render_command(
             Path::new("in.mp3"),
-            "[0:a]atrim=start=0:end=1,asetpts=PTS-STARTPTS[a0];[a0]concat=n=1:v=0:a=1[out]",
+            Path::new("out.filters"),
             Path::new("out.partial.m4a"),
         );
         let args: Vec<_> = command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.windows(2).any(|pair| pair[0] == "-filter_complex"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-/filter_complex" && pair[1] == "out.filters"));
+        assert!(!args.iter().any(|arg| arg == "-filter_complex"));
         assert!(!args.iter().any(|arg| arg.contains("filter_complex_script")));
     }
 
@@ -1950,7 +1955,7 @@ mod download_tests {
                 },
             ],
         )
-        .expect("ffmpeg 9 accepts -filter_complex");
+        .expect("ffmpeg 9 accepts -/filter_complex");
         assert!(dest.is_file());
         let filters = fs::read_to_string(dest.with_extension("filters")).unwrap();
         assert!(filters.contains("atrim=start=0.000000:end=0.800000"));

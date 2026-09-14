@@ -38,7 +38,6 @@ struct PipelineEpisode: Decodable, Identifiable {
         return lastErrorMessage ?? "Processing failed"
     }
 
-    var isInProgress: Bool { ["downloading", "transcribing", "classifying", "ad_boundaries", "show_notes"].contains(stage) && !needsAttention }
     func displayStage(power: PipelinePower) -> String {
         if lastErrorMessage == "memory_busy" { return "\(stageLabel) · paused for memory" }
         if lastErrorMessage == "omlx_busy" { return "\(stageLabel) · waiting for local AI" }
@@ -339,10 +338,6 @@ final class PipelineMonitor: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var unavailable = false
     @Published private(set) var refreshing = false
-
-    var active: [PipelineEpisode] { items.filter { !$0.needsAttention && !$0.isWaiting } }
-    var waiting: [PipelineEpisode] { items.filter { !$0.needsAttention && $0.isWaiting } }
-    var attention: [PipelineEpisode] { items.filter(\.needsAttention) }
 
     func refresh() async {
         guard !refreshing else { return }

@@ -1,6 +1,8 @@
 # Play on Mac
 
-The phone browser controls playback. The Mac Rust backend plays processed episode audio. There is no menu-bar speaker app.
+The phone browser controls playback. The Mac Rust backend plays processed episode audio through authenticated `/api/speaker` routes.
+
+The menu-bar app is a pipeline monitor. It lists local processing jobs. It does not play audio.
 
 ## Architecture
 

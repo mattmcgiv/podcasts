@@ -2,8 +2,7 @@ use pods_backend::browser::{
     apply_actions, original_time, processed_time, snapshot, Interval, Manifest,
 };
 use pods_backend::local_worker::{
-    classification_prompt, retained_intervals, validate_labels, validate_segments, Label, Segment,
-    MAX_FAILED_ATTEMPTS,
+    retained_intervals, validate_labels, validate_segments, Label, Segment, MAX_FAILED_ATTEMPTS,
 };
 use pods_backend::{Backend, Database, DisabledDirectory, HttpRequest, MockFeedFetcher};
 use serde_json::{json, Value};
@@ -1122,9 +1121,6 @@ fn transcript_and_labels_require_real_text_complete_ids_and_evidence() {
         },
     ];
     validate_segments(&segments).unwrap();
-    let prompt = classification_prompt(&segments, 0, 1, 4);
-    assert!(prompt.contains("Sponsored by Acme."));
-    assert!(prompt.contains("We discuss technology."));
     let valid = json!({"labels":[{"segment_id":"s1","label":"content","evidence":"discuss"},{"segment_id":"s0","label":"ad","evidence":"Sponsored"}]});
     let ordered = validate_labels(&valid, &segments).unwrap();
     assert_eq!(ordered[0].segment_id, "s0");

@@ -22,11 +22,5 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_pods-speaker._tcp</string>
-	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Pods Speaker accepts playback control from your iPhone on the local network.</string>
 </dict>
 </plist>

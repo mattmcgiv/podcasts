@@ -650,27 +650,6 @@ fn synthetic_audio_through_publication_and_notes() {
     std::fs::copy(&source, &dest).unwrap();
     let work = dest.parent().unwrap().to_path_buf();
     let source_duration = probe_audio_duration(&dest);
-    if std::env::var("PODS_SMOKE_DEBUG").is_ok() {
-        let segments: Vec<pods_backend::local_worker::Segment> = serde_json::from_slice(
-            &std::fs::read(std::env::var("PODS_SMOKE_TRANSCRIPT").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let prompt =
-            pods_backend::local_worker::classification_prompt(&segments, 0, segments.len(), 4);
-        println!(
-            "Synthetic response: {}",
-            pods_backend::local_worker::chat_json_schema(
-                &pods_backend::omlx_lock::acquire_pods(
-                    pods_backend::omlx_lock::PURPOSE_CLASSIFICATION,
-                    pods_backend::local_worker::MODEL,
-                )
-                .unwrap(),
-                &prompt,
-                Some(pods_backend::local_worker::labels_schema(&segments))
-            )
-            .unwrap()
-        );
-    }
     assert!(pods_backend::local_worker::step(&backend).unwrap());
     let stage = backend
         .db
