@@ -4,30 +4,31 @@ import SQLite3
 
 @MainActor
 final class PodsSpeakerTests: XCTestCase {
-    func testPipelineSummaryAndHeightMatchVisibleWork() {
+    func testPipelineSummaryMatchesThreeBuckets() {
         func episode(_ id: Int, _ stage: String, error: String? = nil) -> PipelineEpisode {
             PipelineEpisode(id: String(id), episodeId: id, title: "Episode", podcastTitle: "Show", stage: stage,
                             blockingReason: nil, lastErrorMessage: error, completedUnits: 64, totalUnits: 128)
         }
         let presentation = PipelinePresentation(items: [episode(1, "show_notes"), episode(2, "queued")])
-        XCTAssertEqual(presentation.statusSummary, "1 processing · 1 waiting")
-        XCTAssertEqual(presentation.featuredHeading, "PROCESSING NOW")
-        XCTAssertEqual(presentation.processingHeight, 118)
-        XCTAssertEqual(presentation.waitingSummary, "1 episode queued for later")
-        XCTAssertEqual(presentation.featured.first?.progress, 0.5)
+        XCTAssertEqual(presentation.statusSummary, "1 processing · 1 queued · 0 stuck")
+        XCTAssertEqual(presentation.processing.map(\.episodeId), [1])
+        XCTAssertEqual(presentation.queued.map(\.episodeId), [2])
+        XCTAssertEqual(presentation.stuck.map(\.episodeId), [])
+        XCTAssertEqual(presentation.processing.first?.progress, 0.5)
         let paused = PipelinePresentation(items: [episode(1, "show_notes", error: "omlx_busy")])
-        XCTAssertEqual(paused.featured.count, 1)
-        XCTAssertEqual(paused.featuredHeading, "PAUSED")
-        XCTAssertEqual(paused.statusSummary, "0 processing · 1 waiting")
-        XCTAssertEqual(paused.waitingSummary, "No episodes queued for later")
+        XCTAssertEqual(paused.processing.map(\.episodeId), [])
+        XCTAssertEqual(paused.queued.map(\.episodeId), [1])
+        XCTAssertEqual(paused.statusSummary, "0 processing · 1 queued · 0 stuck")
         let battery = PipelineEpisode(id: "3", episodeId: 3, title: "Episode", podcastTitle: "Show", stage: "show_notes",
                                       blockingReason: nil, lastErrorMessage: "power_unplugged", completedUnits: 64, totalUnits: 128)
         XCTAssertTrue(battery.isWaiting)
-        XCTAssertEqual(battery.displayStage, "Show Notes · paused until plugged in")
-        XCTAssertEqual(PipelinePresentation(items: []).processingHeight, 118)
+        XCTAssertEqual(battery.displayStage(power: .battery), "Show Notes · paused until plugged in")
+        XCTAssertEqual(battery.displayStage(power: .external), "Show Notes")
+        XCTAssertEqual(battery.displayStage(power: .unknown), "Show Notes")
+        XCTAssertEqual(PipelinePresentation(items: []).statusSummary, "0 processing · 0 queued · 0 stuck")
     }
 
-    func testPipelinePresentationKeepsPausedRowsAndCollapsesRemainingQueue() {
+    func testPipelinePresentationPutsPausedWorkInTheQueueBucket() {
         func episode(_ id: Int, stage: String, error: String? = nil) -> PipelineEpisode {
             PipelineEpisode(id: String(id), episodeId: id, title: "Episode", podcastTitle: "Show", stage: stage,
                             blockingReason: nil, lastErrorMessage: error, completedUnits: nil, totalUnits: nil)
@@ -37,12 +38,12 @@ final class PodsSpeakerTests: XCTestCase {
                      episode(4, stage: "queued"), episode(5, stage: "blocked"),
                      episode(6, stage: "transcribing", error: "memory_busy")]
         let presentation = PipelinePresentation(items: items)
-        XCTAssertEqual(presentation.featured.map(\.episodeId), [2, 1, 3])
-        XCTAssertEqual(presentation.remaining.map(\.episodeId), [4, 6])
-        XCTAssertEqual(presentation.featuredHeading, "PROCESSING NOW")
-        XCTAssertEqual(presentation.statusSummary, "1 processing · 4 waiting · 1 needs attention")
-        XCTAssertEqual(items[0].displayStage, "Transcribing · paused for memory")
-        XCTAssertTrue(presentation.featured.allSatisfy { $0.progress == nil })
+        XCTAssertEqual(presentation.processing.map(\.episodeId), [2])
+        XCTAssertEqual(presentation.queued.map(\.episodeId), [1, 3, 4, 6])
+        XCTAssertEqual(presentation.stuck.map(\.episodeId), [5])
+        XCTAssertEqual(presentation.statusSummary, "1 processing · 4 queued · 1 stuck")
+        XCTAssertEqual(items[0].displayStage(power: .external), "Transcribing · paused for memory")
+        XCTAssertTrue(presentation.queued.allSatisfy { $0.progress == nil })
     }
 
     func testMemoryPausedShowNotesMatchLiveQueueCounts() {
@@ -57,14 +58,35 @@ final class PodsSpeakerTests: XCTestCase {
             episode(24396, stage: "blocked", error: "audio download transport: Dns"),
             episode(24397, stage: "blocked", error: "audio download transport: Dns"),
         ])
-        XCTAssertEqual(presentation.statusSummary, "0 processing · 2 waiting · 3 need attention")
-        XCTAssertEqual(presentation.featuredHeading, "PAUSED")
-        XCTAssertEqual(presentation.featured.map(\.episodeId), [24394, 24395])
-        XCTAssertEqual(presentation.waitingSummary, "No episodes queued for later")
+        XCTAssertEqual(presentation.statusSummary, "0 processing · 2 queued · 3 stuck")
+        XCTAssertEqual(presentation.statusSummary(visibleStuckCount: 2), "0 processing · 2 queued · 2 stuck")
+        XCTAssertEqual(presentation.processing.map(\.episodeId), [])
+        XCTAssertEqual(presentation.queued.map(\.episodeId), [24394, 24395])
+        XCTAssertEqual(presentation.stuck.map(\.episodeId), [24371, 24396, 24397])
         XCTAssertEqual(
             PipelineAttentionDismissals.visibleAttention(in: presentation.items, dismissedEpisodeIDs: []).map(\.episodeId),
             [24371, 24396, 24397]
         )
+    }
+
+    func testPowerPauseLabelFollowsLivePmsetNotStaleJobError() {
+        XCTAssertEqual(PipelinePower.parsePmset("Now drawing from 'AC Power'\n"), .external)
+        XCTAssertEqual(PipelinePower.parsePmset("Now drawing from 'UPS Power'\n"), .external)
+        XCTAssertEqual(PipelinePower.parsePmset("Now drawing from 'Battery Power'\n"), .battery)
+        XCTAssertEqual(PipelinePower.parsePmset("pmset unavailable"), .unknown)
+        let paused = PipelineEpisode(id: "24989", episodeId: 24989, title: "Mini Ep. 123: Differential Learning",
+                                     podcastTitle: "BJJ Mental Models", stage: "transcribing", blockingReason: nil,
+                                     lastErrorMessage: "power_unplugged", completedUnits: nil, totalUnits: nil)
+        XCTAssertTrue(paused.isWaiting)
+        XCTAssertEqual(paused.displayStage(power: .battery), "Transcribing · paused until plugged in")
+        XCTAssertEqual(paused.displayStage(power: .external), "Transcribing")
+        let checking = PipelineEpisode(id: "24987", episodeId: 24987, title: "Will the uptrend in global liquidity be sustained?",
+                                       podcastTitle: "The Macro Minute with Darius Dale", stage: "transcribing",
+                                       blockingReason: nil, lastErrorMessage: "power_status_unavailable",
+                                       completedUnits: nil, totalUnits: nil)
+        XCTAssertEqual(checking.displayStage(power: .external), "Transcribing")
+        XCTAssertEqual(checking.displayStage(power: .unknown), "Transcribing · paused while checking power")
+        XCTAssertEqual(checking.displayStage(power: .battery), "Transcribing · paused while checking power")
     }
 
     func testPipelineProgressAndWaitingAreHonest() throws {
@@ -163,6 +185,61 @@ final class PodsSpeakerTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("missing-\(UUID().uuidString).sqlite")
         XCTAssertThrowsError(try PipelineRepository(databaseURL: url).snapshot())
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testAttentionPagingShowsFiveItemsAndClampsPastTheLastPage() {
+        func episode(_ id: Int) -> PipelineEpisode {
+            PipelineEpisode(id: String(id), episodeId: id, title: "Episode \(id)", podcastTitle: "Show",
+                            stage: "blocked", blockingReason: nil, lastErrorMessage: "invalid audio",
+                            completedUnits: nil, totalUnits: nil)
+        }
+        let items = (1...11).map(episode)
+        XCTAssertEqual(PipelineAttentionPaging.pageSize, 5)
+        XCTAssertEqual(PipelineAttentionPaging.pageCount(itemCount: 0), 0)
+        XCTAssertEqual(PipelineAttentionPaging.pageCount(itemCount: 5), 1)
+        XCTAssertEqual(PipelineAttentionPaging.pageCount(itemCount: 6), 2)
+        XCTAssertEqual(PipelineAttentionPaging.pageCount(itemCount: 11), 3)
+        XCTAssertEqual(PipelineAttentionPaging.clamp(page: -1, itemCount: 11), 0)
+        XCTAssertEqual(PipelineAttentionPaging.clamp(page: 9, itemCount: 11), 2)
+        XCTAssertEqual(PipelineAttentionPaging.slice(items, page: 0).map(\.episodeId), [1, 2, 3, 4, 5])
+        XCTAssertEqual(PipelineAttentionPaging.slice(items, page: 1).map(\.episodeId), [6, 7, 8, 9, 10])
+        XCTAssertEqual(PipelineAttentionPaging.slice(items, page: 2).map(\.episodeId), [11])
+        XCTAssertEqual(PipelineAttentionPaging.slice(items, page: 9).map(\.episodeId), [11])
+        XCTAssertEqual(PipelineAttentionPaging.summary(itemCount: 11, page: 0), "1-5 of 11")
+        XCTAssertEqual(PipelineAttentionPaging.summary(itemCount: 11, page: 2), "11-11 of 11")
+        XCTAssertEqual(PipelineAttentionPaging.summary(itemCount: 0, page: 0), "0 of 0")
+    }
+
+    func testTroubleshootLaunchUsesGrok46HighInPodcastsAndKeepsThePromptInteractive() throws {
+        func episode() -> PipelineEpisode {
+            PipelineEpisode(id: "24396", episodeId: 24396, title: "Coin Stories with Natalie Brunell",
+                            podcastTitle: "Coin Stories", stage: "blocked", blockingReason: nil,
+                            lastErrorMessage: "incomplete", completedUnits: 12, totalUnits: 20)
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("pods-troubleshoot-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let launch = try PipelineTroubleshoot.prepare(for: episode(), directory: folder)
+        XCTAssertEqual(PipelineTroubleshoot.model, "grok-4.6")
+        XCTAssertEqual(PipelineTroubleshoot.reasoningEffort, "high")
+        XCTAssertTrue(launch.prompt.contains("Episode ID: 24396"))
+        XCTAssertTrue(launch.prompt.contains("Coin Stories with Natalie Brunell"))
+        XCTAssertTrue(launch.prompt.contains("incomplete"))
+        XCTAssertTrue(launch.prompt.contains("/Users/matthewmcgivney/projects/podcasts"))
+        XCTAssertTrue(launch.prompt.contains("Do not mutate the live SQLite database"))
+        let script = try String(contentsOf: launch.scriptURL, encoding: .utf8)
+        XCTAssertTrue(script.contains("grok --cwd '/Users/matthewmcgivney/projects/podcasts' --model 'grok-4.6' --reasoning-effort 'high' --"))
+        XCTAssertFalse(script.contains("launch.lock"))
+        XCTAssertEqual(launch.openArguments, [
+            "-na", "Ghostty.app",
+            "--args",
+            "--working-directory=/Users/matthewmcgivney/projects/podcasts",
+            "--window-save-state=never",
+            "--quit-after-last-window-closed=true",
+            "--initial-command=direct:\(launch.scriptURL.path)",
+        ])
+        XCTAssertEqual(try String(contentsOf: launch.promptURL, encoding: .utf8), launch.prompt)
+        let permissions = try FileManager.default.attributesOfItem(atPath: launch.scriptURL.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o755)
     }
 
     func testAdRemovalProtocolAndProgressCadenceAreVersionedForLiveStreaming() {

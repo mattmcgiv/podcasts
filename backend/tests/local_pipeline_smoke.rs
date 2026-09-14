@@ -373,18 +373,37 @@ fn classify_window_maps_uncertain_blocks_to_content_without_repair() {
 }
 
 #[test]
-fn classify_window_bounds_model_calls_on_incomplete_blocks() {
+fn classify_window_second_incomplete_publishes_gaps_as_content() {
     let segments = fixture_segments(4);
     let incomplete = json!({"blocks":[{"first":"s0","last":"s1","label":"ad"}]});
     let mut calls = 0;
-    let error = classify_window_with(&segments, 0, 4, 0, |_prompt, _schema| {
+    let labels = classify_window_with(&segments, 0, 4, 0, |_prompt, _schema| {
         calls += 1;
         assert!(calls <= CLASSIFY_ATTEMPTS);
         Ok(incomplete.clone())
     })
-    .unwrap_err();
+    .unwrap();
     assert_eq!(calls, CLASSIFY_ATTEMPTS);
-    assert_eq!(error.to_string(), "incomplete ad blocks");
+    assert!(validate_blocks(&incomplete, &segments).is_err());
+    assert_eq!(labels_of(&labels), ["ad", "ad", "content", "content"]);
+}
+
+#[test]
+fn classify_window_second_incomplete_keeps_labeled_ids_and_fills_holes() {
+    let segments = fixture_segments(4);
+    let hole = json!({"blocks":[
+        {"first":"s0","last":"s0","label":"ad"},
+        {"first":"s2","last":"s3","label":"content"}
+    ]});
+    let mut calls = 0;
+    let labels = classify_window_with(&segments, 0, 4, 0, |_prompt, _schema| {
+        calls += 1;
+        assert!(calls <= CLASSIFY_ATTEMPTS);
+        Ok(hole.clone())
+    })
+    .unwrap();
+    assert_eq!(calls, CLASSIFY_ATTEMPTS);
+    assert_eq!(labels_of(&labels), ["ad", "content", "content", "content"]);
 }
 
 #[test]

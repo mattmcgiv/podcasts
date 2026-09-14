@@ -26,7 +26,7 @@ pub const REASONING_EFFORT: &str = "low";
 // retry policy, and deterministic boundary shrink, not only first-request
 // prompt text.
 const CLASSIFIER_VERSION: &str =
-    "pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128";
+    "pods-local-v6-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-incomplete-content-aac128";
 pub const VERSION: &str =
     "pods-local-v23-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128";
 const WINDOW_CORE: usize = 24;
@@ -1031,13 +1031,11 @@ fn classify_window_prefixed(
                 Ok(labels) => return Ok(labels),
                 Err(error) => {
                     if attempt + 1 == CLASSIFY_ATTEMPTS {
-                        // Mixed or unclear audio is content. A last-attempt overlap
-                        // conflict publishes the disputed IDs as content instead of
-                        // blocking the episode. Unknown IDs still fail closed.
-                        if error.to_string() == "conflicting ad blocks" {
-                            if let Ok(labels) = validate_blocks_prefer_content(&value, core) {
-                                return Ok(labels);
-                            }
+                        // Mixed or unclear audio is content. Last-attempt overlap
+                        // and leftover IDs publish as content instead of blocking.
+                        // Unknown IDs still fail closed.
+                        if let Ok(labels) = validate_blocks_last_attempt(&value, core) {
+                            return Ok(labels);
                         }
                         return Err(error);
                     }
@@ -1091,20 +1089,21 @@ fn repair_prompt_prefix(error: &Error, output: Option<&Value>) -> String {
 }
 
 pub fn validate_blocks(value: &Value, segments: &[Segment]) -> Result<Vec<Label>, Error> {
-    assign_blocks(value, segments, false)
+    assign_blocks(value, segments, false, false)
 }
 
-fn validate_blocks_prefer_content(
+fn validate_blocks_last_attempt(
     value: &Value,
     segments: &[Segment],
 ) -> Result<Vec<Label>, Error> {
-    assign_blocks(value, segments, true)
+    assign_blocks(value, segments, true, true)
 }
 
 fn assign_blocks(
     value: &Value,
     segments: &[Segment],
     prefer_content_on_conflict: bool,
+    fill_missing_as_content: bool,
 ) -> Result<Vec<Label>, Error> {
     let mut blocks: Vec<_> = value["blocks"]
         .as_array()
@@ -1148,7 +1147,14 @@ fn assign_blocks(
         }
     }
     if assigned.iter().any(Option::is_none) {
-        return Err(failure("incomplete ad blocks"));
+        if !fill_missing_as_content {
+            return Err(failure("incomplete ad blocks"));
+        }
+        for label in &mut assigned {
+            if label.is_none() {
+                *label = Some("content");
+            }
+        }
     }
     let labels: Vec<_> = segments
         .iter()
@@ -1541,13 +1547,25 @@ fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     }
     filters.push_str(&format!("concat=n={}:v=0:a=1[out]", spans.len()));
     let script = dest.with_extension("filters");
-    fs::write(&script, filters).map_err(failure)?;
+    fs::write(&script, &filters).map_err(failure)?;
     let temp = dest.with_extension("partial.m4a");
-    let status = Command::new("ffmpeg")
+    // FFmpeg 9 removed -filter_complex_script. Pass the graph as an argument.
+    let status = ffmpeg_render_command(source, &filters, &temp)
+        .status()
+        .map_err(failure)?;
+    if !status.success() {
+        return Err(failure("audio rendering failed"));
+    }
+    fs::rename(temp, dest).map_err(failure)
+}
+
+fn ffmpeg_render_command(source: &Path, filters: &str, temp: &Path) -> Command {
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-nostdin", "-v", "error", "-y", "-i"])
         .arg(source)
-        .arg("-filter_complex_script")
-        .arg(&script)
+        .arg("-filter_complex")
+        .arg(filters)
         .args([
             "-map",
             "[out]",
@@ -1560,13 +1578,8 @@ fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
             "-movflags",
             "+faststart",
         ])
-        .arg(&temp)
-        .status()
-        .map_err(failure)?;
-    if !status.success() {
-        return Err(failure("audio rendering failed"));
-    }
-    fs::rename(temp, dest).map_err(failure)
+        .arg(temp);
+    command
 }
 
 pub fn labels_schema(segments: &[Segment]) -> Value {
@@ -1884,6 +1897,67 @@ mod download_tests {
             (decoded - wav_secs).abs() < 0.08,
             "decoded={decoded} wav_secs={wav_secs}"
         );
+    }
+
+    #[test]
+    fn render_command_uses_filter_complex_not_removed_script_option() {
+        let command = ffmpeg_render_command(
+            Path::new("in.mp3"),
+            "[0:a]atrim=start=0:end=1,asetpts=PTS-STARTPTS[a0];[a0]concat=n=1:v=0:a=1[out]",
+            Path::new("out.partial.m4a"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair[0] == "-filter_complex"));
+        assert!(!args.iter().any(|arg| arg.contains("filter_complex_script")));
+    }
+
+    #[test]
+    fn render_writes_graph_file_and_concatenates_kept_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("tone.wav");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2:sample_rate=44100",
+                "-y",
+            ])
+            .arg(&wav)
+            .status()
+            .unwrap()
+            .success());
+        let dest = dir.path().join("processed.m4a");
+        render(
+            &wav,
+            &dest,
+            &[
+                Interval {
+                    original_start: 0.0,
+                    original_end: 0.8,
+                    processed_start: 0.0,
+                },
+                Interval {
+                    original_start: 1.2,
+                    original_end: 2.0,
+                    processed_start: 0.8,
+                },
+            ],
+        )
+        .expect("ffmpeg 9 accepts -filter_complex");
+        assert!(dest.is_file());
+        let filters = fs::read_to_string(dest.with_extension("filters")).unwrap();
+        assert!(filters.contains("atrim=start=0.000000:end=0.800000"));
+        assert!(filters.contains("atrim=start=1.200000:end=2.000000"));
+        assert!(filters.contains("concat=n=2:v=0:a=1[out]"));
+        let secs = audio_duration(&dest).unwrap();
+        assert!((secs - 1.6).abs() < 0.25, "secs={secs}");
     }
 
     #[test]
