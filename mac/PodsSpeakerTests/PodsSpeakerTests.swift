@@ -258,4 +258,76 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertEqual(SpeakerPlayer.resolvedPosition(candidate: 0, lastKnown: 125), 125)
         XCTAssertEqual(SpeakerPlayer.resolvedPosition(candidate: 126, lastKnown: 125), 126)
     }
+
+    func testPipelinePauseCapsAToggleAtFourHoursAndReportsWait() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let state = PipelinePauseState(pausedAt: start)
+        XCTAssertEqual(PipelinePauseState.limitSeconds, 14_400)
+        XCTAssertEqual(state.pausedAt, 1_000)
+        XCTAssertEqual(state.pauseUntil, 15_400)
+        XCTAssertTrue(state.isActive(at: start))
+        XCTAssertTrue(state.isActive(at: Date(timeIntervalSince1970: 15_399)))
+        XCTAssertFalse(state.isActive(at: Date(timeIntervalSince1970: 15_400)))
+
+        let encoded = try? JSONEncoder().encode(state)
+        let object = encoded.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Int] }
+        XCTAssertEqual(object?["paused_at"], 1_000)
+        XCTAssertEqual(object?["pause_until"], 15_400)
+        XCTAssertEqual(encoded.flatMap(PipelinePauseFile.decode), state)
+
+        XCTAssertEqual(PipelinePauseController.formatRemaining(14_400), "4h")
+        XCTAssertEqual(PipelinePauseController.formatRemaining(3_900), "1h 5m")
+        XCTAssertEqual(PipelinePauseController.formatRemaining(120), "2m")
+        XCTAssertEqual(PipelinePauseController.formatRemaining(0), "1m")
+
+        let paused = PipelineEpisode(id: "9", episodeId: 9, title: "Episode", podcastTitle: "Show",
+                                     stage: "classifying", blockingReason: nil,
+                                     lastErrorMessage: "pipeline_paused", completedUnits: 1, totalUnits: 4)
+        XCTAssertTrue(paused.isWaiting)
+        XCTAssertEqual(paused.displayStage(power: .external), "Finding ad breaks · paused")
+        XCTAssertEqual(PipelinePresentation(items: [paused]).statusSummary, "0 processing · 1 queued · 0 stuck")
+    }
+
+    func testPipelinePauseFileRejectsCorruptStateAndRoundTrips() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pipeline-pause-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertNil(PipelinePauseFile.read(from: url))
+        XCTAssertNil(PipelinePauseFile.decode(Data("not json".utf8)))
+        XCTAssertNil(PipelinePauseFile.decode(Data(#"{"paused_at":10,"pause_until":10}"#.utf8)))
+        let state = PipelinePauseState(pausedAt: Date(timeIntervalSince1970: 500))
+        try PipelinePauseFile.write(state, to: url)
+        XCTAssertEqual(PipelinePauseFile.read(from: url), state)
+    }
+
+    func testPipelinePauseControllerWritesClearsAndExpiresTheToggle() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pipeline-pause-controller-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let start = Date()
+        let controller = PipelinePauseController(fileURL: url, now: start)
+        XCTAssertFalse(controller.isPaused)
+
+        controller.setPaused(true, now: start)
+        XCTAssertTrue(controller.isPaused)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertNotNil(controller.remaining)
+        XCTAssertEqual(try PipelinePauseFile.read(from: url)?.pauseUntil, Int(start.timeIntervalSince1970) + PipelinePauseState.limitSeconds)
+
+        // A live pause survives a fresh read, as if the menu reopened.
+        let reopened = PipelinePauseController(fileURL: url, now: start)
+        XCTAssertTrue(reopened.isPaused)
+
+        // Past the deadline the toggle resets and the shared file is removed,
+        // so a forgotten pause can never exceed four hours.
+        controller.refresh(now: start.addingTimeInterval(TimeInterval(PipelinePauseState.limitSeconds) + 1))
+        XCTAssertFalse(controller.isPaused)
+        XCTAssertNil(controller.remaining)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+
+        controller.setPaused(true, now: start)
+        controller.setPaused(false, now: start)
+        XCTAssertFalse(controller.isPaused)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
 }

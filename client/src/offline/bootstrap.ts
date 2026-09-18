@@ -12,6 +12,7 @@ export async function bootstrapOffline(): Promise<void> {
   });
   void navigator.storage?.persist?.();
   let retryTimer: number | null = null;
+  let retryDelay = 5_000;
   const sync = () => {
     if (document.visibilityState === "hidden") {
       void sweepStaleDownloads().catch(() => {});
@@ -22,10 +23,12 @@ export async function bootstrapOffline(): Promise<void> {
         void prefetch().catch(() => {});
         if (retryTimer) window.clearTimeout(retryTimer);
         retryTimer = null;
+        retryDelay = 5_000;
       })
       .catch(() => {
         if (retryTimer) window.clearTimeout(retryTimer);
-        retryTimer = window.setTimeout(sync, 5000);
+        retryTimer = window.setTimeout(sync, retryDelay);
+        retryDelay = Math.min(retryDelay * 3, 300_000);
       });
   };
   document.addEventListener("visibilitychange", sync);

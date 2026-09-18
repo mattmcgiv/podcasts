@@ -96,6 +96,27 @@ describe("RecentView", () => {
     expect(view.container.querySelector(".feed-refresh-status")).toBeNull();
   });
 
+  it("shows an in-progress download row on Listen", async () => {
+    installApi({
+      ...settings,
+      "GET /api/recent": page([
+        episode({
+          title: "Incoming",
+          downloaded: false,
+          download_received: 2_000_000,
+          download_total: 8_000_000,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+        }),
+      ]),
+    });
+    wrap(<RecentView />);
+    await screen.findByText("Incoming");
+    expect(screen.getByText("Downloading 25%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "25");
+  });
+
   it("renders, marks played optimistically, loads more", async () => {
     const ep1 = episode({ id: 1, title: "First" });
     const ep2 = episode({ id: 2, title: "Second" });

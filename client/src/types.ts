@@ -18,6 +18,10 @@ export type AdRemovalBlockingReason =
 export interface EpisodeItem {
   manifest?: import("./offline/store").ArtifactManifest;
   downloaded?: boolean;
+  /** Bytes stored so far for an in-progress client download. */
+  download_received?: number;
+  /** Total audio bytes for an in-progress client download. */
+  download_total?: number;
   id: number;
   podcast_id: number;
   podcast_title: string;

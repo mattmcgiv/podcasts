@@ -14,7 +14,7 @@ struct PipelineEpisode: Decodable, Identifiable {
     let totalUnits: Int?
 
     var needsAttention: Bool { ["failed", "blocked", "review"].contains(stage) || blockingReason != nil }
-    var isWaiting: Bool { ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy", "power_unplugged", "power_status_unavailable"].contains(lastErrorMessage ?? "") }
+    var isWaiting: Bool { ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy", "power_unplugged", "power_status_unavailable", "pipeline_paused"].contains(lastErrorMessage ?? "") }
     var progress: Double? {
         guard let completedUnits, let totalUnits, totalUnits > 0,
               completedUnits >= 0, completedUnits <= totalUnits else { return nil }
@@ -41,6 +41,7 @@ struct PipelineEpisode: Decodable, Identifiable {
     func displayStage(power: PipelinePower) -> String {
         if lastErrorMessage == "memory_busy" { return "\(stageLabel) · paused for memory" }
         if lastErrorMessage == "omlx_busy" { return "\(stageLabel) · waiting for local AI" }
+        if lastErrorMessage == "pipeline_paused" { return "\(stageLabel) · paused" }
         if lastErrorMessage == "power_unplugged" {
             return power == .battery ? "\(stageLabel) · paused until plugged in" : stageLabel
         }
@@ -375,6 +376,7 @@ private enum PipelineTheme {
 
 struct PipelineMenu: View {
     @StateObject private var monitor = PipelineMonitor()
+    @StateObject private var pause = PipelinePauseController()
     @State private var dismissedAttentionIDs = PipelineAttentionDismissals.load()
     @State private var attentionPage = 0
     @State private var troubleshootError: String?
@@ -428,12 +430,17 @@ struct PipelineMenu: View {
                 )
                 .padding(.top, 10)
             }
+            footer
+                .padding(.top, 18)
         }
         .onChange(of: attention.count) { _, count in
             attentionPage = PipelineAttentionPaging.clamp(page: attentionPage, itemCount: count)
             if count == 0 {
                 troubleshootError = nil
             }
+        }
+        .onChange(of: monitor.lastUpdated) { _, _ in
+            pause.refresh()
         }
         .padding(18)
         .frame(width: 440, alignment: .topLeading)
@@ -448,16 +455,17 @@ struct PipelineMenu: View {
         HStack(spacing: 22) {
             Text("Pods").font(.system(size: 27, weight: .semibold))
             Rectangle().fill(PipelineTheme.line).frame(width: 1, height: 37)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Pipeline").font(.system(size: 19, weight: .semibold))
-                HStack(spacing: 7) {
-                    Circle().fill(monitor.unavailable ? PipelineTheme.muted : PipelineTheme.blue).frame(width: 9, height: 9)
-                    Text(presentation.statusSummary(visibleStuckCount: attention.count))
-                        .font(.system(size: 12)).foregroundStyle(PipelineTheme.muted)
-                }
-            }
+            Text("Pipeline").font(.system(size: 19, weight: .semibold))
             Spacer(minLength: 0)
+            PipelinePauseToggle(controller: pause)
         }
+    }
+
+    private var footer: some View {
+        Text(presentation.statusSummary(visibleStuckCount: attention.count))
+            .font(.system(size: 12))
+            .foregroundStyle(PipelineTheme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var rule: some View { Rectangle().fill(PipelineTheme.line).frame(height: 1) }
@@ -483,6 +491,34 @@ struct PipelineMenu: View {
             troubleshootError = nil
         } catch {
             troubleshootError = "Could not open Ghostty for \(episode.title)"
+        }
+    }
+}
+
+private struct PipelinePauseToggle: View {
+    @ObservedObject var controller: PipelinePauseController
+
+    private var binding: Binding<Bool> {
+        Binding(get: { controller.isPaused }, set: { controller.setPaused($0) })
+    }
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Toggle(isOn: binding) {
+                Text("Pause")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(PipelineTheme.muted)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .accessibilityLabel("Pause local pipeline inference")
+            .help("Pause Whisper, ad classification, and show notes for up to four hours")
+            if let remaining = controller.remaining, remaining > 0 {
+                Text("resumes in \(PipelinePauseController.formatRemaining(remaining))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(PipelineTheme.muted)
+                    .monospacedDigit()
+            }
         }
     }
 }

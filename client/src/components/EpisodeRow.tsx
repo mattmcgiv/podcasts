@@ -4,6 +4,7 @@ import { adStageLabel, fmtDate, fmtRemaining, progressFraction } from "../lib";
 import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
 import { offlineEnabled } from "../offline/client";
+import { currentDownloadProgress, onDownloadProgress } from "../offline/progress";
 
 interface Props {
   item: EpisodeItem;
@@ -32,6 +33,19 @@ interface LocalAdStatus {
   action: EpisodeItem["ad_removal_action"];
 }
 
+function useDownloadFraction(item: EpisodeItem): number | null {
+  const [live, setLive] = useState(currentDownloadProgress);
+  useEffect(() => onDownloadProgress(setLive), []);
+  if (item.downloaded) return null;
+  if (live?.episode === item.id && live.total > 0) {
+    return Math.min(1, Math.max(0, live.received / live.total));
+  }
+  if (item.download_total && item.download_total > 0) {
+    return Math.min(1, Math.max(0, (item.download_received ?? 0) / item.download_total));
+  }
+  return null;
+}
+
 function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
   switch (stage) {
     case "ready":
@@ -58,6 +72,8 @@ export function EpisodeRow({
   playRequiresAdFree = false,
 }: Props) {
   const progress = progressFraction(item);
+  const downloadFraction = useDownloadFraction(item);
+  const downloading = downloadFraction != null;
   const [adBusy, setAdBusy] = useState(false);
   const [adError, setAdError] = useState<string | null>(null);
   // Local fallback overlay for non-Listen owners (no onAdRemovalStage). It is
@@ -81,6 +97,8 @@ export function EpisodeRow({
   const effectiveBlocking = localAd ? localAd.blocking : item.ad_removal_blocking_reason;
   const effectiveAction = localAd ? localAd.action : item.ad_removal_action;
   const playLocked = playRequiresAdFree && effectiveState !== "ad-free";
+  const playDisabled = playLocked || (offlineEnabled() && !item.downloaded);
+  const downloadPercent = downloading ? Math.round(downloadFraction * 100) : 0;
   const adWindowProgress =
     effectiveStage === "classifying" &&
     item.ad_removal_total_windows != null &&
@@ -120,13 +138,13 @@ export function EpisodeRow({
   }
 
   return (
-    <li className={`episode-row${item.played_at ? " is-played" : ""}${playLocked ? " is-play-locked" : ""}`}>
+    <li className={`episode-row${item.played_at ? " is-played" : ""}${playLocked ? " is-play-locked" : ""}${downloading ? " is-downloading" : ""}`}>
       <button
         className="row-main"
-        disabled={playLocked || (offlineEnabled() && !item.downloaded)}
-        title={playLocked ? "Waiting for ad removal" : undefined}
+        disabled={playDisabled}
+        title={playLocked ? "Waiting for ad removal" : downloading ? "Downloading" : undefined}
         onClick={() => {
-          if (playLocked || (offlineEnabled() && !item.downloaded)) return;
+          if (playDisabled) return;
           onPlay(item);
         }}
       >
@@ -138,26 +156,45 @@ export function EpisodeRow({
             {fmtDate(item.published_at)}
             {fmtRemaining(item) && <> · {fmtRemaining(item)}</>}
           </span>
-          <span
-            className={`ad-removal-state is-${effectiveState}`}
-            style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
-          >
-            {adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
-          </span>
-          {adWindowProgress != null && (
-            <span
-              className="ad-classification-progress"
-              role="progressbar"
-              aria-label="Finding ads progress"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(adWindowProgress * 100)}
-            >
-              <span style={{ width: `${Math.max(4, adWindowProgress * 100)}%` }} />
-            </span>
+          {downloading ? (
+            <>
+              <span className="download-state">Downloading {downloadPercent}%</span>
+              <span
+                className="download-progress"
+                role="progressbar"
+                aria-label="Download progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={downloadPercent}
+                aria-valuetext={`Downloading ${downloadPercent}%`}
+              >
+                <span style={{ width: `${downloadPercent === 0 ? 0 : Math.max(4, downloadPercent)}%` }} />
+              </span>
+            </>
+          ) : (
+            <>
+              <span
+                className={`ad-removal-state is-${effectiveState}`}
+                style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
+              >
+                {adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
+              </span>
+              {adWindowProgress != null && (
+                <span
+                  className="ad-classification-progress"
+                  role="progressbar"
+                  aria-label="Finding ads progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(adWindowProgress * 100)}
+                >
+                  <span style={{ width: `${Math.max(4, adWindowProgress * 100)}%` }} />
+                </span>
+              )}
+            </>
           )}
           {adError && <span className="ad-removal-error">{adError}</span>}
-          {progress > 0 && !item.played_at && (
+          {progress > 0 && !item.played_at && !downloading && (
             <span className="row-progress" role="progressbar" aria-valuenow={Math.round(progress * 100)}>
               <span style={{ width: `${progress * 100}%` }} />
             </span>

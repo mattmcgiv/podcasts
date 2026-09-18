@@ -2,20 +2,36 @@ import { useEffect, useState } from "react";
 import { Api } from "./api";
 import { APP_NAME } from "./config";
 import { assertPasskey, createPasskey, enrollTokenFromLocation } from "./passkey";
-import { hasLocalLibrary, offlineEnabled } from "./offline/client";
+import { hasLocalLibrary, MAC_OFFLINE_MESSAGE, offlineEnabled } from "./offline/client";
 
 type Gate = "loading" | "ready" | "login" | "enroll" | "unset";
+
+export const AUTH_STATUS_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(MAC_OFFLINE_MESSAGE)), ms);
+    promise.then(
+      value => { window.clearTimeout(timer); resolve(value); },
+      error => { window.clearTimeout(timer); reject(error); },
+    );
+  });
+}
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [gate, setGate] = useState<Gate>("loading");
   const [enrollToken, setEnrollToken] = useState<string | null>(enrollTokenFromLocation());
   const [error, setError] = useState<string | null>(null);
 
+  async function openCachedLibrary(): Promise<boolean> {
+    return offlineEnabled() && !enrollTokenFromLocation() && await hasLocalLibrary();
+  }
+
   async function refresh() {
     const token = enrollTokenFromLocation();
     setEnrollToken(token);
-    if (offlineEnabled() && !token && await hasLocalLibrary()) { setGate("ready"); return; }
-    const status = await Api.authStatus();
+    if (await openCachedLibrary()) { setGate("ready"); return; }
+    const status = await (offlineEnabled() ? withTimeout(Api.authStatus(), AUTH_STATUS_TIMEOUT_MS) : Api.authStatus());
     if (status.session) {
       window.dispatchEvent(new Event("pods-authenticated"));
       setGate("ready");
@@ -29,7 +45,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   useEffect(() => {
-    void refresh().catch(() => setGate("unset"));
+    void refresh().catch(() => {
+      void openCachedLibrary()
+        .then(cached => { setGate(cached ? "ready" : "unset"); })
+        .catch(() => setGate("unset"));
+    });
     function onAuthRequired() {
       if (offlineEnabled()) return; // Reauthentication lives in Settings; local playback remains usable.
       setGate((current) => (current === "ready" ? "login" : current));

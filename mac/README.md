@@ -8,6 +8,8 @@ This is **not** a desktop Pods client. It does not play audio. Mac playback is t
 
 The waveform extra lists processing, queued, and stuck jobs from `~/.local/share/pods/data/pods.sqlite`.
 
+The **Pause** switch in the header stops local inference work: Whisper transcription, ad classification, and show-note generation. Downloads and sync keep running. A pause ends after four hours, or when the switch is turned off. The switch writes `~/.local/share/pods/pipeline-pause.json`, which the Rust backend reads.
+
 ## Setup
 
 1. Open `mac/PodsSpeaker.xcodeproj` in Xcode.

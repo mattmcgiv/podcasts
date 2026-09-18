@@ -1,5 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import { setDownloadProgress } from "../offline/progress";
 import { episode } from "../test/mockApi";
 import { EpisodeRow } from "./EpisodeRow";
 
@@ -69,6 +70,59 @@ describe("EpisodeRow download controls", () => {
     expect(screen.queryByRole("button", { name: "Download" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pin" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove download" })).not.toBeInTheDocument();
+  });
+});
+
+describe("EpisodeRow client download progress", () => {
+  it("shows a download bar and keeps Play disabled until the file is local", () => {
+    window.PODS_LOCAL_CLIENT = true;
+    render(
+      <EpisodeRow
+        item={episode({
+          title: "Incoming",
+          downloaded: false,
+          download_received: 1_000_000,
+          download_total: 4_000_000,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+        })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(screen.getByText("Downloading 25%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "25");
+    expect(screen.queryByText("Ad-free")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Incoming/ })).toBeDisabled();
+  });
+
+  it("updates the bar from live download progress events", () => {
+    window.PODS_LOCAL_CLIENT = true;
+    render(
+      <EpisodeRow
+        item={episode({
+          id: 1,
+          title: "Incoming",
+          downloaded: false,
+          download_received: 0,
+          download_total: 8,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+        })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(screen.getByText("Downloading 0%")).toBeInTheDocument();
+    act(() => setDownloadProgress({ episode: 1, received: 4, total: 8 }));
+    expect(screen.getByText("Downloading 50%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "50");
+    act(() => setDownloadProgress({ episode: 2, received: 8, total: 8 }));
+    expect(screen.getByText("Downloading 0%")).toBeInTheDocument();
   });
 });
 

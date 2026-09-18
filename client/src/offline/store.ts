@@ -21,8 +21,18 @@ export interface LocalState {
   client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
   preferences: Preferences; lastSync: number | null;
   notificationsClearedThrough?: number;
+  /** Set after the automatic-episode default is raised from 10 to 50. */
+  automaticEpisodesV2?: boolean;
 }
-export interface Download { hash: string; episode: number; bytes: number; complete: boolean; touched: number }
+export interface Download {
+  hash: string;
+  episode: number;
+  bytes: number;
+  /** Bytes verified so far. Absent on records written before progress tracking. */
+  received?: number;
+  complete: boolean;
+  touched: number;
+}
 export const DATABASE = "pods-offline-v1";
 
 export function snapshotNotifications(snapshot: Snapshot | null | undefined): ProcessingNotification[] {
@@ -46,7 +56,7 @@ export function openDatabase(): Promise<IDBDatabase> {
 
 export function emptyState(): LocalState {
   return { client_id: crypto.randomUUID(), sequence: 0, snapshot: null, outbox: [],
-    preferences: { limit: 2 * 1024 ** 3, count: 10 }, lastSync: null };
+    preferences: { limit: 2 * 1024 ** 3, count: 50 }, lastSync: null, automaticEpisodesV2: true };
 }
 
 /** Drop obsolete fields such as `pins` without touching library data. */
@@ -54,6 +64,10 @@ export function normalizeState(raw: LocalState | undefined | null): LocalState {
   const state = raw ?? emptyState();
   const preferences = state.preferences ?? emptyState().preferences;
   state.preferences = { limit: preferences.limit, count: preferences.count };
+  if (!state.automaticEpisodesV2) {
+    if (state.preferences.count === 10) state.preferences.count = 50;
+    state.automaticEpisodesV2 = true;
+  }
   return state;
 }
 

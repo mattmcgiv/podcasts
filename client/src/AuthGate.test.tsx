@@ -1,10 +1,13 @@
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthGate } from "./AuthGate";
+import { updateState } from "./offline/store";
 import { HttpError, installApi } from "./test/mockApi";
 
 afterEach(() => {
   window.location.hash = "";
+  delete window.PODS_LOCAL_CLIENT;
 });
 
 describe("AuthGate", () => {
@@ -59,5 +62,34 @@ describe("AuthGate", () => {
       </AuthGate>,
     );
     expect(await screen.findByText(/Not set up/)).toBeInTheDocument();
+  });
+
+  it("opens the cached library without contacting the Mac", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    await updateState(s => {
+      s.snapshot = { version: 1, cursor: 0, replace: true, episodes: [], shows: [], settings: {}, versions: {} };
+    });
+    render(
+      <AuthGate>
+        <p>Library</p>
+      </AuthGate>,
+    );
+    expect(await screen.findByText("Library")).toBeInTheDocument();
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("stays on reconnect when the Mac is down and there is no cached library", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
+    render(
+      <AuthGate>
+        <p>Library</p>
+      </AuthGate>,
+    );
+    expect(await screen.findByText(/same Wi-Fi/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
+    expect(screen.queryByText("Library")).not.toBeInTheDocument();
   });
 });

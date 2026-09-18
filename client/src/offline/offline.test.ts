@@ -4,8 +4,9 @@ import { webcrypto } from "node:crypto";
 import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writeRecord, type ArtifactManifest, type LocalState, type Snapshot } from "./store";
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
-import { clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, network, offlineEnabled, resolveConflict, state, synchronize, validateSnapshot } from "./client";
+import { clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
 import { cleanupPlayedDownload, downloadEpisode, downloadError, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
+import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
 import type { EpisodeDetail } from "../types";
 
@@ -107,7 +108,10 @@ describe("durable local library", () => {
       return new Response(JSON.stringify(snapshot()));
     });
     await expect(localRequest("/refresh", { method: "POST", signal: controller.signal })).rejects.toThrow();
-    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(["https://sync.pods.mcgiv.dev:8443/api/refresh"]);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      "https://sync.pods.mcgiv.dev:8443/api/auth/status",
+      "https://sync.pods.mcgiv.dev:8443/api/refresh",
+    ]);
   });
   it("keeps previous refresh history when a later snapshot omits it", async () => {
     await seed();
@@ -122,6 +126,7 @@ describe("durable local library", () => {
   it("reports the refresh outcome even when the follow-up sync conflicts", async () => {
     await seed();
     vi.mocked(fetch).mockImplementation(async (url) => {
+      if (String(url).endsWith("/auth/status")) return new Response("{}", { status: 200 });
       if (String(url).endsWith("/refresh")) return new Response(JSON.stringify({ refreshed: 2, errors: 1 }));
       throw new DOMException("Conflict", "409");
     });
@@ -185,8 +190,48 @@ describe("durable local library", () => {
     expect(await localRequest("/ad-removal/settings")).not.toHaveProperty("deepseek_usage");
     expect(await localRequest("/ad-removal/statuses")).toMatchObject({ items: [] });
     expect(await localRequest("/refresh-status")).toHaveProperty("last_success_at");
-    await expect(localRequest("/unsupported")).rejects.toThrow();
-    await expect(localRequest("/refresh", { method: "POST" })).rejects.toThrow();
+    await expect(localRequest("/unsupported")).rejects.toThrow("Mac on the same Wi-Fi");
+    await expect(localRequest("/refresh", { method: "POST" })).rejects.toThrow(MAC_OFFLINE_MESSAGE);
+  });
+});
+
+describe("Mac disconnected", () => {
+  it("treats any HTTP answer as reachable and a transport failure as down", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("", { status: 401 }));
+    expect(await probeMac()).toBe(true);
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+    expect(await probeMac()).toBe(false);
+  });
+  it("fails sync and refresh after the probe instead of waiting on a silent Mac", async () => {
+    await seed();
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+    await expect(synchronize()).rejects.toThrow(MAC_OFFLINE_MESSAGE);
+    expect(syncError()).toBe(MAC_OFFLINE_MESSAGE);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      "https://sync.pods.mcgiv.dev:8443/api/auth/status",
+    ]);
+    await expect(localRequest("/refresh", { method: "POST" })).rejects.toThrow(MAC_OFFLINE_MESSAGE);
+    expect(await localRequest("/shows")).toEqual(snapshot().shows);
+    expect((await localRequest<{ episodes: unknown[] }>("/search?q=Episode")).episodes).toHaveLength(2);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/search"))).toEqual([]);
+  });
+  it("maps a transport failure after a live probe to the same quiet message", async () => {
+    await seed();
+    vi.mocked(fetch).mockImplementation(async url => {
+      if (String(url).endsWith("/auth/status")) return new Response("{}", { status: 200 });
+      throw new TypeError("Load failed");
+    });
+    await expect(synchronize()).rejects.toThrow(MAC_OFFLINE_MESSAGE);
+    expect(syncError()).toBe(MAC_OFFLINE_MESSAGE);
+  });
+  it("still treats a live Mac 401 as a sign-in requirement", async () => {
+    await seed();
+    vi.mocked(fetch).mockImplementation(async url => {
+      if (String(url).endsWith("/auth/status")) return new Response("{}", { status: 200 });
+      return new Response("", { status: 401 });
+    });
+    await expect(synchronize()).rejects.toThrow("Sign in");
+    expect(syncError()).toMatch(/Sign in/);
   });
 });
 
@@ -346,7 +391,7 @@ describe("verified downloads and local Range playback", () => {
     await deleteDownload(hash); expect(await allDownloads()).toEqual([]);
     await updateState(s => { s.snapshot!.episodes[0].manifest!.bytes = 3 * 1024 ** 3; s.snapshot!.episodes[0].manifest!.chunks = Array(3072).fill(hash); });
     await expect(downloadEpisode(1)).rejects.toThrow("limit");
-    expect(emptyState().preferences.count).toBe(10);
+    expect(emptyState().preferences.count).toBe(50);
     expect(emptyState().preferences).not.toHaveProperty("pins");
   });
 });
@@ -360,13 +405,17 @@ describe("automatic Listen downloads", () => {
     await writeRecord("downloads", episodeHash, { hash: episodeHash, episode: episodeId, bytes: 8, complete, touched: 0 });
   }
 
-  it("lists only fully downloaded unplayed episodes on /recent", async () => {
+  it("lists downloaded and in-progress unplayed episodes on /recent", async () => {
     await seed();
     expect((await localRequest<{ items: unknown[] }>("/recent")).items).toEqual([]);
     await seedComplete(1, hash, false);
-    expect((await localRequest<{ items: unknown[] }>("/recent")).items).toEqual([]);
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items).toEqual([
+      expect.objectContaining({ id: 1, downloaded: false }),
+    ]);
     await seedComplete(1, hash, true);
-    expect((await localRequest<{ items: { id: number }[] }>("/recent")).items.map(e => e.id)).toEqual([1]);
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items).toEqual([
+      expect.objectContaining({ id: 1, downloaded: true }),
+    ]);
     await seedComplete(2, other, true);
     expect((await localRequest<{ items: { id: number }[] }>("/recent")).items.map(e => e.id)).toEqual([1, 2]);
   });
@@ -380,7 +429,7 @@ describe("automatic Listen downloads", () => {
     const raw = await readRecord<LocalState>("meta", "state");
     await writeRecord("meta", "state", { ...raw, preferences: { ...raw!.preferences, pins: [1, 2] } });
     const loaded = await state();
-    expect(loaded.preferences).toEqual({ limit: 2 * 1024 ** 3, count: 10 });
+    expect(loaded.preferences).toEqual({ limit: 2 * 1024 ** 3, count: 50 });
     expect(loaded.preferences).not.toHaveProperty("pins");
     expect(loaded.snapshot?.episodes).toHaveLength(2);
     expect(loaded.outbox).toHaveLength(1);
@@ -389,6 +438,22 @@ describe("automatic Listen downloads", () => {
     expect(persisted?.preferences).not.toHaveProperty("pins");
     expect(persisted?.outbox).toHaveLength(1);
     expect(persisted?.snapshot?.shows).toHaveLength(1);
+  });
+
+  it("raises a stored automatic-episode default of 10 to 50 once", async () => {
+    await seed();
+    const raw = await readRecord<LocalState>("meta", "state");
+    const stale = { ...raw!, preferences: { limit: 2 * 1024 ** 3, count: 10 } };
+    delete stale.automaticEpisodesV2;
+    await writeRecord("meta", "state", stale);
+    const loaded = await state();
+    expect(loaded.preferences.count).toBe(50);
+    expect(loaded.automaticEpisodesV2).toBe(true);
+    const persisted = await readRecord<LocalState>("meta", "state");
+    expect(persisted?.preferences.count).toBe(50);
+    expect(persisted?.automaticEpisodesV2).toBe(true);
+    await writeRecord("meta", "state", { ...persisted, preferences: { ...persisted!.preferences, count: 10 } });
+    expect((await state()).preferences.count).toBe(10);
   });
 
   it("marks played durably and deletes only that episode's audio cache", async () => {
@@ -464,7 +529,7 @@ describe("automatic Listen downloads", () => {
     expect(episodeFetches(hash)).toBe(afterArchive);
   });
 
-  it("does not return an unmarked episode to Listen until download completes", async () => {
+  it("returns an unmarked episode to Listen as an in-progress row until audio is local", async () => {
     const bytes = new TextEncoder().encode("abcdefgh").buffer;
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
@@ -478,11 +543,76 @@ describe("automatic Listen downloads", () => {
     expect((await localRequest<{ items: { id: number }[] }>("/played")).items.map(e => e.id)).toEqual([1]);
     vi.mocked(fetch).mockRejectedValue(new Error("Mac unavailable"));
     await localRequest("/episodes/1/played", { method: "DELETE" });
-    expect((await localRequest<{ items: unknown[] }>("/recent")).items).toEqual([]);
+    await prefetch().catch(() => {});
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items).toEqual([
+      expect.objectContaining({ id: 1, downloaded: false }),
+    ]);
     expect((await localRequest<{ items: unknown[] }>("/played")).items).toEqual([]);
     vi.mocked(fetch).mockResolvedValue(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
     await prefetch();
-    expect((await localRequest<{ items: { id: number }[] }>("/recent")).items.map(e => e.id)).toEqual([1]);
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items.find(e => e.id === 1)).toMatchObject({
+      id: 1, downloaded: true,
+    });
+  });
+
+  it("uses live transfer progress when the download record is not stored yet", async () => {
+    await seed();
+    setDownloadProgress({ episode: 1, received: 2, total: 8 });
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean; download_received?: number; download_total?: number }[] }>("/recent")).items).toEqual([
+      expect.objectContaining({ id: 1, downloaded: false, download_received: 2, download_total: 8 }),
+    ]);
+    setDownloadProgress(null);
+  });
+
+  it("publishes Listen progress while a download is in flight", async () => {
+    const bytes = new TextEncoder().encode("abcdefgh").buffer;
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
+    await seed();
+    await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
+    let finishFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockImplementation(url => {
+      if (String(url).includes("/artifacts/")) return new Promise(resolve => { finishFetch = resolve; });
+      return Promise.reject(new Error("Mac unavailable"));
+    });
+    const seen: Array<DownloadProgress | null> = [];
+    const stop = onDownloadProgress(next => { seen.push(next); });
+    const pending = downloadEpisode(1);
+    await vi.waitFor(() => expect(currentDownloadProgress()).toEqual({ episode: 1, received: 0, total: 8 }));
+    expect((await localRequest<{ items: { id: number; downloaded?: boolean; download_received?: number; download_total?: number }[] }>("/recent")).items).toEqual([
+      expect.objectContaining({ id: 1, downloaded: false, download_received: 0, download_total: 8 }),
+    ]);
+    expect(await localRequest("/next?after=1")).toBeNull();
+    await vi.waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("/artifacts/"))).toBe(true));
+    finishFetch(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await pending;
+    stop();
+    expect(currentDownloadProgress()).toBeNull();
+    expect((await localRequest<{ items: { downloaded?: boolean }[] }>("/recent")).items[0].downloaded).toBe(true);
+    expect(seen[0]).toEqual({ episode: 1, received: 0, total: 8 });
+    expect(seen.at(-1)).toBeNull();
+  });
+
+  it("drops an in-flight Listen row when the episode is marked played", async () => {
+    const bytes = new TextEncoder().encode("abcdefgh").buffer;
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
+    await seed();
+    await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
+    let finishFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockImplementation(url => {
+      if (String(url).includes("/artifacts/")) return new Promise(resolve => { finishFetch = resolve; });
+      return Promise.reject(new Error("Mac unavailable"));
+    });
+    const pending = downloadEpisode(1);
+    await vi.waitFor(() => expect(currentDownloadProgress()?.episode).toBe(1));
+    await localRequest("/episodes/1/played", { method: "POST" });
+    await vi.waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("/artifacts/"))).toBe(true));
+    finishFetch(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await pending;
+    expect(await allDownloads()).toEqual([]);
+    expect(currentDownloadProgress()).toBeNull();
+    expect((await localRequest<{ items: unknown[] }>("/recent")).items).toEqual([]);
   });
 });
 

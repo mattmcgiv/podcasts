@@ -49,3 +49,18 @@ it("retries on a failed sync instead of waiting for the minute interval", async 
   await vi.advanceTimersByTimeAsync(5000);
   expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFail);
 });
+
+it("backs off while the Mac stays down instead of retrying every five seconds", async () => {
+  const register = vi.fn().mockResolvedValue({});
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
+  Object.defineProperty(navigator, "storage", { configurable: true, value: { persist: vi.fn().mockResolvedValue(true) } });
+  await bootstrapOffline();
+  vi.mocked(client.synchronize).mockRejectedValue(new Error("Mac unavailable"));
+  window.dispatchEvent(new Event("online"));
+  await vi.advanceTimersByTimeAsync(5000);
+  const afterFirstRetry = vi.mocked(client.synchronize).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(vi.mocked(client.synchronize).mock.calls.length).toBe(afterFirstRetry);
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFirstRetry);
+});

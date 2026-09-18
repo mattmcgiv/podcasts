@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { resetEmitScheduledForTests } from "../events";
+import { resetDownloadProgressForTests } from "../offline/progress";
 import { resetRefreshFeedsForTests } from "../refreshFeeds";
 import { FakeAudio } from "./fakeAudio";
 
@@ -11,6 +12,7 @@ beforeEach(() => {
   FakeAudio.reset();
   resetRefreshFeedsForTests();
   resetEmitScheduledForTests();
+  resetDownloadProgressForTests();
   vi.stubGlobal("Audio", FakeAudio);
   // Every test must declare its network expectations explicitly.
   vi.stubGlobal(

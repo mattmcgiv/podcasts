@@ -2,19 +2,55 @@ import { emitEpisodesChanged } from "../events";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import type { EpisodeDetail, ProcessingNotification, RefreshStatus, Settings } from "../types";
 import { cleanupPlayedDownload, prefetch, sweepStaleDownloads } from "./downloads";
-import { allDownloads, readRecord, updateState, type ArtifactManifest, type LocalState, type Operation, type Snapshot } from "./store";
+import { currentDownloadProgress } from "./progress";
+import { allDownloads, readRecord, updateState, type ArtifactManifest, type Download, type LocalState, type Operation, type Snapshot } from "./store";
 
 declare global { interface Window { PODS_LOCAL_CLIENT?: boolean } }
 export const offlineEnabled = () => window.PODS_LOCAL_CLIENT ?? import.meta.env.PROD;
 export const backendBase = () => window.PODS_API_BASE ?? import.meta.env.VITE_API_BASE ?? "https://sync.pods.mcgiv.dev:8443";
+export const MAC_OFFLINE_MESSAGE = "Mac is off. Downloaded episodes still play.";
+export const PROBE_TIMEOUT_MS = 3_000;
 let syncing: Promise<void> | null = null;
 let lastError: string | null = null;
 export const syncError = () => lastError;
 
+/** True when the Mac answered a cheap probe. Any HTTP status means it is up. */
+export async function probeMac(): Promise<boolean> {
+  try {
+    await fetch(`${backendBase()}/api/auth/status`, {
+      credentials: "include",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function friendlyNetworkError(error: unknown, init: RequestInit): Error {
+  if (error instanceof DOMException && error.name === "AbortError" && init.signal?.aborted) return error;
+  if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return new Error("Mac did not answer in time. Keep Pods open on the same Wi-Fi.");
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (error instanceof TypeError || /Failed to fetch|NetworkError|Load failed|Network request failed/i.test(message)) {
+    return new Error(MAC_OFFLINE_MESSAGE);
+  }
+  return error instanceof Error ? error : new Error(MAC_OFFLINE_MESSAGE);
+}
+
+function friendlySyncError(message: string): string {
+  if (/Sign in/.test(message)) return message;
+  if (/Failed to fetch|NetworkError|Load failed|Network request failed|Mac is off|Mac did not answer|Mac request failed|Mac unavailable/i.test(message)) {
+    return MAC_OFFLINE_MESSAGE;
+  }
+  return message;
+}
+
 export async function state(): Promise<LocalState> {
   const raw = await readRecord<LocalState>("meta", "state");
   if (!raw) return await updateState(() => {});
-  if (raw.preferences && "pins" in raw.preferences) return await updateState(() => {});
+  if ((raw.preferences && "pins" in raw.preferences) || !raw.automaticEpisodesV2) return await updateState(() => {});
   return raw;
 }
 /** Dismiss only the entries displayed when Clear all was tapped, even if a sync races it. */
@@ -41,10 +77,7 @@ export async function network<T>(path: string, init: RequestInit = {}): Promise<
     response = await fetch(`${backendBase()}/api${path}`, { ...init, headers, credentials: "include",
       signal: init.signal ?? AbortSignal.timeout(timeoutMs) });
   } catch (error) {
-    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new Error("Mac did not answer in time. Keep Pods open on the same Wi-Fi.");
-    }
-    throw error;
+    throw friendlyNetworkError(error, init);
   }
   if (!response.ok) {
     if (response.status === 401) window.dispatchEvent(new Event("pods-auth-required"));
@@ -131,6 +164,7 @@ export function synchronize(): Promise<void> {
 
 async function synchronizeOnce(): Promise<void> {
   try {
+    if (!(await probeMac())) throw new Error(MAC_OFFLINE_MESSAGE);
     // Receive current versions without discarding pending local edits.
     const snapshot = await network<Snapshot>("/sync");
     validateSnapshot(snapshot);
@@ -178,7 +212,7 @@ async function synchronizeOnce(): Promise<void> {
     emitEpisodesChanged();
     try { await sweepStaleDownloads(); } catch { /* Prefetch and the next sync retry. */ }
   } catch (error) {
-    lastError = error instanceof Error ? error.message : "Mac unavailable. Downloaded episodes are still available.";
+    lastError = error instanceof Error ? friendlySyncError(error.message) : MAC_OFFLINE_MESSAGE;
     throw error;
   }
 }
@@ -239,11 +273,34 @@ export async function resolveConflict(id: string, keepPhone: boolean): Promise<v
 }
 
 const defaultSettings: Settings = { speed: 1, autoplay: true };
+
+function withClientDownload<T extends EpisodeDetail>(episode: T, downloads: Download[]): T & {
+  downloaded: boolean;
+  download_received?: number;
+  download_total?: number;
+} {
+  const download = episode.manifest ? downloads.find(d => d.hash === episode.manifest!.hash) : undefined;
+  const live = currentDownloadProgress();
+  const liveMatch = live != null && live.episode === episode.id;
+  const complete = download?.complete === true;
+  const inProgress = !complete && ((download != null && !download.complete) || liveMatch);
+  return {
+    ...episode,
+    downloaded: complete,
+    ...(inProgress
+      ? {
+          download_received: liveMatch && live ? live.received : (download?.received ?? 0),
+          download_total: liveMatch && live ? live.total : (download?.bytes ?? episode.manifest?.bytes ?? 0),
+        }
+      : {}),
+  };
+}
+
 export async function localRequest<T>(path: string, init: RequestInit = {}, raw = false): Promise<T> {
   const s = await state();
   const snapshot = s.snapshot ? applyOverlay(s.snapshot, s.outbox) : { episodes: [], shows: [], settings: {}, processing: undefined, refresh_status: undefined };
   const downloads = await allDownloads();
-  const episodes = snapshot.episodes.map(e => ({ ...e, downloaded: downloads.some(d => d.hash === e.manifest?.hash && d.complete) }));
+  const episodes = snapshot.episodes.map(e => withClientDownload(e, downloads));
   const url = new URL(path, "https://pods.invalid");
   const route = url.pathname;
   const method = init.method ?? "GET";
@@ -275,7 +332,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     }
     else if (match[2] === "show-notes") result = episode.show_notes;
     else throw new Error("This episode is already processed.");
-  } else if (route === "/recent") result = page(episodes.filter(e => e.played_at == null && e.archived_at == null && e.downloaded));
+  } else if (route === "/recent") result = page(episodes.filter(e => e.played_at == null && e.archived_at == null && (e.downloaded || e.download_total != null)));
   else if (route === "/played") result = page(episodes.filter(e => e.played_at != null).sort((a, b) => (b.played_at ?? 0) - (a.played_at ?? 0)));
   else if (route === "/shows" && method === "GET") result = snapshot.shows;
   else if (route === "/shows" && method === "POST") {
@@ -304,6 +361,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     }
     else result = { ...defaultSettings, ...snapshot.settings };
   } else if (route === "/refresh") {
+    if (!(await probeMac())) throw new Error(MAC_OFFLINE_MESSAGE);
     result = await network("/refresh", { method: "POST", signal: init.signal ?? AbortSignal.timeout(REFRESH_TIMEOUT_MS) });
     // Await the sync so the snapshot advances, but its conflicts surface via the conflict UI, not as the refresh result.
     try { await synchronize(); } catch { /* refresh outcome already returned */ }
@@ -317,7 +375,9 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
   else if (route === "/search") {
     const query = (url.searchParams.get("q") ?? "").toLowerCase();
     let directory: { directory_configured?: boolean; podcasts?: unknown[] } = {};
-    try { directory = await network(path); } catch { /* Local search remains usable. */ }
+    if (await probeMac()) {
+      try { directory = await network(path); } catch { /* Local search remains usable. */ }
+    }
     result = { directory_configured: directory.directory_configured ?? false, podcasts: directory.podcasts ?? [], episodes: episodes.filter(e => e.title.toLowerCase().includes(query)) };
   } else if (route === "/opml" && method === "GET") {
     const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
@@ -328,6 +388,6 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     for (const feed of feeds) await enqueue("subscription", feed.getAttribute("xmlUrl")!, true);
     result = { imported: feeds.length, skipped: 0, failed: 0 };
   } else if (route === "/follows" || route === "/follow-candidates") result = [];
-  else throw new Error("This action requires a supported Mac connection.");
+  else throw new Error("This needs your Mac on the same Wi-Fi.");
   return result as T;
 }

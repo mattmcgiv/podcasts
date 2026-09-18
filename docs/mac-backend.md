@@ -116,8 +116,8 @@ Broader automatic monitoring remains appropriate.
 
 ## Offline behavior
 
-The default automatic download queue contains the oldest ten unplayed episodes, within a 2 GiB limit.
-Manual downloads and pins use the same limit. Pins and the active playback file are protected from eviction.
+The default automatic download queue contains the oldest fifty unplayed episodes, within a 2 GiB limit.
+The file currently playing is protected from eviction.
 Eviction removes played episodes first, then the most recent unplayed episodes.
 Downloads pause while the app is hidden. Verified 1 MiB chunks remain available for the next attempt.
 Only complete downloads can play. The service worker supports byte ranges. It does not load the whole episode into memory.
@@ -126,6 +126,8 @@ Playback positions, played state, subscriptions, and app settings enter a durabl
 Retries reuse operation IDs. The backend rejects conflicting edits to the same field.
 Settings offers **Keep phone** and **Use Mac** for conflicts. Backward seeks remain valid edits.
 An expired login does not lock the cached library. A new login is necessary only for synchronization.
+
+When the Mac is off, the phone keeps using that cached library and any complete downloads. Listen, Played, Shows, search, playback, and mark-played stay local. Sync, feed refresh, and new audio transfers fail within a few seconds instead of blocking the app. The next successful Mac connection retries automatically, with increasing delay while the Mac stays down.
 
 iOS can remove browser storage. A persistence request does not guarantee retention.
 The phone is not a backup of the Mac library. Offline playback requires an earlier complete download.
@@ -273,7 +275,9 @@ Audio downloads permit 15 redirects. Failed automatic jobs use exponential retry
 Automatic processing retries at most four failed attempts. Then the job stage is `blocked` and the episode remains unavailable.
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
 `memory_busy` does not consume an attempt. It retries in 60-120 seconds.
-The memory gate defers Whisper below 8 GiB available (resume at 10 GiB) and oMLX work below 24 GiB (resume at 32 GiB).
+The menu-bar **Pause** toggle writes `pipeline-pause.json` in the Pods state directory (default `~/.local/share/pods`). While it is on, local Whisper, ad classification, and show-notes acquisition refuse to start. Downloads, sync, speaker, and rendering continue.
+`pipeline_paused` does not consume an attempt. It retries every 60 seconds until the pause ends or expires.
+A pause is capped at four hours from the time it is switched on. After that deadline both the menu app and the backend treat it as off, and the toggle returns to off.
 Kernel pressure `warn` or `critical` defers both bands and stops an in-flight Whisper process group.
 Notification Center posts one `Transcription` or `Classification` paused banner and one resumed banner per kind. Repeats while that kind stays paused or resumed are suppressed, including after a backend restart. Live banners use `PODS_MEMORY_GATE_NOTIFY=1` from `manage.py`.
 Merge `memory_gate` and the four byte keys into the existing `mac.json`. Do not replace that file.
@@ -288,7 +292,7 @@ The `jobs` command reads the eligible pending view. Retry rejects nonexistent or
 The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
 It does not accept corrected labels.
 
-The source classifier is pipeline v23.
+The source classifier is pipeline v24.
 It uses a bounded repair of at most two model calls per window. The second call uses 24 context segments.
 Labels are binary: `ad` or `content`. Mixed or unclear audio is `content`, so the episode still publishes.
 The repair keeps strict block validation. Invalid or disagreeing JSON fails closed after two attempts.
@@ -296,7 +300,7 @@ A last-attempt ad/content overlap publishes the disputed IDs as content.
 Content-bound versions include repair and retry semantics, not only the initial prompt.
 
 Source `CLASSIFIER_VERSION` is `pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128`.
-Source `VERSION` is `pods-local-v23-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128`.
+Source `VERSION` is `pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.
@@ -469,8 +473,7 @@ A blocked episode remains unavailable. It does not wait for operator labels.
 
 `omlx_busy` does not consume an attempt. It retries in 30-60 seconds.
 `memory_busy` does not consume an attempt. It retries in 60-120 seconds.
-
-The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
+`pipeline_paused` does not consume an attempt. It retries every 60 seconds while the menu-bar **Pause** toggle is on. The pause lasts at most four hours, then clears itself.
 It does not accept corrected labels.
 Retry rejects a nonexistent job or an ineligible job.
 

@@ -1,5 +1,6 @@
 import { emitEpisodesChanged } from "../events";
 import { applyOverlay, backendBase, state } from "./client";
+import { currentDownloadProgress, setDownloadProgress } from "./progress";
 import * as store from "./store";
 import type { ArtifactManifest, Download, LocalState, Preferences } from "./store";
 
@@ -33,6 +34,7 @@ export async function cleanupPlayedDownload(id: number): Promise<void> {
     ?? s.snapshot?.episodes.find(e => e.id === id);
   if (episode?.manifest?.hash) hashes.add(episode.manifest.hash);
   for (const hash of hashes) await store.deleteDownload(hash);
+  if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
   if (hashes.size) changed();
 }
 
@@ -67,8 +69,16 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
 export function downloadEpisode(id: number): Promise<void> {
   if (running) return running.then(() => downloadEpisode(id));
   running = download(id).catch(caught => { error = caught instanceof Error ? caught.message : "Download interrupted."; throw caught; })
-    .finally(() => { running = null; changed(); });
+    .finally(() => { running = null; setDownloadProgress(null); changed(); });
   return running;
+}
+
+async function persistDownload(manifest: ArtifactManifest, id: number, received: number, complete: boolean): Promise<void> {
+  await store.writeRecord("downloads", manifest.hash, {
+    hash: manifest.hash, episode: id, bytes: manifest.bytes, received, complete, touched: Date.now(),
+  } satisfies Download);
+  if (complete) setDownloadProgress(null);
+  else setDownloadProgress({ episode: id, received, total: manifest.bytes });
 }
 
 async function download(id: number): Promise<void> {
@@ -79,23 +89,39 @@ async function download(id: number): Promise<void> {
   if (manifest.chunk_size !== 1024 ** 2 || manifest.chunks.length !== Math.ceil(manifest.bytes / manifest.chunk_size)) throw new Error("Invalid audio manifest.");
   await makeRoom(manifest);
   await store.writeRecord("meta", `manifest:${manifest.hash}`, manifest);
-  await store.writeRecord("downloads", manifest.hash, { hash: manifest.hash, episode: id, bytes: manifest.bytes, complete: false, touched: Date.now() } satisfies Download);
+  await persistDownload(manifest, id, 0, false);
+  changed();
+  let received = 0;
   for (let index = 0; index < manifest.chunks.length; index++) {
-    if (!downloadEligible(id, await state())) { await store.deleteDownload(manifest.hash); return; }
+    if (!downloadEligible(id, await state())) {
+      await store.deleteDownload(manifest.hash);
+      if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+      return;
+    }
     if (document.visibilityState === "hidden") throw new Error("Download paused. Open Pods to resume.");
     const key = `${manifest.hash}:${index}`;
     const cached = await store.readRecord<ArrayBuffer>("chunks", key);
-    if (cached && await verifyChunk(cached, manifest.chunks[index])) continue;
+    if (cached && await verifyChunk(cached, manifest.chunks[index])) {
+      received += cached.byteLength;
+      await persistDownload(manifest, id, received, false);
+      continue;
+    }
     const start = index * manifest.chunk_size, end = Math.min(manifest.bytes, start + manifest.chunk_size) - 1;
     const response = await fetch(`${backendBase()}/api/artifacts/${manifest.hash}`, {
-      credentials: "include", headers: { Range: `bytes=${start}-${end}`, "If-Range": `"${manifest.hash}"` }, signal: AbortSignal.timeout(60000) });
+      credentials: "include", headers: { Range: `bytes=${start}-${end}`, "If-Range": `"${manifest.hash}"` }, signal: AbortSignal.timeout(15000) });
     if (response.status !== 206 || response.headers.get("content-range") !== `bytes ${start}-${end}/${manifest.bytes}`) throw new Error("Mac unavailable or audio changed. Reconnect to resume.");
     const bytes = await response.arrayBuffer();
     if (bytes.byteLength !== end - start + 1 || !await verifyChunk(bytes, manifest.chunks[index])) throw new Error("Audio verification failed. Retry the download.");
     await store.writeRecord("chunks", key, bytes);
+    received += bytes.byteLength;
+    await persistDownload(manifest, id, received, false);
   }
-  if (!downloadEligible(id, await state())) { await store.deleteDownload(manifest.hash); return; }
-  await store.writeRecord("downloads", manifest.hash, { hash: manifest.hash, episode: id, bytes: manifest.bytes, complete: true, touched: Date.now() } satisfies Download);
+  if (!downloadEligible(id, await state())) {
+    await store.deleteDownload(manifest.hash);
+    if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+    return;
+  }
+  await persistDownload(manifest, id, manifest.bytes, true);
   error = null;
 }
 

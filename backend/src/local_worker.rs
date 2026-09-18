@@ -28,7 +28,7 @@ pub const REASONING_EFFORT: &str = "low";
 const CLASSIFIER_VERSION: &str =
     "pods-local-v6-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-incomplete-content-aac128";
 pub const VERSION: &str =
-    "pods-local-v23-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-full-chapters-binary-aac128";
+    "pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128";
 const WINDOW_CORE: usize = 24;
 const WINDOW_CONTEXT: usize = 12;
 const WINDOW_REPAIR_CONTEXT: usize = 24;
@@ -37,6 +37,8 @@ const REPAIR_OUTPUT_CHARS: usize = 1200;
 pub const BOUNDARY_MAX_SHIFT: usize = 8;
 // Bumper-length discontinuity. Conversational turn gaps are typically under 2s.
 pub const BOUNDARY_OPEN_GAP_SECS: f64 = 8.0;
+/// Proper-noun / product length. Short function words must not count as a brand echo.
+const BRAND_TOKEN_MIN_CHARS: usize = 10;
 pub const MAX_FAILED_ATTEMPTS: i64 = 4;
 /// AAC frame rounding. MP3 encoder delay is measured from decoded samples, not this window.
 const PROCESSED_DURATION_TOLERANCE_SECS: f64 = 0.25;
@@ -211,6 +213,13 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
                     episode,
                     &error.to_string(),
                     crate::memory_gate::busy_retry_delay_secs(episode),
+                )?;
+            } else if crate::pipeline_pause::is_paused_error(&error) {
+                persist_busy(
+                    backend,
+                    episode,
+                    crate::pipeline_pause::PIPELINE_PAUSED,
+                    crate::pipeline_pause::RETRY_SECS,
                 )?;
             } else if crate::memory_gate::is_busy_error(&error) {
                 persist_busy(
@@ -416,6 +425,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         require_capacity(backend, 32 * 1024 * 1024)?;
         stage(backend, id, "transcribing")?;
         crate::power_gate::require_external_power()?;
+        crate::pipeline_pause::require_not_paused()?;
         let _whisper_permit = crate::omlx_lock::prepare_whisper(MODEL)?;
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
         // Match transcribe.py's source clock, including container padding.
@@ -465,6 +475,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         stage(backend, id, "classifying")?;
         progress(backend, id, 0, segments.len() as u64)?;
         crate::power_gate::require_external_power()?;
+        crate::pipeline_pause::require_not_paused()?;
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
         let permit =
             crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
@@ -575,6 +586,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     }
     stage(backend, id, "show_notes")?;
     crate::power_gate::require_external_power()?;
+    crate::pipeline_pause::require_not_paused()?;
     crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
     let notes_permit = crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
     let notes = generate_notes_with_progress(&segments, &labels, &manifest.timeline, &notes_permit,
@@ -1381,6 +1393,20 @@ fn is_short_onset(text: &str) -> bool {
     tokens(text).len() <= 3
 }
 
+fn brand_tokens(text: &str) -> impl Iterator<Item = String> {
+    tokens(text)
+        .into_iter()
+        .filter(|token| token.len() >= BRAND_TOKEN_MIN_CHARS)
+}
+
+fn shares_brand_token(pre: &[Segment], post: &str) -> bool {
+    let after: Vec<String> = brand_tokens(post).collect();
+    !after.is_empty()
+        && pre.iter().any(|segment| {
+            brand_tokens(&segment.text).any(|token| after.iter().any(|other| other == &token))
+        })
+}
+
 fn shrink_ad_block(
     segments: &[Segment],
     first: usize,
@@ -1395,7 +1421,7 @@ fn shrink_ad_block(
         let pre = &segments[first..index];
         let inside_ad = pre.iter().any(|segment| {
             has_commercial_structure(&segment.text) || has_speaker_address(&segment.text)
-        });
+        }) || shares_brand_token(pre, &segments[index].text);
         if inside_ad {
             continue;
         }
@@ -2559,6 +2585,44 @@ mod download_tests {
                 let _ = child.wait();
             },
         );
+    }
+
+    #[test]
+    fn paused_step_defers_inference_without_consuming_attempts() {
+        let (backend, _work) = local_job_backend();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',4)",
+                [],
+            )
+            .unwrap();
+        crate::pipeline_pause::with_test_paused(Some(true), || {
+            assert!(step(&backend).unwrap());
+        });
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64("SELECT attempts FROM browser_jobs WHERE episode_id=1", [])
+                .unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            backend
+                .db
+                .scalar_string("SELECT error FROM browser_jobs WHERE episode_id=1", [])
+                .unwrap()
+                .as_deref(),
+            Some(crate::pipeline_pause::PIPELINE_PAUSED)
+        );
+        let retry = backend
+            .db
+            .scalar_i64("SELECT next_retry_at FROM browser_jobs WHERE episode_id=1", [])
+            .unwrap()
+            .unwrap();
+        let expected = crate::db::now_unix() + crate::pipeline_pause::RETRY_SECS;
+        assert!((retry - expected).abs() <= 1);
+        assert_eq!(notification_rows(&backend).len(), 0);
     }
 
     fn memory_snapshot(

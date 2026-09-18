@@ -323,6 +323,10 @@ input {
   opacity: 0.55;
 }
 
+.episode-row.is-downloading .row-main {
+  opacity: 0.88;
+}
+
 .follow-intro {
   margin: 0 0 14px;
   line-height: 1.45;
@@ -492,6 +496,36 @@ input {
 
 @media (prefers-reduced-motion: reduce) {
   .ad-classification-progress > span { animation: none; }
+}
+
+.download-state {
+  align-self: flex-start;
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 600;
+}
+
+.download-progress {
+  display: block;
+  width: min(180px, 72%);
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.download-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0.85;
+  transition: width 420ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .download-progress > span { transition: none; }
 }
 
 .ad-removal-error {
