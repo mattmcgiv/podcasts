@@ -303,6 +303,48 @@ class ManageTests(unittest.TestCase):
             memory_env = {key: env[key] for key in env if key.startswith("PODS_MEMORY")}
             self.assertNotIn("placeholder-token", str(memory_env))
 
+    def test_backend_env_forwards_typesafe_key_and_classifier(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            env = manage.backend_env({
+                "whisper_model": "/models/w",
+                "typesafe_key": "jev-placeholder",
+                "classifier": "jev",
+            })
+            self.assertEqual(env["PODS_TYPESAFE_KEY"], "jev-placeholder")
+            self.assertEqual(env["PODS_CLASSIFIER"], "jev")
+            self.assertNotIn("jev-placeholder", env["PODS_WHISPER_MODEL"])
+
+    def test_launch_forwards_typesafe_key_from_credentials_file(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            current = Path(directory) / "current"
+            current.mkdir()
+            (current / "pods-backend").write_text("")
+            (Path(directory) / "data").mkdir()
+            home = Path(directory) / "home"
+            creds = home / ".config/podcasts"
+            creds.mkdir(parents=True)
+            (creds / "credentials.env").write_text(
+                "PODCASTINDEX_KEY=pi\nTYPESAFE_API_KEY=jev-from-file\n"
+            )
+            with patch.object(manage, "read_config", return_value={"whisper_model": "/models/w", "classifier": "jev"}), \
+                 patch.object(manage, "wifi_address", return_value=None), \
+                 patch.object(manage.signal, "signal"), \
+                 patch.object(manage, "stop_process"), \
+                 patch.object(manage.subprocess, "Popen") as popen, \
+                 patch.object(manage.time, "sleep", side_effect=KeyboardInterrupt), \
+                 patch.object(manage.Path, "home", return_value=home):
+                process = unittest.mock.Mock()
+                process.poll.return_value = None
+                process.pid = 99
+                popen.return_value = process
+                with self.assertRaises(KeyboardInterrupt):
+                    manage.launch()
+                env = popen.call_args.kwargs["env"]
+                self.assertEqual(env["PODS_CLASSIFIER"], "jev")
+                self.assertEqual(env["TYPESAFE_API_KEY"], "jev-from-file")
+                argv = " ".join(popen.call_args[0][0])
+                self.assertNotIn("jev-from-file", argv)
+
     def test_launch_starts_the_release_backend_binary(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
             current = Path(directory) / "current"

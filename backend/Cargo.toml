@@ -17,6 +17,10 @@ required-features = ["passkey"]
 name = "pods-transcribe"
 path = "src/bin/pods-transcribe.rs"
 
+[[bin]]
+name = "pods-compare-jev"
+path = "src/bin/pods-compare-jev.rs"
+
 [dependencies]
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std"] }
 hex = "0.4.3"

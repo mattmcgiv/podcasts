@@ -207,6 +207,10 @@ def backend_env(config):
                PODS_WHISPER_MODEL=config.get("whisper_model", str(Path.home() / "models/whisper-large-v3-mlx")))
     if config.get("omlx_key"):
         env["PODS_OMLX_KEY"] = config["omlx_key"]
+    if config.get("typesafe_key"):
+        env["PODS_TYPESAFE_KEY"] = config["typesafe_key"]
+    if config.get("classifier"):
+        env["PODS_CLASSIFIER"] = str(config["classifier"])
     if "memory_gate" in config:
         env["PODS_MEMORY_GATE"] = "0" if config["memory_gate"] in (False, 0, "0") else "1"
     if "memory_whisper_defer_below_bytes" in config:
@@ -349,7 +353,12 @@ def launch():
         # Only directory credentials are accepted; never source a shell script.
         for line in config_credentials.read_text().splitlines():
             key, separator, value = line.partition("=")
-            if separator and key.strip() in ("PODCASTINDEX_KEY", "PODCASTINDEX_SECRET"):
+            if separator and key.strip() in (
+                "PODCASTINDEX_KEY",
+                "PODCASTINDEX_SECRET",
+                "TYPESAFE_API_KEY",
+                "PODS_TYPESAFE_KEY",
+            ):
                 env[key.strip()] = value.strip().strip("\"'")
     backend, proxy = None, None
     previous = object()
@@ -478,15 +487,18 @@ def retry_job(db, episode):
 
 
 def install_agent():
-    read_config()
+    config = read_config()
     if not (STATE / "current/pods-backend").is_file():
         raise RuntimeError("Install a release first")
     directory = Path.home() / "Library/LaunchAgents"
     directory.mkdir(exist_ok=True)
     path = directory / "dev.mcgiv.pods-backend.plist"
+    environment = {"PATH": PATH, "PODS_STATE_DIR": str(STATE), "PODS_CONFIG_FILE": str(CONFIG)}
+    if config.get("classifier"):
+        environment["PODS_CLASSIFIER"] = str(config["classifier"])
     value = {"Label": "dev.mcgiv.pods-backend", "ProgramArguments": [sys.executable, str(STATE / "current/runtime/manage.py"), "run"],
              "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 30,
-             "EnvironmentVariables": {"PATH": PATH, "PODS_STATE_DIR": str(STATE), "PODS_CONFIG_FILE": str(CONFIG)},
+             "EnvironmentVariables": environment,
              "StandardOutPath": str(STATE / "service.log"), "StandardErrorPath": str(STATE / "service-error.log")}
     path.write_bytes(plistlib.dumps(value))
     print(f"Prepared {path}. Start with launchctl bootstrap gui/{os.getuid()} {path}")

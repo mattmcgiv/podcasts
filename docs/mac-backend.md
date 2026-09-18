@@ -29,7 +29,7 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
-The live local inference model is `Qwen3.8-27B-4bit` with reasoning effort `low`.
+The live ad classifier is TypeSafe Jev 1.13 (`PODS_CLASSIFIER=jev`). Show notes still use local oMLX `Qwen3.8-27B-4bit` with reasoning effort `low`. Set `"classifier": "omlx"` on `mac.json` to roll classification back.
 
 The installed Mac release is `20260905-123534`.
 The running binary SHA-256 is `2c7d7906f90863d595ae73234e1e7bd474acb6bdf5b2fbed08be92a1e71682ae`.
@@ -365,7 +365,15 @@ An optional `omlx_key` in the private configuration overrides that source.
 The model endpoint must use loopback. The default is `http://127.0.0.1:8000/v1/chat/completions`.
 
 Podcast Index credentials remain in `~/.config/podcasts/credentials.env`.
-The service reads only `PODCASTINDEX_KEY` and `PODCASTINDEX_SECRET` from that file. It does not execute the file.
+The service reads `PODCASTINDEX_KEY` and `PODCASTINDEX_SECRET` from that file. It does not execute the file.
+
+Live ad classification uses Jev. Put `TYPESAFE_API_KEY` in `credentials.env` (mode `0600`). `PODS_TYPESAFE_KEY` or a `typesafe_key` in `mac.json` override it. `"classifier": "jev"` on `mac.json` sets `PODS_CLASSIFIER` for the LaunchAgent. `"classifier": "omlx"` restores loopback Qwen classification. Show notes still use oMLX. Compare a previously labeled episode with:
+
+```sh
+cargo run --manifest-path backend/Cargo.toml --bin pods-compare-jev -- 26502
+```
+
+That reads cached oMLX `labels-*.json` and the transcript, calls Jev with one Noul per CORE segment, and writes `jev-compare.json` next to them. It does not overwrite the oMLX labels.
 
 ## DNS, HTTPS, and static hosting
 

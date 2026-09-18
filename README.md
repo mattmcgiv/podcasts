@@ -21,7 +21,8 @@ It converts rows at or above four attempts to `blocked`. It converts over-limit 
 The upgrade does not alter publications or listening state.
 Source `CLASSIFIER_VERSION` is `pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128`.
 Source `VERSION` is `pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128`.
-The local oMLX model is `Qwen3.8-27B-4bit` with reasoning effort `low`.
+The live ad classifier is TypeSafe Jev 1.13. Show notes still use local oMLX `Qwen3.8-27B-4bit` with reasoning effort `low`.
+Put `TYPESAFE_API_KEY` in `~/.config/podcasts/credentials.env`. Set `"classifier": "omlx"` on `mac.json` to roll classification back. Compare an already classified episode with `cargo run --manifest-path backend/Cargo.toml --bin pods-compare-jev -- 26502`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.

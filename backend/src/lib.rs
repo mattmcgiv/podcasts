@@ -3,6 +3,7 @@ pub mod backend;
 pub mod bootstrap;
 pub mod browser;
 pub mod local_worker;
+pub mod jev;
 pub mod memory_gate;
 pub mod omlx_lock;
 pub mod pipeline_pause;

@@ -29,8 +29,8 @@ const CLASSIFIER_VERSION: &str =
     "pods-local-v6-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-incomplete-content-aac128";
 pub const VERSION: &str =
     "pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128";
-const WINDOW_CORE: usize = 24;
-const WINDOW_CONTEXT: usize = 12;
+pub const WINDOW_CORE: usize = 24;
+pub const WINDOW_CONTEXT: usize = 12;
 const WINDOW_REPAIR_CONTEXT: usize = 24;
 pub const CLASSIFY_ATTEMPTS: usize = 2;
 const REPAIR_OUTPUT_CHARS: usize = 1200;
@@ -47,9 +47,16 @@ pub const NOTIFICATION_HISTORY_LIMIT: i64 = 100;
 
 /// Automatic cache identity. The trailing colon preserves existing automatic publications.
 pub fn cached_run_id(source_hash: &str, transcript_hash: &str) -> String {
-    hex::encode(Sha256::digest(format!(
-        "{VERSION}:{MODEL}:{source_hash}:{transcript_hash}:"
-    )))
+    let identity = if crate::jev::enabled() {
+        format!(
+            "{VERSION}:{}:{}:{source_hash}:{transcript_hash}:",
+            crate::jev::CLASSIFIER_VERSION,
+            crate::jev::MODEL
+        )
+    } else {
+        format!("{VERSION}:{MODEL}:{source_hash}:{transcript_hash}:")
+    };
+    hex::encode(Sha256::digest(identity))
 }
 
 pub fn cached_classifier_run_id(source_hash: &str, transcript_hash: &str) -> String {
@@ -461,7 +468,11 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         serde_json::to_vec(&segments).map_err(failure)?,
     ));
     let run = cached_run_id(&source_hash, &transcript_hash);
-    let classifier_run = cached_classifier_run_id(&source_hash, &transcript_hash);
+    let classifier_run = if crate::jev::enabled() {
+        crate::jev::cached_run_id(&source_hash, &transcript_hash)
+    } else {
+        cached_classifier_run_id(&source_hash, &transcript_hash)
+    };
     let labels_file = work.join(format!("labels-{classifier_run}.json"));
     let refined_file = work.join(format!("refined-{run}.json"));
     let labels: Vec<Label> = if labels_file.is_file() {
@@ -476,28 +487,29 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         progress(backend, id, 0, segments.len() as u64)?;
         crate::power_gate::require_external_power()?;
         crate::pipeline_pause::require_not_paused()?;
-        crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
-        let permit =
-            crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
-        crate::omlx_lock::load_for_classification(&permit, MODEL)?;
-        let mut labels = Vec::new();
-        for start in (0..segments.len()).step_by(WINDOW_CORE) {
-            let end = (start + WINDOW_CORE).min(segments.len());
-            let checkpoint = work.join(format!("window-{classifier_run}-{start}.json"));
-            let batch = if checkpoint.is_file() {
-                let saved: Vec<Label> =
-                    serde_json::from_slice(&fs::read(&checkpoint).map_err(failure)?)
-                        .map_err(failure)?;
-                validate_labels(&json!({"labels":saved}), &segments[start..end])?
-            } else {
-                let batch = classify_window(&segments, start, end, WINDOW_CONTEXT, &permit)?;
-                atomic_json(&checkpoint, &batch)?;
-                batch
-            };
-            labels.extend(batch);
-            progress(backend, id, end as u64, segments.len() as u64)?;
-        }
-        drop(permit);
+        let labels = if crate::jev::enabled() {
+            classify_windows_with(
+                &segments,
+                work,
+                &classifier_run,
+                |start, end| crate::jev::classify_window(&segments, start, end, WINDOW_CONTEXT),
+                |done| progress(backend, id, done, segments.len() as u64),
+            )?
+        } else {
+            crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
+            let permit =
+                crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
+            crate::omlx_lock::load_for_classification(&permit, MODEL)?;
+            let labels = classify_windows_with(
+                &segments,
+                work,
+                &classifier_run,
+                |start, end| classify_window(&segments, start, end, WINDOW_CONTEXT, &permit),
+                |done| progress(backend, id, done, segments.len() as u64),
+            )?;
+            drop(permit);
+            labels
+        };
         atomic_json(&labels_file, &labels)?;
         labels
     };
@@ -999,6 +1011,32 @@ pub fn validate_labels(value: &Value, segments: &[Segment]) -> Result<Vec<Label>
             Ok(label)
         })
         .collect()
+}
+
+fn classify_windows_with(
+    segments: &[Segment],
+    work: &Path,
+    classifier_run: &str,
+    mut classify: impl FnMut(usize, usize) -> Result<Vec<Label>, Error>,
+    mut report: impl FnMut(u64) -> Result<(), Error>,
+) -> Result<Vec<Label>, Error> {
+    let mut labels = Vec::new();
+    for start in (0..segments.len()).step_by(WINDOW_CORE) {
+        let end = (start + WINDOW_CORE).min(segments.len());
+        let checkpoint = work.join(format!("window-{classifier_run}-{start}.json"));
+        let batch = if checkpoint.is_file() {
+            let saved: Vec<Label> =
+                serde_json::from_slice(&fs::read(&checkpoint).map_err(failure)?).map_err(failure)?;
+            validate_labels(&json!({"labels": saved}), &segments[start..end])?
+        } else {
+            let batch = classify(start, end)?;
+            atomic_json(&checkpoint, &batch)?;
+            batch
+        };
+        labels.extend(batch);
+        report(end as u64)?;
+    }
+    Ok(labels)
 }
 
 pub fn classify_window(
@@ -1627,7 +1665,7 @@ fn labels_schema(segments: &[Segment]) -> Value {
         "type":"array","minItems":segments.len(),"maxItems":segments.len(),"items":{"anyOf":variants}}}})
 }
 
-fn evidence_quote(segment: &Segment) -> String {
+pub fn evidence_quote(segment: &Segment) -> String {
     segment.text.chars().take(64).collect()
 }
 
@@ -3375,6 +3413,40 @@ mod download_tests {
                 assert!(mock.posts.load(Ordering::SeqCst) >= 1);
             },
         );
+    }
+
+    #[test]
+    fn classify_windows_with_writes_checkpoints_and_jev_run_id_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = four_segments();
+        let labels = classify_windows_with(
+            &segments,
+            dir.path(),
+            "run",
+            |start, end| {
+                Ok(segments[start..end]
+                    .iter()
+                    .map(|segment| Label {
+                        segment_id: segment.id.clone(),
+                        label: "content".into(),
+                        evidence: evidence_quote(segment),
+                    })
+                    .collect())
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(labels.len(), 4);
+        assert!(dir.path().join("window-run-0.json").is_file());
+        assert_ne!(
+            cached_classifier_run_id("a", "b"),
+            crate::jev::cached_run_id("a", "b")
+        );
+        let omlx_run = cached_run_id("a", "b");
+        crate::jev::with_test_enabled(Some(true), || {
+            assert!(crate::jev::enabled());
+            assert_ne!(cached_run_id("a", "b"), omlx_run);
+        });
     }
 
     #[test]
