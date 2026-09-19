@@ -434,6 +434,33 @@ class ManageTests(unittest.TestCase):
                 self.assertTrue(manage.omlx_has_pending_inference(path))
             self.assertFalse(manage.omlx_has_pending_inference(Path(directory) / "missing.sqlite"))
 
+    def test_pending_inference_probe_closes_connections_on_success_and_error(self):
+        # Retain each connection to ensure cleanup does not depend on garbage collection.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite"
+            connections = []
+            real_connect = sqlite3.connect
+            def connect(*args, **kwargs):
+                db = real_connect(*args, **kwargs)
+                connections.append(db)
+                return db
+            for stage in ("classifying", "ready", None):
+                with self.subTest(stage=stage):
+                    setup = real_connect(path)
+                    setup.execute("DROP TABLE IF EXISTS browser_pending_jobs")
+                    if stage is not None:
+                        setup.execute("CREATE TABLE browser_pending_jobs(stage TEXT, error TEXT)")
+                        setup.execute("INSERT INTO browser_pending_jobs VALUES(?, NULL)", (stage,))
+                    setup.commit()
+                    setup.close()
+                    with patch.object(manage.sqlite3, "connect", side_effect=connect):
+                        self.assertEqual(manage.omlx_has_pending_inference(path), stage == "classifying")
+                    try:
+                        with self.assertRaises(sqlite3.ProgrammingError):
+                            connections[-1].execute("SELECT 1")
+                    finally:
+                        connections[-1].close()
+
     def test_omlx_cli_prefers_app_cli_over_homebrew_path(self):
         with tempfile.TemporaryDirectory() as directory:
             brew_dir = Path(directory) / "opt/homebrew/bin"

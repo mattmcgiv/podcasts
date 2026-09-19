@@ -1,5 +1,6 @@
 """Mac service setup, immutable releases, DNS, certificates, and backup."""
 import argparse
+from contextlib import closing
 import hashlib
 import ipaddress
 import json
@@ -244,7 +245,9 @@ def omlx_has_pending_inference(path):
     if not path.is_file():
         return False
     try:
-        with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
+        # A Connection context manager ends a transaction; it does not close the file.
+        # This probe runs every five seconds while oMLX is unavailable.
+        with closing(sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)) as db:
             row = db.execute(
                 "SELECT 1 FROM browser_pending_jobs WHERE stage NOT IN ('blocked','review') "
                 "AND (error IS NULL OR error NOT IN ('memory_busy','power_unplugged','power_status_unavailable')) "
