@@ -61,8 +61,9 @@ it("shows Syncing while a tap waits on the Mac", async () => {
   vi.mocked(client.synchronize).mockReturnValue(new Promise(resolve => { finish = () => resolve(); }));
   render(<OfflineSettings />);
   fireEvent.click(await screen.findByRole("button", { name: "Sync now" }));
-  expect(await screen.findByRole("status")).toHaveTextContent("Syncing…");
-  expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
+  expect(await screen.findByRole("button", { name: "Syncing…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Syncing…" })).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("status")).toHaveTextContent("Syncing…");
   finish();
   await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
   expect(screen.getByRole("status")).toHaveTextContent("Done.");

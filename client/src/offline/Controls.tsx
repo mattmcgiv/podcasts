@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { Api } from "../api";
-import { assertPasskey } from "../passkey";
 import { defaultDeviceName, resolveConflict, state, synchronize, syncError } from "./client";
 import { downloadError, prefetch, savePreferences } from "./downloads";
+import { signInAndSync } from "./signIn";
 import { allDownloads, updateState, type Download, type LocalState } from "./store";
 import { fmtTime } from "../lib";
 
@@ -29,23 +28,18 @@ export function OfflineSettings() {
   const [downloads, setDownloads] = useState<Download[]>([]);
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [action, setAction] = useState<"sync" | "sign-in" | "backup" | null>(null);
   useEffect(() => {
     let active = true;
     const refresh = () => { void Promise.all([state(), allDownloads()]).then(([s, d]) => { if (active) { setLocal(s); setDownloads(d); } }).catch(() => {}); };
     refresh(); window.addEventListener("pods-offline-changed", refresh);
     return () => { active = false; window.removeEventListener("pods-offline-changed", refresh); };
   }, []);
-  async function run(action: () => Promise<void>, pending = "") {
-    setBusy(true); setStatus(pending);
-    try { await action(); setStatus("Done."); }
+  async function run(work: () => Promise<void>, name: "sync" | "sign-in" | "backup" | null = null, pending = "") {
+    setBusy(true); setAction(name); setStatus(pending);
+    try { await work(); setStatus("Done."); }
     catch (error) { setStatus(error instanceof Error ? error.message : "Mac unavailable."); }
-    finally { setBusy(false); }
-  }
-  async function signIn() {
-    const options = await Api.loginOptions();
-    await Api.login(options.state_id, await assertPasskey(options.publicKey));
-    await synchronize();
-    await prefetch();
+    finally { setBusy(false); setAction(null); }
   }
   if (!local) return <section className="settings-section"><p>Loading offline library…</p></section>;
   return <section className="settings-section" aria-label="Offline library" aria-busy={busy}>
@@ -56,9 +50,11 @@ export function OfflineSettings() {
     <p>{local.lastSync ? `Last sync: ${new Date(local.lastSync).toLocaleString()}` : "Not synchronized yet."} {local.outbox.length} pending changes.</p>
     {local.snapshot?.processing && <p className="settings-detail">At last sync: {counted(local.snapshot.processing.pending, "episode")} pending on Mac, {local.snapshot.processing.failed ?? 0} failed and retrying, {counted(local.snapshot.processing.blocked ?? 0, "episode")} could not be processed automatically.
       {local.snapshot.processing.storage.blocked ? " Mac processing paused: storage limit or low disk space." : ""}</p>}
-    <button type="button" disabled={busy} onClick={() => void run(async () => { await synchronize(); await prefetch(); }, "Syncing…")}>Sync now</button>
-    <button type="button" disabled={busy} onClick={() => void run(signIn, "Syncing…")}>Sign in to Mac</button>
-    <button type="button" onClick={() => void run(exportSyncBackup)}>Export state backup</button>
+    <div className="settings-action-list">
+      <button type="button" className={`settings-btn primary${action === "sync" ? " is-busy" : ""}`} disabled={busy} aria-busy={action === "sync"} onClick={() => void run(async () => { await synchronize(); await prefetch(); }, "sync", "Syncing…")}>{action === "sync" ? "Syncing…" : "Sync now"}</button>
+      <button type="button" className={`settings-btn primary${action === "sign-in" ? " is-busy" : ""}`} disabled={busy} aria-busy={action === "sign-in"} onClick={() => void run(signInAndSync, "sign-in", "Signing in…")}>{action === "sign-in" ? "Signing in…" : "Sign in to Mac"}</button>
+      <button type="button" className={`settings-btn${action === "backup" ? " is-busy" : ""}`} disabled={busy} aria-busy={action === "backup"} onClick={() => void run(exportSyncBackup, "backup", "Exporting…")}>{action === "backup" ? "Exporting…" : "Export state backup"}</button>
+    </div>
     <label>Automatic episodes <input aria-label="Automatic episodes" type="number" min="0" max="1000" value={local.preferences.count}
       onChange={event => void run(() => savePreferences({ ...local.preferences, count: Number(event.target.value) }))} /></label>
     <label>Storage limit (GiB) <input aria-label="Storage limit (GiB)" type="number" min="0.1" step="0.1" value={local.preferences.limit / 1024 ** 3}
@@ -71,8 +67,8 @@ export function OfflineSettings() {
       <p>{local.device_name ?? defaultDeviceName()}: {changeDescription(local, operation.entity, operation.field, local.outbox.filter(o => o.entity === operation.entity && o.field === operation.field).at(-1)?.value)}</p>
       <p>{local.snapshot?.writers?.[`${operation.entity}:${operation.field}`]?.device ?? "Shared library"}: {changeDescription(local, operation.entity, operation.field,
         operation.entity === "settings" ? local.snapshot?.settings[operation.field] : operation.field === "position" ? {seconds:local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.position_secs} : operation.field === "played" ? local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.played_at != null : "Subscription")}</p>
-      <button type="button" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, true))}>Keep this device’s change</button>
-      <button type="button" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, false))}>Use shared change</button>
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, true))}>Keep this device’s change</button>
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, false))}>Use shared change</button>
     </div>)}
     {local.outbox.filter(o => o.error).map(o => <p key={o.id} role="alert">{o.error} Your change is saved on this device.</p>)}
   </section>;
