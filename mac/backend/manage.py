@@ -1,5 +1,6 @@
 """Mac service setup, immutable releases, DNS, certificates, and backup."""
 import argparse
+from contextlib import closing
 import hashlib
 import ipaddress
 import json
@@ -68,19 +69,24 @@ def json_request(url, token, value=None, method=None):
     return json.loads(body) if body else None
 
 
-def wifi_address():
-    ports = subprocess.check_output(["networksetup", "-listallhardwareports"], text=True)
-    lines = ports.splitlines()
-    device = next((lines[i + 1].split(": ", 1)[1] for i, line in enumerate(lines[:-1]) if line in ("Hardware Port: Wi-Fi", "Hardware Port: AirPort")), None)
-    if not device:
-        return None
-    result = subprocess.run(["ipconfig", "getifaddr", device], capture_output=True, text=True)
-    if result.returncode:
-        return None
-    address = ipaddress.ip_address(result.stdout.strip())
-    if address.version != 4 or not address.is_private or address.is_loopback or address.is_link_local:
-        return None
-    return str(address)
+def tailscale_address():
+    """Fail closed: only bind a connected tailnet address, never Wi-Fi or all interfaces."""
+    cli = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    try:
+        result = subprocess.run([cli, "status", "--json"], capture_output=True, text=True, timeout=10,
+                                env=dict(os.environ, TAILSCALE_BE_CLI="1"))
+        if result.returncode:
+            return None
+        status = json.loads(result.stdout)
+        if status.get("BackendState") != "Running" or not status.get("Self", {}).get("Online"):
+            return None
+        for raw in status.get("TailscaleIPs", []):
+            address = ipaddress.ip_address(raw)
+            if address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"):
+                return str(address)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 def update_dns(config, address):
@@ -244,7 +250,9 @@ def omlx_has_pending_inference(path):
     if not path.is_file():
         return False
     try:
-        with sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True) as db:
+        # A Connection context manager ends a transaction; it does not close the file.
+        # This probe runs every five seconds while oMLX is unavailable.
+        with closing(sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)) as db:
             row = db.execute(
                 "SELECT 1 FROM browser_pending_jobs WHERE stage NOT IN ('blocked','review') "
                 "AND (error IS NULL OR error NOT IN ('memory_busy','power_unplugged','power_status_unavailable')) "
@@ -380,7 +388,7 @@ def launch():
                     env,
                     same_session=True,
                 )
-            address = wifi_address()
+            address = tailscale_address()
             if address != previous or (address and proxy and proxy.poll() is not None):
                 if proxy:
                     stop_process(proxy); proxy = None
@@ -401,12 +409,12 @@ https://{DOMAIN}:8443 {{
 ''')
                     proxy = spawn_grouped(["caddy", "run", "--config", str(caddyfile)], env)
                 previous = address
-            if address != dns_previous and time.time() >= next_dns:
+            if address and address != dns_previous and time.time() >= next_dns:
                 try:
                     update_dns(config, address)
                     dns_previous = address
                 except Exception:
-                    print("Local DNS update failed; retrying.", file=sys.stderr)
+                    print("Tailscale DNS update failed; retrying.", file=sys.stderr)
                 next_dns = time.time() + 60
             if time.time() >= next_certificate:
                 try:

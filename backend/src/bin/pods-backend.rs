@@ -20,7 +20,7 @@ fn check_local_model() -> i32 {
             text: "Now we discuss the history of computing and its early pioneers.".into(),
         },
     ];
-    let permit = match pods_backend::omlx_lock::acquire_pods(
+    let permit = match pods_backend::omlx_lock::acquire_chat(
         pods_backend::omlx_lock::PURPOSE_CLASSIFICATION,
         pods_backend::local_worker::MODEL,
     ) {

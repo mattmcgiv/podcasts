@@ -314,7 +314,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     vi.useRealTimers();
   });
 
-  it("selects iPhone and Mac playback outputs", async () => {
+  it("selects This device and Mac playback outputs", async () => {
     window.webkit = {
       messageHandlers: {
         podsAudio: {
@@ -325,7 +325,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));
     await screen.findByRole("dialog", { name: "Player" });
-    await user.click(screen.getByRole("button", { name: "iPhone" }));
+    await user.click(screen.getByRole("button", { name: "This device" }));
     act(() => {
       window.PodsAudioBridge?.emit({
         type: "cast",
@@ -411,7 +411,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     );
     await user.click(screen.getByText("start"));
     expect(await screen.findByRole("group", { name: "Audio output" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "iPhone" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "This device" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry Mac" })).toBeInTheDocument();
   });
 
@@ -523,7 +523,7 @@ describe("PlayerSheet + MiniPlayer", () => {
     await screen.findByRole("dialog", { name: "Player" });
     await user.click(await screen.findByRole("button", { name: "Mac" }));
     expect(await screen.findByText(/Playing through Mac/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "iPhone" }));
+    await user.click(screen.getByRole("button", { name: "This device" }));
     expect(await screen.findByRole("status", { name: "Mac speaker message" })).toHaveTextContent(/may still be playing/);
   });
 });

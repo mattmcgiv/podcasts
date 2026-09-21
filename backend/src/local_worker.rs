@@ -169,7 +169,10 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         )?;
         let _ = backend.refresh("local-subscription");
     }
-    if let Some(raw) = backend.db.scalar_string("SELECT value FROM settings WHERE key='browser_trim_podcast_ids'", [])? {
+    if let Some(raw) = backend.db.scalar_string(
+        "SELECT value FROM settings WHERE key='browser_trim_podcast_ids'",
+        [],
+    )? {
         let ids: Vec<i64> = serde_json::from_str(&raw).unwrap_or_default();
         {
             let conn = backend.db.lock()?;
@@ -177,7 +180,10 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
                 crate::jobs::JobStore::archive_except_newest_two(&conn, podcast_id)?;
             }
         }
-        backend.db.execute("DELETE FROM settings WHERE key='browser_trim_podcast_ids'", [])?;
+        backend.db.execute(
+            "DELETE FROM settings WHERE key='browser_trim_podcast_ids'",
+            [],
+        )?;
     }
     backend.db.execute("INSERT OR IGNORE INTO browser_jobs(episode_id)
         SELECT e.id FROM browser_episode_catalog e JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
@@ -423,7 +429,9 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         if !matches!(parsed.scheme(), "https" | "http") {
             return Err(failure("unsupported audio URL"));
         }
-        download_source_with_progress(backend, url, source, |done, total| progress(backend, id, done, total))?;
+        download_source_with_progress(backend, url, source, |done, total| {
+            progress(backend, id, done, total)
+        })?;
     }
     let (source_hash, _) = ArtifactStore::hash_file(source).map_err(failure)?;
     let transcript_file = work.join(format!("transcript-{source_hash}.json"));
@@ -437,13 +445,27 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
         // Match transcribe.py's source clock, including container padding.
         let probe = Command::new("ffprobe")
-            .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
-            .arg(source).output().map_err(failure)?;
-        let duration = String::from_utf8_lossy(&probe.stdout).trim().parse::<f64>().map_err(failure)?;
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(source)
+            .output()
+            .map_err(failure)?;
+        let duration = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(failure)?;
         if !probe.status.success() || !duration.is_finite() || duration <= 0.0 {
             return Err(failure("invalid transcription duration"));
         }
-        let checkpoints = work.join(format!("words-{source_hash}-49e6aa286ad60c14352c404340ded53710378a11"));
+        let checkpoints = work.join(format!(
+            "words-{source_hash}-49e6aa286ad60c14352c404340ded53710378a11"
+        ));
         let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
         let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
             .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
@@ -492,18 +514,19 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
                 &segments,
                 work,
                 &classifier_run,
+                &crate::jev::batch_ranges(&segments)?,
                 |start, end| crate::jev::classify_window(&segments, start, end, WINDOW_CONTEXT),
                 |done| progress(backend, id, done, segments.len() as u64),
             )?
         } else {
             crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
             let permit =
-                crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
-            crate::omlx_lock::load_for_classification(&permit, MODEL)?;
+                crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)?;
             let labels = classify_windows_with(
                 &segments,
                 work,
                 &classifier_run,
+                &fixed_window_ranges(&segments),
                 |start, end| classify_window(&segments, start, end, WINDOW_CONTEXT, &permit),
                 |done| progress(backend, id, done, segments.len() as u64),
             )?;
@@ -587,8 +610,15 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             model: MODEL.into(),
             pipeline_version: run,
         };
-        backend.db.with_transaction(|tx|{
-            tx.execute("INSERT OR IGNORE INTO browser_artifacts VALUES(?,?,?)",params![manifest.hash,id,serde_json::to_string(&manifest).map_err(failure)?])?;
+        backend.db.with_transaction(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO browser_artifacts VALUES(?,?,?)",
+                params![
+                    manifest.hash,
+                    id,
+                    serde_json::to_string(&manifest).map_err(failure)?
+                ],
+            )?;
             Ok(())
         })?;
         manifest
@@ -600,9 +630,14 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     crate::power_gate::require_external_power()?;
     crate::pipeline_pause::require_not_paused()?;
     crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
-    let notes_permit = crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
-    let notes = generate_notes_with_progress(&segments, &labels, &manifest.timeline, &notes_permit,
-        |done, total| progress(backend, id, done, total))?;
+    let notes_permit = crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
+    let notes = generate_notes_with_progress(
+        &segments,
+        &labels,
+        &manifest.timeline,
+        &notes_permit,
+        |done, total| progress(backend, id, done, total),
+    )?;
     drop(notes_permit);
     backend.db.with_transaction(|tx| {
         tx.execute(
@@ -720,12 +755,18 @@ fn kill_registered_whisper_group() {
 fn transcription_progress(checkpoints: &Path, duration: f64) -> (u64, u64) {
     let mut seconds = 0.0;
     for start in (0..duration.ceil() as u64).step_by(180) {
-        if fs::read(checkpoints.join(format!("{start}.json"))).ok()
-            .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok()).is_some() {
+        if fs::read(checkpoints.join(format!("{start}.json")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
+            .is_some()
+        {
             seconds += (duration - start as f64).min(180.0);
         }
     }
-    ((seconds * 1000.0).round() as u64, (duration * 1000.0).round() as u64)
+    (
+        (seconds * 1000.0).round() as u64,
+        (duration * 1000.0).round() as u64,
+    )
 }
 
 #[cfg(test)]
@@ -733,7 +774,13 @@ fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> 
     run_whisper_child_with_progress(python, script, source, dest, || Ok(()))
 }
 
-fn run_whisper_child_with_progress(python: &str, script: &str, source: &Path, dest: &Path, mut report: impl FnMut() -> Result<(), Error>) -> Result<(), Error> {
+fn run_whisper_child_with_progress(
+    python: &str,
+    script: &str,
+    source: &Path,
+    dest: &Path,
+    mut report: impl FnMut() -> Result<(), Error>,
+) -> Result<(), Error> {
     #[cfg(test)]
     let _whisper_test_lock = WHISPER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     crate::power_gate::require_external_power()?;
@@ -817,7 +864,12 @@ fn download_source(backend: &Backend, url: &str, source: &Path) -> Result<(), Er
     download_source_with_progress(backend, url, source, |_, _| Ok(()))
 }
 
-fn download_source_with_progress(backend: &Backend, url: &str, source: &Path, mut report: impl FnMut(u64, u64) -> Result<(), Error>) -> Result<(), Error> {
+fn download_source_with_progress(
+    backend: &Backend,
+    url: &str,
+    source: &Path,
+    mut report: impl FnMut(u64, u64) -> Result<(), Error>,
+) -> Result<(), Error> {
     let partial = source.with_extension("part");
     let metadata = source.with_extension("download.json");
     let prior: Value = fs::read(&metadata)
@@ -904,7 +956,9 @@ fn download_source_with_progress(backend: &Backend, url: &str, source: &Path, mu
     let mut input = response.into_reader();
     let mut received = 0u64;
     let base = if resumed { offset } else { 0 };
-    if let Some(length) = length { report(base, base + length)?; }
+    if let Some(length) = length {
+        report(base, base + length)?;
+    }
     let mut last_report = Instant::now();
     let mut buffer = [0u8; 65536];
     loop {
@@ -920,7 +974,9 @@ fn download_source_with_progress(backend: &Backend, url: &str, source: &Path, mu
         }
         output.write_all(&buffer[..count]).map_err(failure)?;
         if last_report.elapsed() >= Duration::from_secs(1) {
-            if let Some(length) = length { report(base + received, base + length)?; }
+            if let Some(length) = length {
+                report(base + received, base + length)?;
+            }
             last_report = Instant::now();
         }
     }
@@ -954,12 +1010,7 @@ pub fn validate_segments(segments: &[Segment]) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-fn classification_prompt(
-    segments: &[Segment],
-    start: usize,
-    end: usize,
-    context: usize,
-) -> String {
+fn classification_prompt(segments: &[Segment], start: usize, end: usize, context: usize) -> String {
     let core: Vec<_> = segments[start..end].iter().map(|s| s.id.as_str()).collect();
     let data: Vec<_> = segments[start.saturating_sub(context)..(end + context).min(segments.len())]
         .iter().map(|s| json!({"id":s.id,"start":s.start,"end":s.end,"text":s.text,"evidence_quote":evidence_quote(s)})).collect();
@@ -1013,20 +1064,25 @@ pub fn validate_labels(value: &Value, segments: &[Segment]) -> Result<Vec<Label>
         .collect()
 }
 
+fn fixed_window_ranges(segments: &[Segment]) -> Vec<(usize, usize)> {
+    (0..segments.len()).step_by(WINDOW_CORE).map(|start| (start, (start + WINDOW_CORE).min(segments.len()))).collect()
+}
+
 fn classify_windows_with(
     segments: &[Segment],
     work: &Path,
     classifier_run: &str,
+    ranges: &[(usize, usize)],
     mut classify: impl FnMut(usize, usize) -> Result<Vec<Label>, Error>,
     mut report: impl FnMut(u64) -> Result<(), Error>,
 ) -> Result<Vec<Label>, Error> {
     let mut labels = Vec::new();
-    for start in (0..segments.len()).step_by(WINDOW_CORE) {
-        let end = (start + WINDOW_CORE).min(segments.len());
+    for &(start, end) in ranges {
         let checkpoint = work.join(format!("window-{classifier_run}-{start}.json"));
         let batch = if checkpoint.is_file() {
             let saved: Vec<Label> =
-                serde_json::from_slice(&fs::read(&checkpoint).map_err(failure)?).map_err(failure)?;
+                serde_json::from_slice(&fs::read(&checkpoint).map_err(failure)?)
+                    .map_err(failure)?;
             validate_labels(&json!({"labels": saved}), &segments[start..end])?
         } else {
             let batch = classify(start, end)?;
@@ -1143,10 +1199,7 @@ pub fn validate_blocks(value: &Value, segments: &[Segment]) -> Result<Vec<Label>
     assign_blocks(value, segments, false, false)
 }
 
-fn validate_blocks_last_attempt(
-    value: &Value,
-    segments: &[Segment],
-) -> Result<Vec<Label>, Error> {
+fn validate_blocks_last_attempt(value: &Value, segments: &[Segment]) -> Result<Vec<Label>, Error> {
     assign_blocks(value, segments, true, true)
 }
 
@@ -1820,26 +1873,78 @@ mod download_tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0; 1024];
                 stream.read(&mut request).unwrap();
-                write!(stream, "HTTP/1.1 200 OK\r\n{}Connection: close\r\n\r\naudio", if known { "Content-Length: 5\r\n" } else { "" }).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{}Connection: close\r\n\r\naudio",
+                    if known { "Content-Length: 5\r\n" } else { "" }
+                )
+                .unwrap();
             });
             let mut reports = Vec::new();
-            download_source_with_progress(&backend, &format!("http://{address}/audio"), &temp.path().join(format!("{known}.audio")), |done, total| {
-                reports.push((done,total)); Ok(())
-            }).unwrap();
+            download_source_with_progress(
+                &backend,
+                &format!("http://{address}/audio"),
+                &temp.path().join(format!("{known}.audio")),
+                |done, total| {
+                    reports.push((done, total));
+                    Ok(())
+                },
+            )
+            .unwrap();
             server.join().unwrap();
-            assert_eq!(reports, if known { vec![(0,5),(5,5)] } else { vec![(5,5)] });
+            assert_eq!(
+                reports,
+                if known {
+                    vec![(0, 5), (5, 5)]
+                } else {
+                    vec![(5, 5)]
+                }
+            );
         }
     }
 
     #[test]
     fn progress_is_cleared_when_stage_changes() {
         let (backend, _temp) = local_job_backend();
-        backend.db.execute("INSERT INTO browser_jobs(episode_id,stage) VALUES(1,'transcribing')", []).unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage) VALUES(1,'transcribing')",
+                [],
+            )
+            .unwrap();
         progress(&backend, 1, 180, 200).unwrap();
-        assert_eq!(backend.db.scalar_i64("SELECT completed_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), Some(180));
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT completed_units FROM browser_jobs WHERE episode_id=1",
+                    []
+                )
+                .unwrap(),
+            Some(180)
+        );
         stage(&backend, 1, "classifying").unwrap();
-        assert_eq!(backend.db.scalar_i64("SELECT completed_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), None);
-        assert_eq!(backend.db.scalar_i64("SELECT total_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), None);
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT completed_units FROM browser_jobs WHERE episode_id=1",
+                    []
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT total_units FROM browser_jobs WHERE episode_id=1",
+                    []
+                )
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -2655,7 +2760,10 @@ mod download_tests {
         );
         let retry = backend
             .db
-            .scalar_i64("SELECT next_retry_at FROM browser_jobs WHERE episode_id=1", [])
+            .scalar_i64(
+                "SELECT next_retry_at FROM browser_jobs WHERE episode_id=1",
+                [],
+            )
             .unwrap()
             .unwrap();
         let expected = crate::db::now_unix() + crate::pipeline_pause::RETRY_SECS;
@@ -2695,8 +2803,8 @@ mod download_tests {
             .execute(
                 "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'queued',0)",
                 [],
-        )
-        .unwrap();
+            )
+            .unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let mock = start_mock_omlx(
             json!({"active_requests":0,"waiting_requests":0}),
@@ -2855,7 +2963,10 @@ mod download_tests {
         let marker = dir.path().join("started");
         fs::write(
             &script,
-            format!("from pathlib import Path\nPath({:?}).write_text('started')\n", marker),
+            format!(
+                "from pathlib import Path\nPath({:?}).write_text('started')\n",
+                marker
+            ),
         )
         .unwrap();
         let dest = dir.path().join("out.json");
@@ -2880,11 +2991,9 @@ mod download_tests {
             true,
             || {
                 crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
-                let permit = crate::omlx_lock::acquire_pods(
-                    crate::omlx_lock::PURPOSE_CLASSIFICATION,
-                    MODEL,
-                )
-                .unwrap();
+                let permit =
+                    crate::omlx_lock::acquire_pods(crate::omlx_lock::PURPOSE_CLASSIFICATION, MODEL)
+                        .unwrap();
                 crate::power_gate::with_test_power_status(
                     crate::power_gate::PowerStatus::Battery,
                     || {
@@ -3423,6 +3532,7 @@ mod download_tests {
             &segments,
             dir.path(),
             "run",
+            &fixed_window_ranges(&segments),
             |start, end| {
                 Ok(segments[start..end]
                     .iter()
@@ -3744,24 +3854,44 @@ mod download_tests {
                 }];
                 let mut reports = Vec::new();
                 let notes = generate_notes_with_progress(
-                    &vec![segments[0].clone(); 65], &vec![labels[0].clone(); 65], &timeline, &permit,
+                    &vec![segments[0].clone(); 65],
+                    &vec![labels[0].clone(); 65],
+                    &timeline,
+                    &permit,
                     |done, total| {
                         progress(&backend, 1, done, total)?;
                         reports.push((done, total));
                         Ok(())
                     },
-                ).unwrap();
+                )
+                .unwrap();
                 assert_eq!(reports, vec![(0, 65), (64, 65), (65, 65)]);
-                assert_eq!(backend.db.scalar_i64("SELECT completed_units FROM browser_jobs WHERE episode_id=1", []).unwrap(), Some(65));
+                assert_eq!(
+                    backend
+                        .db
+                        .scalar_i64(
+                            "SELECT completed_units FROM browser_jobs WHERE episode_id=1",
+                            []
+                        )
+                        .unwrap(),
+                    Some(65)
+                );
                 assert!(notes.as_array().is_some_and(|a| !a.is_empty()));
                 // The mock returns s0; the second batch rejects that unknown source.
                 let mut invalid_second_batch = vec![segments[0].clone(); 65];
                 invalid_second_batch[64].id = "s64".into();
                 reports.clear();
                 assert!(generate_notes_with_progress(
-                    &invalid_second_batch, &vec![labels[0].clone(); 65], &timeline, &permit,
-                    |done, total| { reports.push((done, total)); Ok(()) },
-                ).is_err());
+                    &invalid_second_batch,
+                    &vec![labels[0].clone(); 65],
+                    &timeline,
+                    &permit,
+                    |done, total| {
+                        reports.push((done, total));
+                        Ok(())
+                    },
+                )
+                .is_err());
                 assert_eq!(reports, vec![(0, 65), (64, 65)]);
                 let ads = vec![Label {
                     segment_id: "s0".into(),

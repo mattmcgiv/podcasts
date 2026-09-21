@@ -1008,11 +1008,11 @@ fn browser_show_notes_queue_and_artifact_manifest() {
     let cookie = format!("{SESSION_COOKIE}={token}");
     let mut req = HttpRequest::new("GET", "/api/episodes/1/artifact-manifest");
     req = req.with_header("cookie", cookie.clone());
-    assert_eq!(backend.handle(req).status_code, 200);
+    assert_eq!(backend.handle(req).status_code, 404);
     let mut req = HttpRequest::new("POST", "/api/episodes/1/show-notes");
     req = req.with_header("cookie", cookie);
     let notes = backend.handle(req);
-    assert!(notes.status_code == 202 || notes.status_code == 200);
+    assert_eq!(notes.status_code, 404);
 }
 
 fn cookie_req(method: &str, target: &str, token: &str) -> HttpRequest {
@@ -2080,7 +2080,7 @@ fn backend_retry_unsubscribe_invalid_position_and_browser_sync() {
     let notes = backend.handle(
         HttpRequest::new("POST", "/api/episodes/1/show-notes").with_header("cookie", cookie.clone()),
     );
-    assert!(notes.status_code == 202 || notes.status_code == 200);
+    assert_eq!(notes.status_code, 404);
     let bad_art = backend.handle(
         HttpRequest::new("GET", "/api/artifacts/nope").with_header("cookie", cookie.clone()),
     );
@@ -2577,7 +2577,7 @@ fn coordinator_caps_steps_and_browser_covers_notes_and_settings() {
             .with_json(&json!({
                 "client_id":"c1",
                 "actions":[{
-                    "id":"bad","sequence":1,"entity":"settings","field":"theme",
+                    "id":"bad","sequence":1,"entity":"settings","field":"unsupported_setting",
                     "base_revision":0,"value":"dark"
                 }]
             })),

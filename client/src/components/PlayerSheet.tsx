@@ -185,7 +185,7 @@ export function PlayerSheet() {
                 className={`chip${p.cast.output !== "mac" ? " active" : ""}`}
                 onClick={() => p.setCastOutput("local")}
               >
-                iPhone
+                This device
               </button>
               <button
                 type="button"
@@ -195,7 +195,7 @@ export function PlayerSheet() {
                 title={
                   p.cast.available || p.cast.connected
                     ? p.cast.name ?? "Mac"
-                    : "Mac is not reachable on this Wi-Fi"
+                    : "Mac is not reachable through Tailscale"
                 }
               >
                 {p.cast.connected || p.cast.output === "mac"

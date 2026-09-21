@@ -88,7 +88,7 @@ describe("AuthGate", () => {
         <p>Library</p>
       </AuthGate>,
     );
-    expect(await screen.findByText(/same Wi-Fi/)).toBeInTheDocument();
+    expect(await screen.findByText(/Tailscale/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeInTheDocument();
     expect(screen.queryByText("Library")).not.toBeInTheDocument();
   });

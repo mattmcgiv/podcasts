@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { OfflineSettings } from "../offline/Controls";
-import { offlineEnabled } from "../offline/client";
+import { offlineEnabled, enqueue } from "../offline/client";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
@@ -46,6 +46,11 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [addedGuids, setAddedGuids] = useState<Set<string>>(new Set());
   const [addingGuid, setAddingGuid] = useState<string | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(currentThemePreference);
+  useEffect(() => {
+    const update = () => setThemePreference(currentThemePreference());
+    window.addEventListener("pods-theme-changed", update);
+    return () => window.removeEventListener("pods-theme-changed", update);
+  }, []);
   const [refreshing, setRefreshing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -170,6 +175,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   function setTheme(preference: ThemePreference) {
     setThemePreference(preference);
     applyThemePreference(preference);
+    if (offlineEnabled()) void enqueue("settings", "theme", preference);
   }
 
   async function enableAdRemoval() {

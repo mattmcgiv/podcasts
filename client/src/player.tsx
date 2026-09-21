@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
-import { offlineEnabled } from "./offline/client";
+import { offlineEnabled, beginPlaybackSession, endPlaybackSession, enqueue, syncBeforePlayback } from "./offline/client";
 import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
@@ -101,6 +101,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [showNotesGenerating, setShowNotesGenerating] = useState(false);
   const [showNotesError, setShowNotesError] = useState<string | null>(null);
 
+  const playRequestRef = useRef(0);
+  // WebKit can reject play after async sync. The next tap must reach play directly.
+  const gestureRetryRef = useRef<number | null>(null);
   const audioRef = useRef<AudioEngine | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
   const playingHashRef = useRef<string | undefined>(undefined);
@@ -146,6 +149,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const close = useCallback(() => {
+    ++playRequestRef.current;
+    if (currentRef.current) endPlaybackSession(currentRef.current.id);
     const a = audioRef.current;
     if (a) {
       flushPosition();
@@ -297,19 +302,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [requestShowNotes]);
 
   const playEpisode = useCallback(
-    (item: EpisodeItem, context: PlayContext) => {
+    async (item: EpisodeItem, context: PlayContext) => {
       if (currentRef.current?.id === item.id) {
         contextRef.current = context;
         setExpanded(true);
         loadEpisodeDetail(item.id);
         return;
       }
+      const request = ++playRequestRef.current;
+      gestureRetryRef.current = null;
+      if (offlineEnabled()) {
+        await syncBeforePlayback();
+        try { item = await Api.episode(item.id); } catch { /* Use the local episode offline. */ }
+        if (request !== playRequestRef.current) return;
+        beginPlaybackSession(item.id, item.position_revision);
+      }
       flushPosition();
+      if (currentRef.current) endPlaybackSession(currentRef.current.id);
       const a = ensureAudio();
       contextRef.current = context;
       if (offlineEnabled() && (!item.downloaded || !item.manifest)) return;
       if (offlineEnabled()) protectPlayingArtifact(item.manifest?.hash ?? null);
       playingHashRef.current = item.manifest?.hash;
+      if (offlineEnabled()) void enqueue("settings", "last_listened", item.id).catch(() => {});
       setCurrent(item);
       currentRef.current = item;
       currentEpisodeVisitRef.current = {
@@ -335,7 +350,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         a.src = item.audio_url;
       }
-      void a.play().catch(() => {
+      void a.play().catch((error: unknown) => {
+        if (request !== playRequestRef.current) return;
+        if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
         setPlaying(false);
         setInitializing(false);
       });
@@ -360,6 +377,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     );
     try {
       try {
+        if (offlineEnabled()) protectPlayingArtifact(null);
         await Api.markPlayed(completedId);
         console.log(`playback_mark_played_succeeded episode_id=${completedId}`);
         emitEpisodesChanged();
@@ -472,18 +490,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t);
   }, [playing, flushPosition]);
 
-  // Load persisted settings once.
   useEffect(() => {
-    void Api.settings()
-      .then((s) => {
-        setSpeedState(s.speed);
-        speedRef.current = s.speed;
-        setAutoplayState(s.autoplay);
-        autoplayRef.current = s.autoplay;
+    let active = true;
+    const refresh = () => {
+      void Api.settings().then(s => {
+        if (!active) return;
+        setSpeedState(s.speed); speedRef.current = s.speed;
+        setAutoplayState(s.autoplay); autoplayRef.current = s.autoplay;
         if (audioRef.current) audioRef.current.playbackRate = s.speed;
-      })
-      .catch(() => {});
-  }, []);
+      }).catch(() => {});
+      const cur = currentRef.current;
+      const audio = audioRef.current;
+      if (offlineEnabled() && cur && audio?.paused) void Api.episode(cur.id).then(item => {
+        if (!active || currentRef.current?.id !== item.id || !audio.paused) return;
+        if (item.played_at != null) { close(); return; }
+        if (item.manifest?.hash !== playingHashRef.current) return;
+        if (Math.abs(audio.currentTime - item.position_secs) > 0.25) {
+          audio.currentTime = item.position_secs; setPosition(item.position_secs);
+        }
+        beginPlaybackSession(item.id, item.position_revision);
+      }).catch(() => {});
+    };
+    refresh();
+    window.addEventListener("pods-shared-settings", refresh);
+    return () => { active = false; window.removeEventListener("pods-shared-settings", refresh); };
+  }, [close]);
 
   const setSpeed = useCallback((value: number, correlationId?: string) => {
     setSpeedState(value);
@@ -508,7 +539,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const toggle = useCallback(() => {
     const a = audioRef.current;
     if (!a || !currentRef.current) return;
-    if (a.paused) void a.play().catch(() => {});
+    const cur = currentRef.current;
+    const request = ++playRequestRef.current;
+    const play = () => a.play().catch((error: unknown) => {
+      if (request === playRequestRef.current && (error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") {
+        gestureRetryRef.current = cur.id;
+      }
+    });
+    if (a.paused && gestureRetryRef.current === cur.id) {
+      gestureRetryRef.current = null;
+      void play();
+    } else if (a.paused && offlineEnabled()) {
+      void syncBeforePlayback().then(() => Api.episode(cur.id)).then(item => {
+        if (request !== playRequestRef.current || currentRef.current?.id !== item.id || item.played_at != null) return;
+        beginPlaybackSession(item.id, item.position_revision);
+        a.currentTime = item.position_secs;
+        return play();
+      }).catch(() => { if (request === playRequestRef.current && currentRef.current?.id === cur.id) void play(); });
+    } else if (a.paused) void play();
     else a.pause();
   }, []);
 

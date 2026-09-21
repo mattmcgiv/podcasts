@@ -934,12 +934,11 @@ impl Backend {
         Ok(())
     }
 
-    pub(crate) fn episode_detail(&self, id: i64) -> Result<EpisodeDetail, Error> {
+    pub(crate) fn episode_detail_row(conn: &rusqlite::Connection, id: i64) -> Result<EpisodeDetail, Error> {
         let sql = format!(
             "SELECT e.id, e.podcast_id, p.title, p.image_url, e.title, e.audio_url, e.duration_secs, e.published_at, e.image_url, CAST(COALESCE(s.position_secs, 0) AS REAL), s.played_at, e.notes_html, s.archived_at, CASE WHEN j.stage = 'ready' THEN 'ad-free' WHEN j.stage = 'failed' THEN 'failed' WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'unfiltered' ELSE 'preparing' END, CASE WHEN j.stage = 'failed' THEN 'retry' WHEN j.id IS NULL OR j.stage = 'cancelled' THEN 'prepare' ELSE NULL END, j.stage, j.blocking_reason FROM episodes e JOIN podcasts p ON p.id = e.podcast_id LEFT JOIN episode_state s ON s.episode_id = e.id LEFT JOIN ad_removal_jobs j ON j.episode_id = e.id WHERE e.id = ?"
         );
-        let conn = self.db.lock()?;
-        let mut detail: EpisodeDetail = conn.query_row(&sql, params![id], |row| {
+        let detail: EpisodeDetail = conn.query_row(&sql, params![id], |row| {
             Ok(EpisodeDetail {
                 id: row.get(0)?,
                 podcast_id: row.get(1)?,
@@ -962,7 +961,12 @@ impl Backend {
                 ad_markers: vec![],
             })
         }).optional()?.ok_or(Error::NotFound)?;
-        drop(conn);
+        Ok(detail)
+    }
+
+    pub(crate) fn episode_detail(&self, id: i64) -> Result<EpisodeDetail, Error> {
+        let mut detail = Self::episode_detail_row(&*self.db.lock()?, id)?;
+
         let store = JobStore::new(&self.db);
         if detail.ad_removal_stage.as_deref() == Some("ready") {
             detail.ad_markers = store

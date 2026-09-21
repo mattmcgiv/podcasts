@@ -2,21 +2,22 @@
 
 ## Supported architecture
 
-The supported client is Chrome on iPhone at `https://pods.mcgiv.dev`. The native iOS app is deprecated.
+The supported client is Chrome on iPhone and iPad at `https://pods.mcgiv.dev`. The native iOS app is deprecated.
 The `ios/` source remains for history and migration. Native builds are not an acceptance gate for this architecture.
 
 Cloudflare Pages serves the static client. The Mac supplies the library API while awake.
-The phone and Mac must share a Wi-Fi network that permits communication between devices.
-There is no public backend tunnel, VPN requirement, or cloud inference fallback.
+Tailscale connects either device to the Mac, including over the internet.
+There is no public backend tunnel. Jev classifies ads; show notes use local oMLX.
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
 | React client | Cloudflare Pages | App shell and updates |
 | IndexedDB and service worker | Phone browser | Library, pending edits, audio chunks, offline playback |
-| Caddy | Mac Wi-Fi address, port 8443 | HTTPS and loopback proxy |
+| Caddy | Mac Tailscale address, port 8443 | HTTPS and loopback proxy |
 | Rust backend | Mac loopback, port 18180 | SQLite library, synchronization, processing queue |
 | Whisper large-v3 FP16 | Mac, MLX | Local transcription with word timestamps |
-| Qwen3.8-27B-4bit (reasoning effort low) | Local oMLX endpoint | Ad classification and show notes |
+| Jev 1.13 | TypeSafe API | Ad classification |
+| Qwen3.8-27B-4bit (reasoning effort low) | Local oMLX endpoint | Show notes |
 
 The client never receives an episode before ad classification, audio rendering, and show notes finish.
 Playback uses an immutable AAC/M4A file with ads physically removed. There is no original-audio fallback or timer-based ad skipping.
@@ -28,6 +29,10 @@ Real-episode accuracy comparisons remain necessary before any claim that it is t
 The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-community/whisper-large-v3-mlx`.
 
 ## Current deployment
+
+See [iPhone and iPad rollout evidence](ipad-sync-implementation.md) for the September 19 rollout and remaining deployment steps.
+
+### Historical September 5 deployment evidence
 
 The live ad classifier is TypeSafe Jev 1.13 (`PODS_CLASSIFIER=jev`). Show notes still use local oMLX `Qwen3.8-27B-4bit` with reasoning effort `low`. Set `"classifier": "omlx"` on `mac.json` to roll classification back.
 
@@ -124,7 +129,7 @@ Only complete downloads can play. The service worker supports byte ranges. It do
 
 Playback positions, played state, subscriptions, and app settings enter a durable local queue before synchronization.
 Retries reuse operation IDs. The backend rejects conflicting edits to the same field.
-Settings offers **Keep phone** and **Use Mac** for conflicts. Backward seeks remain valid edits.
+Settings shows the local and shared values, with the device that wrote the shared value, and offers **Keep this device** and **Use shared** for conflicts. Backward seeks remain valid edits.
 An expired login does not lock the cached library. A new login is necessary only for synchronization.
 
 When the Mac is off, the phone keeps using that cached library and any complete downloads. Listen, Played, Shows, search, playback, and mark-played stay local. Sync, feed refresh, and new audio transfers fail within a few seconds instead of blocking the app. The next successful Mac connection retries automatically, with increasing delay while the Mac stays down.
@@ -140,7 +145,7 @@ The service worker caches versioned app assets. It waits for old tabs to close b
 1. Close every Pods tab and window.
 2. Do not clear browser storage.
 3. Open Pods again at `https://pods.mcgiv.dev`.
-4. If the phone is on the Mac Wi-Fi, sign in.
+4. Connect Tailscale and sign in if requested.
 5. Then synchronize.
 
 Note: Browser storage holds the library and downloads. Site-data deletion removes that cache.
@@ -357,7 +362,9 @@ Create `~/.config/podcasts/mac.json` with mode `0600`:
 }
 ```
 
-Optional: set `"omlx_autostart": true` on that same object if the Mac manager should request `omlx start --no-wait` when loopback port 8000 is down. The request waits 60 seconds of continuous downtime, requires pending classification or show-notes work, and then waits 15 minutes before another request. It does not restart a live server. Restart the agent after that change. Rollback: set `"omlx_autostart": false` or remove the key, then restart the agent.
+Classification and show notes start the managed oMLX server if loopback port 8000 is down, load `Qwen3.8-27B-4bit` if needed, then unload that model when the chat permit drops. If no models remain loaded, or Pods started the server, it also runs `omlx stop`. Whisper only unloads Pods' model and leaves the server running.
+
+Optional: set `"omlx_autostart": true` on that same object if the Mac manager should also request `omlx start --no-wait` when loopback port 8000 is down. The request waits 60 seconds of continuous downtime, requires pending classification or show-notes work, and then waits 15 minutes between start requests. It does not restart a live server. Restart the agent after that change. Rollback: set `"omlx_autostart": false` or remove the key, then restart the agent. The worker start/stop path does not use this flag.
 
 Never put real tokens in Git, chat, the client, or shell arguments.
 The service reads the oMLX key from `~/.pi/agent/models.json`. It does not invoke Pi.
@@ -525,3 +532,31 @@ The native iOS app remains deprecated.
 The Vultr VPS, firewall, and SSH key were destroyed on 2026-09-07.
 The account had no snapshots, backups, reserved IPs, object storage, or other paid Vultr resources.
 `https://pods.mcgiv.dev` stayed on Cloudflare Pages. Route53 records were not deleted.
+
+## 2026-09-19: iPhone and iPad over Tailscale
+
+The service manager now selects a connected Tailscale IPv4 address and binds
+Caddy only to that interface. It publishes that stable address to the existing
+`sync.pods.mcgiv.dev` DNS record. A temporary Tailscale outage stops the HTTPS
+listener and preserves the DNS record; it never falls back to Wi-Fi or a public
+interface. Rust remains on loopback port 18180, passkeys remain required, and
+Caddy continues rejecting `/api/internal*`. The tailnet grants only the enrolled
+phone and tablet access to TCP 8443 on this Mac.
+
+Use Tailscale with no exit node and no DNS override. The Mac must be awake,
+online, and running its logged-in LaunchAgent. On iOS/iPadOS, disconnect Mullvad
+before connecting Tailscale. For travel, turn both VPNs off before joining a
+captive portal, complete Wi-Fi sign-in, then connect Tailscale if needed. In
+Tailscale VPN On Demand, add airline Wi-Fi SSIDs to **Except On**; those SSIDs
+force it off until the exception is changed. This custom Pods hostname does not
+trigger Tailscale's `*.ts.net` on-demand rule. Downloaded playback and queued edits
+remain available with all VPNs off.
+
+Do not clear browser site data, change the Pages hostname, or remove the old
+native iOS app during migration. Open the existing iPhone browser first, export
+Settings → Export state backup, and sync it before signing into the iPad. The
+same passkey can be selected on both devices. Each device downloads its own
+verified audio; Continue listening is prioritized within that device's limits.
+
+[Jev batching measurements and rollout evidence](ipad-sync-implementation.md)
+records the candidate, limitations, and rollback location.

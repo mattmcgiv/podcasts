@@ -93,6 +93,23 @@ class ManageTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM passkey_credentials").fetchone()[0], 1)
                 self.assertEqual(db.execute("SELECT token_hash FROM auth_enroll_tokens").fetchone()[0], hashlib.sha256(token.encode()).hexdigest())
 
+    def test_tailscale_address_fails_closed(self):
+        def result(state="Running", online=True, ips=None):
+            return unittest.mock.Mock(returncode=0, stdout=json.dumps({
+                "BackendState": state, "Self": {"Online": online},
+                "TailscaleIPs": ips or ["100.64.0.2", "fd7a:115c:a1e0::1"]}))
+        with patch.object(manage.subprocess, "run", return_value=result()) as run:
+            self.assertEqual(manage.tailscale_address(), "100.64.0.2")
+            self.assertEqual(run.call_args.kwargs["env"]["TAILSCALE_BE_CLI"], "1")
+        for response in (result(state="Stopped"), result(online=False),
+                         result(ips=["192.168.1.1"]), result(ips=["0.0.0.0"]),
+                         unittest.mock.Mock(returncode=1),
+                         unittest.mock.Mock(returncode=0, stdout="invalid")):
+            with patch.object(manage.subprocess, "run", return_value=response):
+                self.assertIsNone(manage.tailscale_address())
+        with patch.object(manage.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(manage.tailscale_address())
+
     def test_dns_always_specifies_both_address_families(self):
         with patch.object(manage, "dns_request", return_value="good") as request:
             manage.update_dns({"desec_token": "test-only"}, "192.168.1.20")
@@ -327,7 +344,7 @@ class ManageTests(unittest.TestCase):
                 "PODCASTINDEX_KEY=pi\nTYPESAFE_API_KEY=jev-from-file\n"
             )
             with patch.object(manage, "read_config", return_value={"whisper_model": "/models/w", "classifier": "jev"}), \
-                 patch.object(manage, "wifi_address", return_value=None), \
+                 patch.object(manage, "tailscale_address", return_value=None), \
                  patch.object(manage.signal, "signal"), \
                  patch.object(manage, "stop_process"), \
                  patch.object(manage.subprocess, "Popen") as popen, \
@@ -352,7 +369,7 @@ class ManageTests(unittest.TestCase):
             (current / "pods-backend").write_text("")
             (Path(directory) / "data").mkdir()
             with patch.object(manage, "read_config", return_value={"whisper_model": "/models/w"}), \
-                 patch.object(manage, "wifi_address", return_value=None), \
+                 patch.object(manage, "tailscale_address", return_value=None), \
                  patch.object(manage.signal, "signal"), \
                  patch.object(manage, "stop_process"), \
                  patch.object(manage.subprocess, "Popen") as popen, \
@@ -376,7 +393,7 @@ class ManageTests(unittest.TestCase):
             (current / "pods-backend").write_text("")
             (Path(directory) / "data").mkdir()
             with patch.object(manage, "read_config", return_value={"whisper_model": "/models/w"}), \
-                 patch.object(manage, "wifi_address", return_value=None), \
+                 patch.object(manage, "tailscale_address", return_value=None), \
                  patch.object(manage.signal, "signal"), \
                  patch.object(manage, "stop_process"), \
                  patch.object(manage.subprocess, "Popen") as popen, \
@@ -433,6 +450,33 @@ class ManageTests(unittest.TestCase):
                 db.commit()
                 self.assertTrue(manage.omlx_has_pending_inference(path))
             self.assertFalse(manage.omlx_has_pending_inference(Path(directory) / "missing.sqlite"))
+
+    def test_pending_inference_probe_closes_connections_on_success_and_error(self):
+        # Retain each connection to ensure cleanup does not depend on garbage collection.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sqlite"
+            connections = []
+            real_connect = sqlite3.connect
+            def connect(*args, **kwargs):
+                db = real_connect(*args, **kwargs)
+                connections.append(db)
+                return db
+            for stage in ("classifying", "ready", None):
+                with self.subTest(stage=stage):
+                    setup = real_connect(path)
+                    setup.execute("DROP TABLE IF EXISTS browser_pending_jobs")
+                    if stage is not None:
+                        setup.execute("CREATE TABLE browser_pending_jobs(stage TEXT, error TEXT)")
+                        setup.execute("INSERT INTO browser_pending_jobs VALUES(?, NULL)", (stage,))
+                    setup.commit()
+                    setup.close()
+                    with patch.object(manage.sqlite3, "connect", side_effect=connect):
+                        self.assertEqual(manage.omlx_has_pending_inference(path), stage == "classifying")
+                    try:
+                        with self.assertRaises(sqlite3.ProgrammingError):
+                            connections[-1].execute("SELECT 1")
+                    finally:
+                        connections[-1].close()
 
     def test_omlx_cli_prefers_app_cli_over_homebrew_path(self):
         with tempfile.TemporaryDirectory() as directory:

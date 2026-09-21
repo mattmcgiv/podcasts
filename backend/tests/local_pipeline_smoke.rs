@@ -472,9 +472,11 @@ fn planted_review_json_does_not_enter_automatic_run_identity() {
     assert_ne!(automatic, with_review);
     assert_eq!(
         automatic,
-        hex::encode(Sha256::digest(format!(
-            "{VERSION}:{MODEL}:{source_hash}:{transcript_hash}:"
-        )))
+        hex::encode(Sha256::digest(if pods_backend::jev::enabled() {
+            format!("{VERSION}:{}:{}:{source_hash}:{transcript_hash}:", pods_backend::jev::CLASSIFIER_VERSION, pods_backend::jev::MODEL)
+        } else {
+            format!("{VERSION}:{MODEL}:{source_hash}:{transcript_hash}:")
+        }))
     );
     assert_eq!(cached_run_id(&source_hash, &transcript_hash), automatic);
     let classifier = cached_classifier_run_id(&source_hash, &transcript_hash);

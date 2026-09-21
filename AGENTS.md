@@ -23,7 +23,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 
 - The browser at `pods.mcgiv.dev` is the supported client. The native iOS app is deprecated; retain its source and data for migration only.
 - The library/API backend is the Rust crate in `backend/` (`Backend::handle`), hosted on the Mac. The browser must work from downloaded data while the Mac is unavailable.
-- The browser synchronizes over local HTTPS when both devices can communicate on the same Wi-Fi. Only processed episodes with finished show notes are published.
+- The browser synchronizes over HTTPS through Tailscale while the Mac is awake and connected. Only processed episodes with finished show notes are published.
 - For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.
 - The iPhone client app (Swift), the in-app iPhone "backend" (loopback server + Rust FFI shell), and all iPhone signing/install tooling are **deprecated as of 1 October 2026**. Do not review, extend, or append to `ios/`, `backend/src/ffi.rs`, `backend/include/pods_backend.h`, or `backend/build-ios.sh`. See `ios/DEPRECATED.md`. The code is kept until removal.
 - The still-present iPhone shell serves the Rust backend on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `RustBackend`.
@@ -33,7 +33,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 
 ## Product rules
 
-- Mobile-only (iPhone). No tablet/desktop layouts.
+- Personal mobile client for iPhone and iPad, including portrait, landscape, and split-screen widths.
 - Primary browser: **Chrome on iPhone** — Matt uses it most of the time. Pods is for his personal use, so optimize for Chrome's features. (Note: Chrome on iOS still uses the WebKit engine, so web-platform capabilities match Safari; the differences are in browser UI/features, not the rendering/JS engine.)
 - **No discovery/recommendation features — ever.** This is an anti-requirement from Matt.
 - Recent (default view) = unplayed episodes, oldest first. Mark-played removes; Played view is the archive.

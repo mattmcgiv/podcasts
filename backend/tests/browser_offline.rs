@@ -1257,3 +1257,32 @@ fn refined_boundaries_reject_overlap_and_preserve_neighboring_editorial() {
         assert!(apply_boundaries(&segments, &blocks).is_err());
     }
 }
+
+#[test]
+fn two_devices_preserve_rewinds_and_merge_equal_edits_and_watermarks() {
+    let (backend, _temp, manifest) = fixture();
+    let apply = |device: &str, id: &str, entity: &str, field: &str, value: Value, base: i64| {
+        apply_actions(&backend, json!({"client_id":device,"device_name":device,"actions":[{
+            "id":id,"sequence":1,"entity":entity,"field":field,"value":value,"base_revision":base
+        }]})).unwrap()["results"][0].clone()
+    };
+    let first = apply("iPhone","phone-progress","1","position",json!({"seconds":12,"artifact_hash":manifest.hash}),0);
+    let first_revision = first["revision"].as_i64().unwrap();
+    let stale = apply("iPad","stale-progress","1","position",json!({"seconds":2,"artifact_hash":manifest.hash}),0);
+    assert_eq!(stale["status"],"conflict");
+    assert_eq!(snapshot(&backend).unwrap()["episodes"][0]["position_secs"],12.0);
+    let rewind = apply("iPad","intentional-rewind","1","position",json!({"seconds":2,"artifact_hash":manifest.hash}),first_revision);
+    assert_eq!(rewind["status"],"applied");
+    assert_eq!(snapshot(&backend).unwrap()["episodes"][0]["position_secs"],2.0);
+    let same = apply("iPhone","same-rewind","1","position",json!({"seconds":2,"artifact_hash":manifest.hash}),0);
+    assert_eq!(same["status"],"applied");
+    assert_eq!(same["revision"],rewind["revision"]);
+    let theme=apply("iPad","theme","settings","theme",json!("dark"),0);
+    assert_eq!(apply("iPhone","theme-identical","settings","theme",json!("dark"),0)["revision"],theme["revision"]);
+    apply("iPhone","cleared-9","settings","notifications_cleared_through",json!(9),0);
+    assert_eq!(apply("iPad","cleared-3","settings","notifications_cleared_through",json!(3),0)["status"],"applied");
+    let state=snapshot(&backend).unwrap();
+    assert_eq!(state["settings"]["notifications_cleared_through"],9);
+    assert_eq!(state["writers"]["1:position"]["device"],"iPad");
+    assert_eq!(state["versions"]["1:position"],rewind["revision"]);
+}

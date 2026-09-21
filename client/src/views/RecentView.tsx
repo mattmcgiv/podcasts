@@ -9,6 +9,7 @@ import { listenClassifierPause } from "../lib";
 import { refreshFeeds } from "../refreshFeeds";
 import { offlineEnabled } from "../offline/client";
 import { ProcessingNotifications } from "./NotificationsView";
+import { ContinueListening } from "../offline/SharedState";
 import type { AdRemovalSettings, AdRemovalStage, EpisodeItem } from "../types";
 import type { AdRemovalStatusItem } from "../types";
 
@@ -322,6 +323,7 @@ export function RecentView() {
 
   return (
     <section className="view">
+      <ContinueListening />
       <header className="view-header">
         <h1>{APP_NAME}</h1>
         <button

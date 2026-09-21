@@ -175,7 +175,10 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
 const NOTES_READY_SQL: &str = "json_array_length(b.notes_json) > 0";
 
 pub fn publication(backend: &Backend, id: i64) -> Result<(Manifest, Value), Error> {
-    let conn = backend.db.lock()?;
+    publication_on(&*backend.db.lock()?, id)
+}
+
+fn publication_on(conn: &rusqlite::Connection, id: i64) -> Result<(Manifest, Value), Error> {
     let pair: Option<(String, String)> = conn.query_row(
         &format!("SELECT b.manifest_json,b.notes_json FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
          JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
@@ -221,8 +224,13 @@ fn persisted_refresh_status(conn: &rusqlite::Connection) -> Result<Value, Error>
 }
 
 pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
+    let storage = crate::local_worker::storage_status(backend);
+    backend.db.with_transaction(|conn| {
+    let writers = conn.prepare("SELECT entity,field,device,updated_at FROM browser_field_writers")?
+        .query_map([], |r| Ok((format!("{}:{}",r.get::<_,String>(0)?,r.get::<_,String>(1)?),
+            json!({"device":r.get::<_,String>(2)?,"updated_at":r.get::<_,i64>(3)?}))))?
+        .collect::<Result<serde_json::Map<String, Value>,_>>()?;
     let (ids, shows, settings, versions, revision, refresh_status) = {
-        let conn = backend.db.lock()?;
         let ids = conn.prepare(&format!("SELECT b.episode_id FROM browser_publications b JOIN browser_episode_catalog e ON e.id=b.episode_id
             JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
             WHERE {NOTES_READY_SQL} AND (p.is_subscribed=1 OR s.played_at IS NOT NULL OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))
@@ -264,10 +272,10 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     let mut episodes = Vec::new();
     for id in ids {
         // A concurrent unsubscribe may remove this publication from the visible set.
-        let Ok((manifest, notes)) = publication(backend, id) else {
+        let Ok((manifest, notes)) = publication_on(conn, id) else {
             continue;
         };
-        let mut detail = serde_json::to_value(backend.episode_detail(id)?)
+        let mut detail = serde_json::to_value(Backend::episode_detail_row(conn, id)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         detail["audio_url"] = json!(format!("/_media/{}.m4a", manifest.hash));
         detail["duration_secs"] = json!(manifest.duration);
@@ -284,34 +292,24 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
         episodes.push(detail);
     }
     // A complete replacement snapshot carries removals without retaining an unbounded event log.
-    let pending = backend
-        .db
-        .scalar_i64(
+    let pending = conn.query_row(
             "SELECT COUNT(*) FROM browser_episode_catalog e JOIN podcasts p ON p.id=e.podcast_id
             LEFT JOIN episode_state s ON s.episode_id=e.id WHERE
             (p.is_subscribed=1 OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))
             AND s.played_at IS NULL AND s.archived_at IS NULL
             AND NOT EXISTS(SELECT 1 FROM browser_publications b WHERE b.episode_id=e.id AND json_array_length(b.notes_json) > 0)
             AND NOT EXISTS(SELECT 1 FROM browser_jobs j WHERE j.episode_id=e.id AND j.stage='blocked')",
-            [],
-        )?
-        .unwrap_or(0);
-    let failed = backend
-        .db
-        .scalar_i64(
+            [], |r| r.get::<_,i64>(0),
+        )?;
+    let failed = conn.query_row(
             "SELECT COUNT(*) FROM browser_pending_jobs WHERE stage='retry'",
-            [],
-        )?
-        .unwrap_or(0);
-    let blocked = backend
-        .db
-        .scalar_i64(
+            [], |r| r.get::<_,i64>(0),
+        )?;
+    let blocked = conn.query_row(
             "SELECT COUNT(*) FROM browser_pending_jobs WHERE stage='blocked'",
-            [],
-        )?
-        .unwrap_or(0);
+            [], |r| r.get::<_,i64>(0),
+        )?;
     let notifications = {
-        let conn = backend.db.lock()?;
         let mut stmt = conn.prepare(
             "SELECT n.id, n.episode_id, n.category, n.failed_stage, n.message, n.outcome, n.created_at,
                     COALESCE(e.title, ''), COALESCE(p.title, '')
@@ -339,10 +337,11 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     };
     Ok(
         json!({"version":1,"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
-        "settings":settings,"versions":versions,"refresh_status":refresh_status,"notifications":notifications,
-        "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":crate::local_worker::storage_status(backend),
+        "settings":settings,"versions":versions,"writers":writers,"refresh_status":refresh_status,"notifications":notifications,
+        "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":storage,
             "memory":crate::memory_gate::status_json()}}),
     )
+    })
 }
 
 fn queue_browser_back_catalog_trim(tx: &rusqlite::Transaction, podcast_id: i64) -> Result<(), Error> {
@@ -375,6 +374,7 @@ fn same_action(stored: &str, action: &Value) -> bool {
 }
 
 pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> {
+    let device = payload["device_name"].as_str().filter(|s| !s.is_empty() && s.len()<=80).unwrap_or("Another device");
     let client = payload["client_id"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 128)
@@ -401,13 +401,48 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             let base = action["base_revision"].as_i64().ok_or_else(||Error::Invalid("base_revision required".into()))?;
             let revision: i64 = tx.query_row("SELECT revision FROM browser_field_versions WHERE entity=? AND field=?",params![entity,field],|r|r.get(0)).optional()?.unwrap_or(0);
             let mut stale = revision != base;
-            if !stale {
+            // Equal edits are acknowledgements, not fresh writes. Watermarks commute by max.
+            let mut identical = false;
+            if entity == "settings" {
+                let settings = crate::db::setting(tx,"browser_settings")?.and_then(|v|serde_json::from_str::<Value>(&v).ok()).unwrap_or(json!({}));
+                identical = settings[field] == action["value"] && !action["value"].is_null();
+                if field == "notifications_cleared_through" {
+                    if let Some(value) = action["value"].as_i64().filter(|v|*v>=0) {
+                        identical = value <= settings[field].as_i64().unwrap_or(0);
+                        stale = false;
+                    }
+                }
+            } else if entity == "subscription" {
+                let subscribed = tx.query_row("SELECT is_subscribed FROM podcasts WHERE feed_url=?",[field],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
+                identical = stale && action["value"].as_bool() == Some(subscribed);
+            } else if let Ok(episode) = entity.parse::<i64>() {
+                if field == "played" {
+                    let played = tx.query_row("SELECT played_at IS NOT NULL FROM episode_state WHERE episode_id=?",[episode],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
+                    identical = action["value"].as_bool() == Some(played);
+                } else if field == "position" {
+                    let manifest: Option<String> = tx.query_row("SELECT manifest_json FROM browser_publications WHERE episode_id=?",[episode],|r|r.get(0)).optional()?;
+                    if let Some(manifest) = manifest.and_then(|raw|serde_json::from_str::<Manifest>(&raw).ok()) {
+                        let seconds = tx.query_row("SELECT position_secs FROM episode_state WHERE episode_id=?",[episode],|r|r.get::<_,f64>(0)).optional()?.unwrap_or(0.0);
+                        identical = action["value"]["artifact_hash"].as_str() == Some(manifest.hash.as_str())
+                            && action["value"]["seconds"].as_f64().is_some_and(|s| s.is_finite() && s>=0.0 && (original_time(&manifest.timeline,s)-seconds).abs()<0.001);
+                    }
+                }
+            }
+            if identical { stale = false; }
+            if !stale && !identical {
                 let value = &action["value"];
                 if entity == "settings" {
                     let mut settings=crate::db::setting(tx,"browser_settings")?.and_then(|s|serde_json::from_str::<Value>(&s).ok()).unwrap_or(json!({}));
                     match field {
                         "speed" if value.as_f64().is_some_and(|n|n.is_finite()&&(0.5..=3.0).contains(&n))=>settings[field]=value.clone(),
                         "autoplay" if value.is_boolean()=>settings[field]=value.clone(),
+                        "theme" if matches!(value.as_str(),Some("system"|"light"|"dark"))=>settings[field]=value.clone(),
+                        "last_listened" if value.as_i64().is_some_and(|id|id>0)=> {
+                            let id=value.as_i64().unwrap();
+                            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM browser_publications WHERE episode_id=?)",[id],|r|r.get::<_,bool>(0))? { return Err(Error::Invalid("episode not published".into())); }
+                            settings[field]=value.clone();
+                        },
+                        "notifications_cleared_through" if value.as_i64().is_some_and(|id|id>=0)=>settings[field]=json!(value.as_i64().unwrap().max(settings[field].as_i64().unwrap_or(0))),
                         _=>return Err(Error::Invalid("unsupported setting".into())),
                     }
                     crate::db::set_setting(tx,"browser_settings",&settings.to_string())?;
@@ -460,10 +495,13 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             }
             let result = if stale {
                 json!({"id":id,"status":"conflict","revision":revision})
+            } else if identical {
+                json!({"id":id,"status":"applied","revision":revision})
             } else {
                 tx.execute("UPDATE browser_clock SET revision=revision+1",[])?;
                 let next: i64 = tx.query_row("SELECT revision FROM browser_clock",[],|r|r.get(0))?;
                 tx.execute("INSERT INTO browser_field_versions VALUES(?,?,?) ON CONFLICT(entity,field) DO UPDATE SET revision=excluded.revision",params![entity,field,next])?;
+                tx.execute("INSERT INTO browser_field_writers VALUES(?,?,?,?) ON CONFLICT(entity,field) DO UPDATE SET device=excluded.device,updated_at=excluded.updated_at",params![entity,field,device,crate::db::now_unix()])?;
                 json!({"id":id,"status":"applied","revision":next})
             };
             tx.execute("INSERT INTO browser_operations VALUES(?,?,?,?,?)",params![id,client,sequence,raw,result.to_string()])?;

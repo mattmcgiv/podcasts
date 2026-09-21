@@ -8,7 +8,7 @@ import * as store from "./store";
 import { Api } from "../api";
 import * as passkey from "../passkey";
 
-vi.mock("./client", () => ({ state: vi.fn(), resolveConflict: vi.fn(), synchronize: vi.fn(), syncError: vi.fn(), offlineEnabled: () => false }));
+vi.mock("./client", () => ({ state: vi.fn(), defaultDeviceName: () => "Browser", resolveConflict: vi.fn(), synchronize: vi.fn(), syncError: vi.fn(), offlineEnabled: () => false }));
 vi.mock("./downloads", () => ({ downloadError: vi.fn(), prefetch: vi.fn(), savePreferences: vi.fn() }));
 vi.mock("./store", async original => ({ ...await original<typeof import("./store")>(), allDownloads: vi.fn() }));
 vi.mock("../passkey", () => ({ assertPasskey: vi.fn() }));
@@ -84,11 +84,11 @@ it("synchronizes, changes limits, signs in, and resolves both conflict choices",
   await waitFor(() => expect(screen.getByRole("button", { name: "Sign in to Mac" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Sign in to Mac" }));
   await waitFor(() => expect(Api.login).toHaveBeenCalledWith("login", { id: "credential" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Keep phone" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Keep phone" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Keep this device’s change" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Keep this device’s change" }));
   await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith("a", true));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Use Mac" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Use Mac" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Use shared change" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Use shared change" }));
   await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith("a", false));
   fireEvent.change(screen.getByLabelText("Automatic episodes"), { target: { value: "5" } });
   await waitFor(() => expect(downloads.savePreferences).toHaveBeenCalledWith({ ...s.preferences, count: 5 }));

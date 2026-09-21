@@ -15,6 +15,7 @@ import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 import { applyThemePreference, currentThemePreference } from "./theme";
 import { SettingsSheet } from "./views/SettingsSheet";
 import { AuthGate } from "./AuthGate";
+import { SyncStatus } from "./offline/SharedState";
 
 const SWIPE_TABS = ["recent", "played", "shows", ...(FOLLOW_APPEARANCES_ENABLED ? ["follows"] : []), "settings"] as const;
 const SWIPE_DISTANCE_PX = 64;
@@ -82,6 +83,7 @@ function Shell() {
   return (
     <div className="shell">
       <main className="content" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+        <SyncStatus />
         <div className={`tab-swipe-screen${swipeDirection ? ` tab-swipe-${swipeDirection}` : ""}`} key={`${route.tab}-${route.showId ?? "root"}-${route.notifications ? "n" : "t"}`}>
           {route.tab === "recent" && (route.notifications ? <NotificationsView /> : <RecentView />)}
           {route.tab === "played" && <PlayedView />}

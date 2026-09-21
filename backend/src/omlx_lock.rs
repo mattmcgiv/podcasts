@@ -12,6 +12,11 @@
 //! reports `omlx_busy`. An uncooperative caller can still race after that
 //! check and POST to `:8000` without this file lock.
 //!
+//! Classification and show notes start the managed oMLX server when loopback
+//! port 8000 is down, load Pods' model, then unload it on Drop. If the server
+//! is idle with no models left, or Pods started it, Drop also runs `omlx stop`.
+//! Whisper still only unloads Pods' model and leaves the server running.
+//!
 //! Nested acquire of the same lock path in-process returns busy. Chat POST
 //! functions take `&InferencePermit` so they cannot start without a holder.
 //!
@@ -27,9 +32,12 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io,
+    ops::Deref,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{Mutex, OnceLock},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -43,6 +51,11 @@ pub const PURPOSE_CLASSIFICATION: &str = "classification";
 pub const PURPOSE_SHOW_NOTES: &str = "show_notes";
 pub const PURPOSE_WHISPER: &str = "speech_to_text";
 pub const DEFAULT_CHAT_URL: &str = "http://127.0.0.1:8000/v1/chat/completions";
+const OMLX_APP_CLI: &str = "/Applications/oMLX.app/Contents/MacOS/omlx-cli";
+const OMLX_START_WAIT: Duration = Duration::from_secs(180);
+const OMLX_START_POLL: Duration = Duration::from_millis(200);
+const OMLX_STOP_TIMEOUT_SECS: &str = "60";
+const OMLX_CLI_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:";
 
 const BUSY_RETRY_MIN_SECS: i64 = 30;
 const BUSY_RETRY_SPAN: u64 = 31;
@@ -195,6 +208,36 @@ impl Drop for InferencePermit {
     }
 }
 
+/// Chat-session permit: start oMLX if it is down, load the model, then unload
+/// and stop the managed server on Drop when nothing else remains loaded.
+///
+/// The inner flock stays held through unload/stop. A disabled advisory lock is
+/// not enough authority to start, load, or stop shared state.
+#[derive(Debug)]
+#[must_use]
+pub struct ChatPermit {
+    model: String,
+    started_server: bool,
+    permit: Option<InferencePermit>,
+}
+
+impl Deref for ChatPermit {
+    type Target = InferencePermit;
+
+    fn deref(&self) -> &Self::Target {
+        self.permit.as_ref().expect("chat permit")
+    }
+}
+
+impl Drop for ChatPermit {
+    fn drop(&mut self) {
+        if let Some(permit) = self.permit.as_ref() {
+            let _ = release_after_chat(permit, &self.model, self.started_server);
+        }
+        self.permit.take();
+    }
+}
+
 /// 30–60 seconds, deterministic from `episode_id`.
 pub fn busy_retry_delay_secs(episode_id: i64) -> i64 {
     BUSY_RETRY_MIN_SECS + (mix_u64(episode_id as u64) % BUSY_RETRY_SPAN) as i64
@@ -219,6 +262,28 @@ pub fn acquire_pods(purpose: &str, model: &str) -> Result<InferencePermit, Error
     let paths = LockPaths::configured()?;
     let claim = LockClaim::new(OWNER_PODS, purpose, model)?;
     try_acquire(&paths, &claim, probe_occupancy).map_err(Error::from)
+}
+
+/// Acquire the cooperative lock for classification or show notes, start oMLX
+/// if the loopback server is down, and load `model` if it is not already loaded.
+pub fn acquire_chat(purpose: &str, model: &str) -> Result<ChatPermit, Error> {
+    if purpose != PURPOSE_CLASSIFICATION && purpose != PURPOSE_SHOW_NOTES {
+        return Err(LockError::Busy.into());
+    }
+    let paths = LockPaths::configured()?;
+    let claim = LockClaim::new(OWNER_PODS, purpose, model)?;
+    let permit = try_acquire(&paths, &claim, probe_occupancy_allow_stopped).map_err(Error::from)?;
+    if permit.is_disabled() {
+        return Err(LockError::Busy.into());
+    }
+    match prepare_chat(&permit, model) {
+        Ok(started_server) => Ok(ChatPermit {
+            model: model.to_string(),
+            started_server,
+            permit: Some(permit),
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 /// Keep cooperating inference clients out until the Whisper child exits.
@@ -252,22 +317,207 @@ pub fn load_for_classification(permit: &InferencePermit, model: &str) -> Result<
     model_transition(permit, model, "load")
 }
 
+fn probe_occupancy_allow_stopped() -> Result<Occupancy, LockError> {
+    #[cfg(test)]
+    if let Some(occupancy) = test_state().occupancy {
+        return Ok(occupancy);
+    }
+    match read_omlx_status_or_stopped()? {
+        None => Ok(Occupancy::idle()),
+        Some(status) => occupancy_from_status(&status),
+    }
+}
+
+fn prepare_chat(permit: &InferencePermit, model: &str) -> Result<bool, Error> {
+    let (status, started) = match read_omlx_status_or_stopped()? {
+        Some(status) => (status, false),
+        None => {
+            start_omlx()?;
+            match wait_for_omlx_status() {
+                Ok(status) => (status, true),
+                Err(error) => {
+                    let _ = stop_omlx();
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let prepared = (|| {
+        if occupancy_from_status(&status)?.is_busy() || status["models_loading"].as_u64() != Some(0)
+        {
+            return Err(LockError::Busy.into());
+        }
+        if !model_in_status(model, &status)? {
+            model_transition(permit, model, "load")?;
+        }
+        Ok(started)
+    })();
+    if prepared.is_err() && started {
+        let _ = stop_omlx();
+    }
+    prepared
+}
+
+fn release_after_chat(
+    permit: &InferencePermit,
+    model: &str,
+    started_server: bool,
+) -> Result<(), Error> {
+    let Some(mut status) = read_omlx_status_or_stopped()? else {
+        return Ok(());
+    };
+    if model_loaded_idle_from_status(model, &status)? {
+        model_transition(permit, model, "unload")?;
+        status = read_omlx_status_or_stopped()?.ok_or(LockError::Busy)?;
+        if model_loaded_idle_from_status(model, &status)? {
+            return Err(LockError::Busy.into());
+        }
+    }
+    if started_server || server_idle_empty(&status) {
+        stop_omlx()?;
+    }
+    Ok(())
+}
+
+fn server_idle_empty(status: &Value) -> bool {
+    occupancy_from_status(status).map(|occupancy| !occupancy.is_busy()) == Ok(true)
+        && status["models_loading"].as_u64() == Some(0)
+        && status["loaded_models"]
+            .as_array()
+            .is_some_and(|models| models.is_empty())
+}
+
+fn model_in_status(model: &str, status: &Value) -> Result<bool, Error> {
+    let models = status["loaded_models"].as_array().ok_or(LockError::Busy)?;
+    if models.iter().any(|value| !value.is_string()) {
+        return Err(LockError::Busy.into());
+    }
+    Ok(models.iter().any(|value| value.as_str() == Some(model)))
+}
+
+fn wait_for_omlx_status() -> Result<Value, Error> {
+    let deadline = Instant::now() + start_wait();
+    loop {
+        match read_omlx_status_or_stopped() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) | Err(_) => {
+                if Instant::now() >= deadline {
+                    return Err(LockError::Busy.into());
+                }
+                thread::sleep(poll_interval());
+            }
+        }
+    }
+}
+
+fn start_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = test_state().start_wait {
+        return wait;
+    }
+    OMLX_START_WAIT
+}
+
+fn poll_interval() -> Duration {
+    #[cfg(test)]
+    if test_state().start_wait.is_some() {
+        return Duration::from_millis(20);
+    }
+    OMLX_START_POLL
+}
+
+fn start_omlx() -> Result<(), LockError> {
+    let cli = configured_omlx_cli().ok_or(LockError::Busy)?;
+    run_omlx_cli(&cli, &["start", "--no-wait"])
+}
+
+fn stop_omlx() -> Result<(), LockError> {
+    let Some(cli) = configured_omlx_cli() else {
+        return Ok(());
+    };
+    run_omlx_cli(&cli, &["stop", "--timeout", OMLX_STOP_TIMEOUT_SECS])
+}
+
+fn run_omlx_cli(cli: &Path, args: &[&str]) -> Result<(), LockError> {
+    let output = Command::new(cli)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("PATH", omlx_cli_path())
+        .output()
+        .map_err(|_| LockError::Busy)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(LockError::Busy)
+    }
+}
+
+fn omlx_cli_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{OMLX_CLI_PATH}{home}/.local/bin:{home}/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+}
+
+fn configured_omlx_cli() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(cli) = test_state().omlx_cli {
+        return cli;
+    }
+    for candidate in [
+        Some(PathBuf::from(OMLX_APP_CLI)),
+        std::env::var_os("HOME").map(|home| Path::new(&home).join(".omlx/bin/omlx")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("omlx");
+        if is_executable(&candidate) && omlx_cli_is_managed(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn omlx_cli_is_managed(path: &Path) -> bool {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy();
+    text.contains("/oMLX.app/Contents/MacOS/") || text.ends_with("/.omlx/bin/omlx")
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn model_loaded_idle(model: &str) -> Result<bool, Error> {
     let status = read_omlx_status()?;
     model_loaded_idle_from_status(model, &status)
 }
 
 fn model_loaded_idle_from_status(model: &str, status: &Value) -> Result<bool, Error> {
-    if occupancy_from_status(&status)?.is_busy()
-        || status["models_loading"].as_u64() != Some(0)
-    {
+    if occupancy_from_status(status)?.is_busy() || status["models_loading"].as_u64() != Some(0) {
         return Err(LockError::Busy.into());
     }
-    let models = status["loaded_models"].as_array().ok_or(LockError::Busy)?;
-    if models.iter().any(|value| !value.is_string()) {
-        return Err(LockError::Busy.into());
-    }
-    Ok(models.iter().any(|value| value.as_str() == Some(model)))
+    model_in_status(model, status)
 }
 
 fn model_transition(_permit: &InferencePermit, model: &str, action: &str) -> Result<(), Error> {
@@ -468,22 +718,25 @@ fn read_omlx_status_or_stopped() -> Result<Option<Value>, LockError> {
     let response = match ureq::get(&url)
         .set("Authorization", &format!("Bearer {key}"))
         .timeout(Duration::from_secs(5))
-        .call() {
-            Ok(response) => response,
-            Err(error) => {
-                // Only a refused connection establishes that no listener is
-                // available. Timeouts, HTTP failures and bad JSON fail closed.
-                let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-                while let Some(cause) = source {
-                    if cause.downcast_ref::<io::Error>()
-                        .is_some_and(|e| e.kind() == io::ErrorKind::ConnectionRefused) {
-                        return Ok(None);
-                    }
-                    source = cause.source();
+        .call()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            // Only a refused connection establishes that no listener is
+            // available. Timeouts, HTTP failures and bad JSON fail closed.
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            while let Some(cause) = source {
+                if cause
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|e| e.kind() == io::ErrorKind::ConnectionRefused)
+                {
+                    return Ok(None);
                 }
-                return Err(LockError::Busy);
+                source = cause.source();
             }
-        };
+            return Err(LockError::Busy);
+        }
+    };
     let raw: Value = serde_json::from_str(&response.into_string().map_err(|_| LockError::Busy)?)
         .map_err(|_| LockError::Busy)?;
     Ok(Some(raw))
@@ -574,7 +827,11 @@ fn write_metadata(path: &Path, claim: &LockClaim) -> Result<(), LockError> {
         "started_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     });
     let object = body.as_object().ok_or(LockError::Busy)?;
-    if object.len() != METADATA_FIELDS.len() || METADATA_FIELDS.iter().any(|field| !object.contains_key(*field)) {
+    if object.len() != METADATA_FIELDS.len()
+        || METADATA_FIELDS
+            .iter()
+            .any(|field| !object.contains_key(*field))
+    {
         return Err(LockError::Busy);
     }
     let encoded = serde_json::to_vec_pretty(&body).map_err(|_| LockError::Busy)?;
@@ -645,6 +902,8 @@ struct TestState {
     occupancy: Option<Occupancy>,
     omlx_url: Option<String>,
     omlx_key: Option<String>,
+    omlx_cli: Option<Option<PathBuf>>,
+    start_wait: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -655,6 +914,8 @@ std::thread_local! {
         occupancy: None,
         omlx_url: None,
         omlx_key: None,
+        omlx_cli: None,
+        start_wait: None,
     }) };
 }
 
@@ -684,6 +945,8 @@ pub fn with_test_lock_env<R>(
             occupancy: Some(occupancy),
             omlx_url: None,
             omlx_key: None,
+            omlx_cli: Some(None),
+            start_wait: Some(Duration::from_millis(80)),
         };
     });
     f()
@@ -704,6 +967,11 @@ pub fn set_test_occupancy(occupancy: Option<Occupancy>) {
 }
 
 #[cfg(test)]
+pub fn set_test_omlx_cli(cli: Option<PathBuf>) {
+    TEST_STATE.with(|state| state.borrow_mut().omlx_cli = Some(cli));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{
@@ -719,12 +987,7 @@ mod tests {
     };
 
     fn claim() -> LockClaim {
-        LockClaim::new(
-            "pods",
-            "classification",
-            "Qwen3.8-27B-4bit",
-        )
-        .unwrap()
+        LockClaim::new("pods", "classification", "Qwen3.8-27B-4bit").unwrap()
     }
 
     // Each response is paired with its expected request, including a second
@@ -743,14 +1006,21 @@ mod tests {
                     assert!(Instant::now() < deadline, "missing {expected}");
                     thread::sleep(Duration::from_millis(5));
                 };
-                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
                 let mut buffer = [0; 4096];
                 let n = stream.read(&mut buffer).unwrap();
                 let request = String::from_utf8_lossy(&buffer[..n]);
                 assert!(request.starts_with(expected), "{request}");
                 assert!(request.contains("Authorization: Bearer test-key"));
                 let payload = body.to_string();
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                )
+                .unwrap();
             }
         });
         (format!("http://{address}/v1/chat/completions"), worker)
@@ -761,14 +1031,24 @@ mod tests {
             "loaded_models": if loaded { vec!["model", "other"] } else { vec!["other"] }})
     }
 
+    fn idle_models(models: &[&str]) -> Value {
+        json!({"active_requests":0,"waiting_requests":0,"models_loading":0,"loaded_models":models})
+    }
+
     #[test]
     fn whisper_unloads_holds_lock_then_classification_loads() {
         let dir = tempfile::tempdir().unwrap();
         let (url, server) = lifecycle_server(vec![
             ("GET /api/status ", lifecycle_status(true)),
-            ("POST /v1/models/model/unload ", json!({"status":"ok","model_id":"model"})),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
             ("GET /api/status ", lifecycle_status(false)),
-            ("POST /v1/models/model/load ", json!({"status":"ok","model_id":"model"})),
+            (
+                "POST /v1/models/model/load ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
         ]);
         with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
             set_test_omlx_endpoint(url, "test-key");
@@ -793,7 +1073,10 @@ mod tests {
 
     #[test]
     fn whisper_transition_failure_releases_permit() {
-        for response in [json!({"status":"error"}), json!({"status":"ok","model_id":"model"})] {
+        for response in [
+            json!({"status":"error"}),
+            json!({"status":"ok","model_id":"model"}),
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let mut replies = vec![
                 ("GET /api/status ", lifecycle_status(true)),
@@ -852,11 +1135,173 @@ mod tests {
         server.join().unwrap();
     }
 
+    fn logging_cli(dir: &Path) -> PathBuf {
+        let path = dir.join("omlx-cli");
+        let log = dir.join("omlx-cli.log");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn cli_log(dir: &Path) -> String {
+        fs::read_to_string(dir.join("omlx-cli.log")).unwrap_or_default()
+    }
+
+    #[test]
+    fn chat_loads_unloads_and_stops_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", idle_models(&[])),
+            (
+                "POST /v1/models/model/load ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&["model"])),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&[])),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            set_test_omlx_cli(Some(cli.clone()));
+            let permit = acquire_chat(PURPOSE_CLASSIFICATION, "model").unwrap();
+            assert_eq!(permit.purpose(), PURPOSE_CLASSIFICATION);
+            drop(permit);
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        server.join().unwrap();
+        assert_eq!(cli_log(dir.path()).trim(), "stop --timeout 60");
+    }
+
+    #[test]
+    fn chat_keeps_server_when_other_models_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", lifecycle_status(true)),
+            ("GET /api/status ", lifecycle_status(true)),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&["other"])),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            set_test_omlx_cli(Some(cli.clone()));
+            drop(acquire_chat(PURPOSE_SHOW_NOTES, "model").unwrap());
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        server.join().unwrap();
+        assert!(cli_log(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn chat_starts_when_stopped_and_stops_if_never_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        drop(listener);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            set_test_omlx_cli(Some(cli.clone()));
+            assert!(is_busy_error(
+                &acquire_chat(PURPOSE_CLASSIFICATION, "model").unwrap_err()
+            ));
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        let log = cli_log(dir.path());
+        assert!(log.contains("start --no-wait"), "{log}");
+        assert!(log.contains("stop --timeout 60"), "{log}");
+    }
+
+    #[test]
+    fn running_chat_does_not_start_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", idle_models(&[])),
+            (
+                "POST /v1/models/model/load ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&["model"])),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&[])),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            set_test_omlx_cli(Some(cli.clone()));
+            drop(acquire_chat(PURPOSE_CLASSIFICATION, "model").unwrap());
+        });
+        server.join().unwrap();
+        assert_eq!(cli_log(dir.path()).trim(), "stop --timeout 60");
+        assert!(!cli_log(dir.path()).contains("start"));
+    }
+
+    #[test]
+    fn disabled_lock_never_starts_or_stops_omlx() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        with_test_lock_env(dir.path(), Occupancy::idle(), false, || {
+            set_test_omlx_cli(Some(cli.clone()));
+            assert!(is_busy_error(
+                &acquire_chat(PURPOSE_CLASSIFICATION, "model").unwrap_err()
+            ));
+        });
+        assert!(cli_log(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn whisper_does_not_stop_omlx() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = logging_cli(dir.path());
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", lifecycle_status(true)),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", lifecycle_status(false)),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            set_test_omlx_cli(Some(cli.clone()));
+            drop(prepare_whisper("model").unwrap());
+        });
+        server.join().unwrap();
+        assert!(cli_log(dir.path()).is_empty());
+    }
+
     #[test]
     fn unavailable_server_and_failed_load_release_on_return() {
         let dir = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+        let url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
         drop(listener);
         with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
             set_test_omlx_endpoint(url, "test-key");
@@ -867,7 +1312,8 @@ mod tests {
             assert!(lock_available(&LockPaths::in_dir(dir.path())));
         });
         let (url, server) = lifecycle_server(vec![(
-            "POST /v1/models/model/load ", json!({"status":"error"}),
+            "POST /v1/models/model/load ",
+            json!({"status":"error"}),
         )]);
         with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
             set_test_omlx_endpoint(url, "test-key");
@@ -1063,8 +1509,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         with_test_lock_env(dir.path(), Occupancy::idle(), false, || {
-            let permit =
-                acquire_pods("classification", "Qwen3.8-27B-4bit").unwrap();
+            let permit = acquire_pods("classification", "Qwen3.8-27B-4bit").unwrap();
             assert!(permit.is_disabled());
             assert!(!paths.metadata.is_file());
         });

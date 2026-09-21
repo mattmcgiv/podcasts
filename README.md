@@ -1,6 +1,6 @@
 # Pods
 
-A single-user podcast app for Chrome on iPhone. The browser stores the library and downloaded audio. The Mac runs the Rust backend.
+A single-user podcast app for Chrome on iPhone and iPad. The browser stores the library and downloaded audio. The Mac runs the Rust backend.
 
 **The native iOS app is deprecated.** Its source remains for history and data migration. New development targets the browser client.
 
@@ -57,7 +57,7 @@ No discovery feed. No recommendations. Your subscriptions, unplayed episodes fir
 - **Playback** with scrubber, skip back/forward, speeds through 3×, autoplay next, and mini player
 - **Ad removal** (optional): download audio, local speech transcription, DeepSeek V4 Pro classification of ad ranges, automatic skip during playback with undo
 - **Generated show notes / chapters** from the episode transcript when ad-removal processing is ready
-- **Play on Mac** from the player Audio output controls (same Wi-Fi, authenticated Mac backend; progress saves on the phone)
+- **Play on Mac** from the player Audio output controls (Tailscale, authenticated Mac backend; progress synchronizes across devices)
 - **Library tools**: subscribe by search or RSS URL, OPML import/export, unsubscribe
 - **Appearance**: system, light, or dark theme
 
@@ -174,6 +174,8 @@ Never put keys, prompts, transcripts, URLs, or payloads in the JSON file.
 - **Classification phase:** one permit covers every transcript window and the boundary pass. Pods does not release between windows. It releases before ffmpeg audio rendering.
 - **Show notes:** a second acquire of the same lock. Pods holds it through the complete oMLX notes response/work, then releases.
 
+Each chat acquire starts the managed oMLX server if loopback port 8000 is down, then loads `Qwen3.8-27B-4bit` if it is not already loaded. Drop unloads that model. If the server is idle with no models left, or Pods started it for this acquire, Drop also runs `omlx stop --timeout 60`. Whisper still only unloads Pods' model and leaves the server running. A disabled advisory lock is not enough authority to start, load, or stop shared state. Start and stop use the same managed CLI as autostart (`/Applications/oMLX.app/Contents/MacOS/omlx-cli` or `~/.omlx/bin/omlx`). Homebrew `omlx` on `PATH` does not win. Argv never includes the API key.
+
 Chat POST requires that permit token. Nested acquire of the same path returns busy. That prevents deadlock and accidental bypass inside Pods.
 
 After `flock` succeeds, Pods makes an authenticated read-only `GET /api/status`. If `active_requests` or `waiting_requests` is nonzero, Pods releases and reports `omlx_busy`. An uncooperative caller can still race after this check and POST to `127.0.0.1:8000` without the file lock.
@@ -231,9 +233,9 @@ This code does not create a LaunchAgent, lock daemon, or other mysterious backgr
 
 ### oMLX autostart
 
-The Mac manager can request the existing oMLX menu-bar app to start its loopback HTTP server when that port is down.
+The worker starts oMLX itself when classification or show notes need a server and port 8000 is down. The Mac manager can also request the existing oMLX menu-bar app to start that server, as a backup, when the port is down.
 
-This is off by default. Merge `"omlx_autostart": true` into `~/.config/podcasts/mac.json` and restart the agent. Do not put the flag only on the launchd plist. `python3 mac/backend/manage.py agent` rewrites the plist and drops extra env keys.
+Manager autostart is off by default. Merge `"omlx_autostart": true` into `~/.config/podcasts/mac.json` and restart the agent. Do not put the flag only on the launchd plist. `python3 mac/backend/manage.py agent` rewrites the plist and drops extra env keys.
 
 A TCP check of `127.0.0.1:8000` is the liveness probe. Occupied oMLX, a held cooperative lock, and HTTP 503 are live. Those cases do not trigger a start. `open -a oMLX` is not enough when the app is already up with the server stopped. The manager calls the menu-bar CLI (`/Applications/oMLX.app/Contents/MacOS/omlx-cli` or `~/.omlx/bin/omlx`) with `start --no-wait`. Homebrew `omlx` on `PATH` does not win. It does not call `omlx serve` or `omlx restart`. A fast non-zero CLI exit is a failed start. The first stderr line is logged. Stdout is discarded. Stderr is not a pipe. A CLI that is still running after a short poll is left running.
 
@@ -301,4 +303,18 @@ See `ios/README.md` for Xcode setup, seed DB staging, feed refresh behavior, ref
 
 ## Mac speaker
 
-The Mac backend plays processed episode audio. The browser on the same Wi-Fi controls playback. See [Play on Mac](docs/mac-speaker.md).
+The Mac backend plays processed episode audio. The browser connected through Tailscale controls playback. See [Play on Mac](docs/mac-speaker.md).
+
+### iPhone and iPad synchronization
+
+Use the same `https://pods.mcgiv.dev` browser origin on both devices. Connect
+Tailscale, sign in with the existing Pods passkey, and keep Pods open to sync.
+Progress (including rewinds), played state, subscriptions, playback preferences,
+appearance, last-listened episode, and cleared notifications are shared. Download
+counts, storage limits, and audio files stay on each device. Offline edits remain
+queued until acknowledged. Settings displays conflicting device changes and
+provides a metadata backup export.
+
+The Mac serves only `https://sync.pods.mcgiv.dev:8443` on its Tailscale interface.
+No public port forwarding or exit node is used. See
+[rollout and validation](docs/ipad-sync-implementation.md).

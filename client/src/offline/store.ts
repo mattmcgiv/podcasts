@@ -8,21 +8,23 @@ export interface ArtifactManifest {
 export interface Snapshot {
   version: number; cursor: number; replace: boolean; episodes: EpisodeDetail[]; shows: Show[];
   settings: Record<string, unknown>; versions: Record<string, number>;
+  writers?: Record<string, { device: string; updated_at: number }>;
   refresh_status?: RefreshStatus;
   processing?: { pending: number; failed?: number; blocked?: number; storage: { used: number; limit: number; free: number; blocked: boolean } };
   notifications?: ProcessingNotification[];
 }
 export interface Operation {
   id: string; sequence: number; entity: string; field: string; value: unknown;
-  base_revision: number; conflict?: number;
+  base_revision: number; conflict?: number; sent?: boolean; error?: string;
 }
 export interface Preferences { limit: number; count: number }
 export interface LocalState {
-  client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
+  device_name?: string; client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
   preferences: Preferences; lastSync: number | null;
   notificationsClearedThrough?: number;
   /** Set after the automatic-episode default is raised from 10 to 50. */
   automaticEpisodesV2?: boolean;
+  sharedPreferencesV1?: boolean;
 }
 export interface Download {
   hash: string;
@@ -40,7 +42,7 @@ export function snapshotNotifications(snapshot: Snapshot | null | undefined): Pr
 }
 
 export function visibleNotifications(state: LocalState): ProcessingNotification[] {
-  return snapshotNotifications(state.snapshot).filter(item => item.id > (state.notificationsClearedThrough ?? 0));
+  return snapshotNotifications(state.snapshot).filter(item => item.id > (Math.max(state.notificationsClearedThrough ?? 0, Number(state.snapshot?.settings.notifications_cleared_through ?? 0), ...state.outbox.filter(o => o.entity === "settings" && o.field === "notifications_cleared_through").map(o => Number(o.value)))));
 }
 
 export function openDatabase(): Promise<IDBDatabase> {
@@ -56,7 +58,7 @@ export function openDatabase(): Promise<IDBDatabase> {
 
 export function emptyState(): LocalState {
   return { client_id: crypto.randomUUID(), sequence: 0, snapshot: null, outbox: [],
-    preferences: { limit: 2 * 1024 ** 3, count: 50 }, lastSync: null, automaticEpisodesV2: true };
+    preferences: { limit: 2 * 1024 ** 3, count: 50 }, lastSync: null, automaticEpisodesV2: true, sharedPreferencesV1: true };
 }
 
 /** Drop obsolete fields such as `pins` without touching library data. */

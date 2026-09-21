@@ -33,7 +33,7 @@ export async function cleanupPlayedDownload(id: number): Promise<void> {
   const episode = (s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes.find(e => e.id === id) : undefined)
     ?? s.snapshot?.episodes.find(e => e.id === id);
   if (episode?.manifest?.hash) hashes.add(episode.manifest.hash);
-  for (const hash of hashes) await store.deleteDownload(hash);
+  for (const hash of hashes) if (hash !== activeHash) await store.deleteDownload(hash);
   if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
   if (hashes.size) changed();
 }
@@ -136,7 +136,8 @@ export async function prefetch(): Promise<void> {
   const s = await state();
   const episodes = (s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes : []).filter(e => e.played_at == null && e.archived_at == null);
   let planned = 0;
-  const queue = episodes.slice(0, s.preferences.count);
+  const last = Number((s.snapshot ? applyOverlay(s.snapshot, s.outbox).settings.last_listened : 0));
+  const queue = episodes.slice().sort((a, b) => Number(b.id === last) - Number(a.id === last)).slice(0, s.preferences.count);
   for (const episode of queue) {
     if (!downloadEligible(episode.id, await state())) continue;
     planned += episode.manifest?.bytes ?? 0;

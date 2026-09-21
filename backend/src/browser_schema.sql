@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS browser_field_versions (
     PRIMARY KEY(entity, field)
 );
 CREATE TABLE IF NOT EXISTS browser_clock (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS browser_field_writers (
+    entity TEXT NOT NULL, field TEXT NOT NULL, device TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(entity, field)
+);
 INSERT OR IGNORE INTO browser_clock VALUES(1,0);
 CREATE TABLE IF NOT EXISTS browser_artifacts (
     hash TEXT PRIMARY KEY,

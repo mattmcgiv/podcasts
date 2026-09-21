@@ -4,7 +4,7 @@ import { webcrypto } from "node:crypto";
 import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writeRecord, type ArtifactManifest, type LocalState, type Snapshot } from "./store";
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
-import { clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
+import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
 import { cleanupPlayedDownload, downloadEpisode, downloadError, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
@@ -190,7 +190,7 @@ describe("durable local library", () => {
     expect(await localRequest("/ad-removal/settings")).not.toHaveProperty("deepseek_usage");
     expect(await localRequest("/ad-removal/statuses")).toMatchObject({ items: [] });
     expect(await localRequest("/refresh-status")).toHaveProperty("last_success_at");
-    await expect(localRequest("/unsupported")).rejects.toThrow("Mac on the same Wi-Fi");
+    await expect(localRequest("/unsupported")).rejects.toThrow("Mac to Tailscale");
     await expect(localRequest("/refresh", { method: "POST" })).rejects.toThrow(MAC_OFFLINE_MESSAGE);
   });
 });
@@ -284,7 +284,7 @@ describe("synchronization", () => {
     expect((await state()).outbox).toHaveLength(0);
     expect((await state()).lastSync).not.toBeNull();
   });
-  it("sends only the latest edit per field and drops a 409 item", async () => {
+  it("sends only unsent latest edits and retains a rejected 409 item", async () => {
     await seed();
     await updateState(s => {
       s.outbox = [
@@ -309,8 +309,72 @@ describe("synchronization", () => {
     });
     await synchronize();
     expect(posted.flat()).toEqual(["stale", "last", "fresh", "stale", "last", "fresh"]);
-    expect((await state()).outbox.map(o => o.id)).toEqual([]);
+    expect((await state()).outbox.map(o => o.id)).toEqual(["stale"]);
+    expect((await state()).outbox[0].error).toContain("rejected");
     expect((await state()).lastSync).not.toBeNull();
+  });
+  it("retries a lost acknowledgement unchanged and drains an edit made in flight", async () => {
+    await seed();
+    await updateState(s => { s.outbox = [{id:"lost", sequence:1, entity:"1", field:"position", value:{seconds:8,artifact_hash:hash}, base_revision:0}]; s.sequence=1; });
+    const posted: Array<Array<{id:string;value:unknown;base_revision:number}>> = [];
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/sync/actions")) {
+        const actions = JSON.parse(String(init?.body)).actions;
+        posted.push(actions);
+        if (posted.length === 1) throw new TypeError("Failed to fetch");
+        if (posted.length === 2) await enqueue("1", "position", {seconds:3,artifact_hash:hash});
+        return new Response(JSON.stringify({results:actions.map((a:{id:string}) => ({id:a.id,status:"applied",revision:posted.length}))}));
+      }
+      return new Response(JSON.stringify(snapshot()));
+    });
+    await expect(synchronize(false)).rejects.toThrow();
+    expect((await state()).outbox[0]).toMatchObject({id:"lost",sent:true});
+    await synchronize(false);
+    expect(posted[1]).toEqual(posted[0]);
+    expect(posted[2][0]).toMatchObject({value:{seconds:3},base_revision:2});
+    expect((await state()).outbox).toEqual([]);
+    expect((await state()).snapshot!.episodes[0].position_secs).toBe(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/sync"))).toHaveLength(0);
+  });
+  it("keeps edits with missing acknowledgements and never rolls back a newer shared snapshot on replay", async () => {
+    await seed();
+    await updateState(s => { s.outbox = [{id:"lost", sequence:1,entity:"settings",field:"speed",value:1.5,base_revision:0,sent:true}]; });
+    vi.mocked(fetch).mockImplementation(async url => new Response(JSON.stringify(String(url).endsWith("/sync/actions") ? {results:[]} : snapshot())));
+    await expect(synchronize(false)).rejects.toThrow("acknowledge");
+    expect((await state()).outbox).toHaveLength(1);
+    await updateState(s => { s.snapshot!.versions["settings:speed"]=8; s.snapshot!.settings.speed=2; });
+    vi.mocked(fetch).mockImplementation(async url => new Response(JSON.stringify(String(url).endsWith("/sync/actions") ? {results:[{id:"lost",status:"applied",revision:2}]} : snapshot())));
+    await synchronize(false);
+    expect((await state()).snapshot!.settings.speed).toBe(2);
+    expect((await state()).snapshot!.versions["settings:speed"]).toBe(8);
+  });
+  it("pins an active playback revision across a remote refresh and preserves a deliberate rewind", async () => {
+    await seed();
+    beginPlaybackSession(1, 0);
+    await updateState(s => { s.snapshot!.versions["1:position"]=9; s.snapshot!.episodes[0].position_secs=9; });
+    await enqueue("1","position",{seconds:2,artifact_hash:hash});
+    await synchronize(false).catch(() => {});
+    expect((await state()).outbox[0]).toMatchObject({base_revision:0,value:{seconds:2}});
+    await updateState(s => { s.outbox[0].conflict=9; });
+    expect((await localRequest<EpisodeDetail>("/episodes/1")).position_secs).toBe(2);
+    await resolveConflict((await state()).outbox[0].id, true).catch(() => {});
+    expect((await state()).outbox[0]).toMatchObject({base_revision:9,value:{seconds:2}});
+    endPlaybackSession(1);
+  });
+  it("migrates existing appearance and dismissals once without changing downloads or queued progress", async () => {
+    await seed();
+    window.localStorage.setItem("pods-theme-preference", "dark");
+    await updateState(s => { delete s.sharedPreferencesV1; s.notificationsClearedThrough=7;
+      s.outbox=[{id:"position",sequence:1,entity:"1",field:"position",value:{seconds:4},base_revision:0}]; s.sequence=1;
+    });
+    await synchronize(false).catch(() => {});
+    const saved=await state();
+    expect(saved.outbox.map(o=>o.field)).toEqual(["position","theme","notifications_cleared_through"]);
+    expect(saved.outbox[1].value).toBe("dark");
+    expect(saved.preferences).toEqual({limit:2*1024**3,count:50});
+    await synchronize(false).catch(() => {});
+    expect((await state()).outbox).toEqual(saved.outbox);
+    window.localStorage.removeItem("pods-theme-preference");
   });
   it("retains unauthenticated local changes and supports explicit conflict resolution", async () => {
     await seed();
@@ -627,9 +691,17 @@ describe("notification dismissal", () => {
     await updateState(s => { s.snapshot = incoming; });
     expect(store.visibleNotifications(await state())).toHaveLength(3);
     await clearNotifications(3);
-    expect(fetch).not.toHaveBeenCalled();
+    await synchronize().catch(() => {});
+    expect((await state()).outbox[0]).toMatchObject({ entity: "settings", field: "notifications_cleared_through", value: 3 });
     expect(store.visibleNotifications(await state())).toEqual([]);
-    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(incoming)));
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/sync/actions")) {
+        const actions = JSON.parse(String(init?.body)).actions;
+        incoming.settings.notifications_cleared_through = 3;
+        return new Response(JSON.stringify({ results: actions.map((o: {id: string}) => ({id:o.id, status:"applied", revision:1})) }));
+      }
+      return new Response(JSON.stringify(incoming));
+    });
     await synchronize();
     expect(store.visibleNotifications(await state())).toEqual([]);
     incoming.notifications.unshift(notice(4));

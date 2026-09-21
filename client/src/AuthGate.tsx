@@ -105,7 +105,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="auth-gate" role="status">
         <h1>{APP_NAME}</h1>
-        <p>{offlineEnabled() ? "Connect this iPhone and your Mac to the same Wi-Fi, then open the enrollment link from the Mac." : "Not set up. Enroll a passkey from the server."}</p>
+        <p>{offlineEnabled() ? "Connect this device and your Mac to Tailscale, then open the enrollment link from the Mac." : "Not set up. Enroll a passkey from the server."}</p>
         {offlineEnabled() && <button type="button" onClick={() => void refresh().catch(() => setGate("unset"))}>Reconnect</button>}
       </div>
     );

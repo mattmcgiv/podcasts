@@ -16,6 +16,7 @@ export type AdRemovalBlockingReason =
   | "playback_active";
 
 export interface EpisodeItem {
+  position_revision?: number;
   manifest?: import("./offline/store").ArtifactManifest;
   downloaded?: boolean;
   /** Bytes stored so far for an in-progress client download. */

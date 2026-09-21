@@ -12,7 +12,7 @@ import {
 const POLL_MS = 1_000;
 const MAX_POLL_FAILURES = 3;
 const UNCONFIRMED_STOP =
-  "Mac did not confirm stop. It may still be playing. Tap iPhone, then Play to use this phone.";
+  "Mac did not confirm stop. It may still be playing. Tap This device, then Play to use this device.";
 const RECONNECT_HINT = "Tap Mac to play through the Mac speaker again.";
 
 export interface BrowserSpeakerOptions {
@@ -269,7 +269,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
             available: false,
             connected: false,
             output: "mac",
-            error: status?.error || "Mac is not reachable on this Wi-Fi.",
+            error: status?.error || "Mac is not reachable through Tailscale.",
           });
           return;
         }
@@ -432,7 +432,7 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
         ...this._cast,
         available: false,
         connected: false,
-        error: "Mac is not reachable on this Wi-Fi.",
+        error: "Mac is not reachable through Tailscale.",
       });
       return;
     }

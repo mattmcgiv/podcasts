@@ -1177,6 +1177,21 @@ describe("PlayerProvider offline position flush", () => {
     return { setPosition };
   }
 
+  it("retries a WebKit gesture rejection synchronously on the next Play tap", async () => {
+    renderOffline(downloadedEpisode());
+    const audio = FakeAudio.last();
+    const play = vi.spyOn(audio, "play").mockRejectedValueOnce(new DOMException("User gesture required", "NotAllowedError"));
+    await act(async () => { screen.getByText("play-offline").click(); });
+    expect(screen.getByTestId("state")).toHaveTextContent("1:paused");
+    expect(play).toHaveBeenCalledTimes(1);
+    act(() => {
+      screen.getByText("toggle").click();
+      // This assertion runs before any microtask, inside the gesture's call stack.
+      expect(play).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+  });
+
   it("does not persist startup zero while a nonzero resume is pending", async () => {
     vi.useFakeTimers();
     const { setPosition } = renderOffline(downloadedEpisode());
@@ -1363,7 +1378,7 @@ describe("PlayerProvider automatic download cleanup", () => {
       screen.getByText("play-offline").click();
       await Promise.resolve();
     });
-    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
     await act(async () => FakeAudio.last().emitEnded());
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("2:playing"));
     expect(FakeAudio.last().src).toBe(`/_media/${NEXT_HASH}.m4a`);
@@ -1393,7 +1408,7 @@ describe("PlayerProvider automatic download cleanup", () => {
       screen.getByText("play-offline").click();
       await Promise.resolve();
     });
-    expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
     await act(async () => {
       screen.getByText("done").click();
       await Promise.resolve();

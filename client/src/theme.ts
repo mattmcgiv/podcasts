@@ -11,4 +11,5 @@ export function applyThemePreference(preference: ThemePreference, persist = true
   document.documentElement.dataset.theme = preference;
   document.documentElement.style.colorScheme = preference === "system" ? "light dark" : preference;
   if (persist) window.localStorage.setItem(THEME_PREFERENCE_KEY, preference);
+  window.dispatchEvent(new Event("pods-theme-changed"));
 }

@@ -1,4 +1,5 @@
 import { emitEpisodesChanged } from "../events";
+import { applyThemePreference, currentThemePreference, THEME_PREFERENCE_KEY } from "../theme";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import type { EpisodeDetail, ProcessingNotification, RefreshStatus, Settings } from "../types";
 import { cleanupPlayedDownload, prefetch, sweepStaleDownloads } from "./downloads";
@@ -8,9 +9,17 @@ import { allDownloads, readRecord, updateState, type ArtifactManifest, type Down
 declare global { interface Window { PODS_LOCAL_CLIENT?: boolean } }
 export const offlineEnabled = () => window.PODS_LOCAL_CLIENT ?? import.meta.env.PROD;
 export const backendBase = () => window.PODS_API_BASE ?? import.meta.env.VITE_API_BASE ?? "https://sync.pods.mcgiv.dev:8443";
-export const MAC_OFFLINE_MESSAGE = "Mac is off. Downloaded episodes still play.";
+export const MAC_OFFLINE_MESSAGE = "Mac unavailable. Downloaded episodes still play.";
 export const PROBE_TIMEOUT_MS = 3_000;
 let syncing: Promise<void> | null = null;
+let refreshRequested = false;
+let syncAgain = false;
+const playbackBases = new Map<string, number>();
+export function beginPlaybackSession(id: number, revision?: number): void {
+  if (revision != null) playbackBases.set(String(id), revision);
+}
+export function endPlaybackSession(id: number): void { playbackBases.delete(String(id)); }
+
 let lastError: string | null = null;
 export const syncError = () => lastError;
 
@@ -30,7 +39,7 @@ export async function probeMac(): Promise<boolean> {
 function friendlyNetworkError(error: unknown, init: RequestInit): Error {
   if (error instanceof DOMException && error.name === "AbortError" && init.signal?.aborted) return error;
   if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
-    return new Error("Mac did not answer in time. Keep Pods open on the same Wi-Fi.");
+    return new Error("Mac did not answer in time. Check Tailscale and keep Pods open.");
   }
   const message = error instanceof Error ? error.message : "";
   if (error instanceof TypeError || /Failed to fetch|NetworkError|Load failed|Network request failed/i.test(message)) {
@@ -58,7 +67,7 @@ export async function clearNotifications(throughId: number): Promise<void> {
   await updateState(s => {
     s.notificationsClearedThrough = Math.max(s.notificationsClearedThrough ?? 0, throughId);
   });
-  window.dispatchEvent(new Event("pods-offline-changed"));
+  await enqueue("settings", "notifications_cleared_through", throughId);
 }
 
 export async function hasLocalLibrary(): Promise<boolean> { return (await state()).snapshot != null; }
@@ -94,7 +103,11 @@ export async function network<T>(path: string, init: RequestInit = {}): Promise<
 export function applyOverlay(snapshot: Snapshot, outbox: Operation[]): Snapshot {
   const copy = structuredClone(snapshot);
   for (const operation of outbox) {
-    if (operation.entity === "settings") { copy.settings[operation.field] = operation.value; continue; }
+    if (operation.entity === "settings") {
+      copy.settings[operation.field] = operation.field === "notifications_cleared_through"
+        ? Math.max(Number(copy.settings[operation.field]) || 0, Number(operation.value) || 0) : operation.value;
+      continue;
+    }
     if (operation.entity === "subscription") {
       if (!operation.value) {
         const removed = copy.shows.find(s => s.feed_url === operation.field);
@@ -121,25 +134,26 @@ export function applyOverlay(snapshot: Snapshot, outbox: Operation[]): Snapshot 
 function coalesceOutbox(outbox: Operation[]): Operation[] {
   const last = new Map<string, Operation>();
   for (const operation of outbox) {
-    if (operation.conflict != null) continue;
+    if (operation.conflict != null || operation.sent || operation.error) continue;
     last.set(`${operation.entity}:${operation.field}`, operation);
   }
-  return outbox.filter(operation => operation.conflict != null || last.get(`${operation.entity}:${operation.field}`) === operation);
+  return outbox.filter(operation => operation.conflict != null || operation.sent || operation.error || last.get(`${operation.entity}:${operation.field}`) === operation);
 }
 
 type SyncAction = { id: string; sequence: number; entity: string; field: string; value: unknown; base_revision: number };
-type ActionResult = { id: string; status: string; revision: number };
+type ActionResult = { id: string; status: string; revision: number; error?: string };
 
 async function postActions(clientId: string, actions: SyncAction[]): Promise<ActionResult[]> {
   if (actions.length === 0) return [];
   try {
     const response = await network<{ results: ActionResult[] }>("/sync/actions", {
-      method: "POST", body: JSON.stringify({ client_id: clientId, actions }) });
+      method: "POST", body: JSON.stringify({ client_id: clientId, device_name: (await state()).device_name ?? defaultDeviceName(), actions }) });
+    if (!Array.isArray(response.results)) throw new Error("Mac acknowledgement is incomplete. Pending changes are saved.");
     return response.results;
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    if (!message.includes("(409)")) throw error;
-    if (actions.length === 1) return [];
+    if (!/\((400|409|422)\)/.test(message)) throw error;
+    if (actions.length === 1) return [{ id: actions[0].id, status: "rejected", revision: 0, error: "The server rejected this change. Export a backup before troubleshooting." }];
     const results: ActionResult[] = [];
     for (const action of actions) results.push(...await postActions(clientId, [action]));
     return results;
@@ -147,70 +161,123 @@ async function postActions(clientId: string, actions: SyncAction[]): Promise<Act
 }
 
 export async function enqueue(entity: string, field: string, value: unknown): Promise<void> {
+  try {
   await updateState(s => {
     s.outbox.push({ id: crypto.randomUUID(), sequence: ++s.sequence, entity, field, value,
-      base_revision: s.snapshot?.versions[`${entity}:${field}`] ?? 0 });
+      base_revision: (field === "position" ? playbackBases.get(entity) : undefined) ?? s.snapshot?.versions[`${entity}:${field}`] ?? 0 });
   });
+  } catch (error) {
+    lastError = "Could not save this change on this device. Check browser storage.";
+    window.dispatchEvent(new Event("pods-offline-changed"));
+    throw error;
+  }
   emitEpisodesChanged();
   window.dispatchEvent(new Event("pods-offline-changed"));
-  void synchronize().catch(() => {});
+  void synchronize(false).catch(() => {});
 }
 
-export function synchronize(): Promise<void> {
+export function defaultDeviceName(): string {
+  return /iPad/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+    ? "iPad" : /iPhone/.test(navigator.userAgent) ? "iPhone" : "Browser";
+}
+
+export function synchronize(refresh = true): Promise<void> {
+  refreshRequested ||= refresh;
+  syncAgain = true;
   if (syncing) return syncing;
-  syncing = synchronizeOnce().finally(() => { syncing = null; window.dispatchEvent(new Event("pods-offline-changed")); });
+  syncing = (async () => {
+    do {
+      syncAgain = false;
+      const pull = refreshRequested;
+      refreshRequested = false;
+      await synchronizeOnce(pull);
+    } while (syncAgain);
+  })().finally(() => { syncing = null; window.dispatchEvent(new Event("pods-offline-changed")); });
   return syncing;
 }
 
-async function synchronizeOnce(): Promise<void> {
+/** Bound resume latency while the durable sync continues in the background. */
+export async function syncBeforePlayback(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    await Promise.race([synchronize().catch(() => {}), new Promise<void>(resolve => { timer = setTimeout(resolve, 2500); })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function receiveSnapshot(): Promise<void> {
+  const snapshot = await network<Snapshot>("/sync");
+  validateSnapshot(snapshot);
+  const local = await updateState(s => { s.snapshot = adoptSnapshot(s.snapshot, snapshot); });
+  const theme = applyOverlay(snapshot, local.outbox).settings.theme;
+  if (theme === "system" || theme === "light" || theme === "dark") applyThemePreference(theme);
+  window.dispatchEvent(new Event("pods-shared-settings"));
+}
+
+/** Import existing browser-only preferences once, without resetting the library or outbox. */
+async function migrateSharedPreferences(): Promise<void> {
+  if ((await state()).sharedPreferencesV1) return;
+  const theme = window.localStorage.getItem(THEME_PREFERENCE_KEY) ? currentThemePreference() : undefined;
+  await updateState(s => {
+    if (s.sharedPreferencesV1) return;
+    const queue = (field: string, value: unknown) => {
+      if (!s.outbox.some(o => o.entity === "settings" && o.field === field)) s.outbox.push({
+        id: crypto.randomUUID(), sequence: ++s.sequence, entity: "settings", field, value,
+        base_revision: s.snapshot?.versions[`settings:${field}`] ?? 0,
+      });
+    };
+    if (s.snapshot && theme) queue("theme", theme);
+    if (s.notificationsClearedThrough) queue("notifications_cleared_through", s.notificationsClearedThrough);
+    s.sharedPreferencesV1 = true;
+  });
+}
+
+async function synchronizeOnce(refresh: boolean): Promise<void> {
+  try {
+    await migrateSharedPreferences();
     if (!(await probeMac())) throw new Error(MAC_OFFLINE_MESSAGE);
-    // Receive current versions without discarding pending local edits.
-    const snapshot = await network<Snapshot>("/sync");
-    validateSnapshot(snapshot);
-    await updateState(s => { s.snapshot = adoptSnapshot(s.snapshot, snapshot); });
-    await updateState(s => { s.outbox = coalesceOutbox(s.outbox); });
-    window.dispatchEvent(new Event("pods-offline-changed"));
-    const initial = await state();
-    const queued = initial.outbox.filter(o => o.conflict == null);
-    for (let offset = 0; offset < queued.length; offset += ACTION_BATCH) {
-      const current = await state();
-      const chunk = queued.slice(offset, offset + ACTION_BATCH).map(scheduled => current.outbox.find(o => o.id === scheduled.id))
-        .filter((operation): operation is Operation => operation != null && operation.conflict == null);
-      if (chunk.length === 0) continue;
-      const actions = chunk.map(operation => ({ id: operation.id, sequence: operation.sequence, entity: operation.entity,
-        field: operation.field, value: operation.value, base_revision: operation.base_revision }));
-      const results = await postActions(current.client_id, actions);
+    if (refresh || !(await state()).snapshot) await receiveSnapshot();
+    while (true) {
+      // A sent operation is immutable: a lost response must retry the same identity.
+      const current = await updateState(s => { s.outbox = coalesceOutbox(s.outbox); });
+      const blocked = new Set(current.outbox.filter(o => o.conflict != null || o.error).map(o => `${o.entity}:${o.field}`));
+      const keys = new Set<string>();
+      const chunk = current.outbox.filter(o => {
+        const key = `${o.entity}:${o.field}`;
+        if (blocked.has(key) || keys.has(key)) return false;
+        keys.add(key); return true;
+      }).slice(0, ACTION_BATCH);
+      if (!chunk.length) break;
+      await updateState(s => { for (const op of s.outbox) if (chunk.some(c => c.id === op.id)) op.sent = true; });
+      const results = await postActions(current.client_id, chunk.map(({id,sequence,entity,field,value,base_revision}) => ({id,sequence,entity,field,value,base_revision})));
+      let missing = false;
       for (const operation of chunk) {
         const result = results.find(r => r.id === operation.id);
-        if (!result) {
-          await updateState(s => { s.outbox = s.outbox.filter(o => o.id !== operation.id); });
-          continue;
-        }
+        if (!result) { missing = true; continue; }
         await updateState(s => {
           if (result.status === "applied") {
-            // Include the acknowledged change in the snapshot before removing its optimistic overlay.
-            if (s.snapshot) {
+            if (s.snapshot && (s.snapshot.versions[`${operation.entity}:${operation.field}`] ?? 0) <= result.revision) {
               s.snapshot = applyOverlay(s.snapshot, [operation]);
               s.snapshot.versions[`${operation.entity}:${operation.field}`] = result.revision;
             }
             s.outbox = s.outbox.filter(o => o.id !== operation.id);
-            for (const queuedOp of s.outbox) {
-              if (queuedOp.entity === operation.entity && queuedOp.field === operation.field && queuedOp.conflict == null) queuedOp.base_revision = result.revision;
+            for (const queued of s.outbox) {
+              if (queued.entity === operation.entity && queued.field === operation.field && !queued.sent && queued.conflict == null && queued.base_revision === operation.base_revision) queued.base_revision = result.revision;
             }
+            if (operation.field === "position" && playbackBases.get(operation.entity) === operation.base_revision) playbackBases.set(operation.entity, result.revision);
           } else {
             const pending = s.outbox.find(o => o.id === operation.id);
-            if (pending) pending.conflict = result.revision;
+            if (pending && result.status === "conflict") pending.conflict = result.revision;
+            else if (pending) pending.error = result.error ?? "Change not acknowledged by the Mac.";
           }
         });
       }
+      if (missing) throw new Error("Mac did not acknowledge every change. Pending changes are saved and will retry.");
     }
-    const latest = await network<Snapshot>("/sync");
-    validateSnapshot(latest);
-    await updateState(s => { s.snapshot = adoptSnapshot(s.snapshot, latest); s.lastSync = Date.now(); });
+    if (refresh) await receiveSnapshot();
+    await updateState(s => { s.lastSync = Date.now(); });
     lastError = null;
     emitEpisodesChanged();
-    try { await sweepStaleDownloads(); } catch { /* Prefetch and the next sync retry. */ }
+    try { await sweepStaleDownloads(); } catch { /* Next sync retries cleanup. */ }
   } catch (error) {
     lastError = error instanceof Error ? friendlySyncError(error.message) : MAC_OFFLINE_MESSAGE;
     throw error;
@@ -264,8 +331,11 @@ export async function resolveConflict(id: string, keepPhone: boolean): Promise<v
   await updateState(s => {
     const operation = s.outbox.find(o => o.id === id);
     if (!operation) return;
-    s.outbox = s.outbox.filter(o => o.id !== id);
-    if (keepPhone) s.outbox.push({ ...operation, id: crypto.randomUUID(), sequence: ++s.sequence,
+    const sameField = s.outbox.filter(o => o.entity === operation.entity && o.field === operation.field);
+    const latest = sameField.at(-1) ?? operation;
+    s.outbox = s.outbox.filter(o => o.entity !== operation.entity || o.field !== operation.field);
+    playbackBases.delete(operation.entity);
+    if (keepPhone) s.outbox.push({ ...latest, sent: false, error: undefined, id: crypto.randomUUID(), sequence: ++s.sequence,
       base_revision: operation.conflict ?? operation.base_revision, conflict: undefined });
   });
   emitEpisodesChanged();
@@ -300,7 +370,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
   const s = await state();
   const snapshot = s.snapshot ? applyOverlay(s.snapshot, s.outbox) : { episodes: [], shows: [], settings: {}, processing: undefined, refresh_status: undefined };
   const downloads = await allDownloads();
-  const episodes = snapshot.episodes.map(e => withClientDownload(e, downloads));
+  const episodes = snapshot.episodes.map(e => withClientDownload({ ...e, position_revision: s.outbox.find(o => o.entity === String(e.id) && o.field === "position")?.base_revision ?? s.snapshot?.versions[`${e.id}:position`] ?? 0 }, downloads));
   const url = new URL(path, "https://pods.invalid");
   const route = url.pathname;
   const method = init.method ?? "GET";
@@ -388,6 +458,6 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     for (const feed of feeds) await enqueue("subscription", feed.getAttribute("xmlUrl")!, true);
     result = { imported: feeds.length, skipped: 0, failed: 0 };
   } else if (route === "/follows" || route === "/follow-candidates") result = [];
-  else throw new Error("This needs your Mac on the same Wi-Fi.");
+  else throw new Error("Connect this device and your Mac to Tailscale to use this feature.");
   return result as T;
 }
