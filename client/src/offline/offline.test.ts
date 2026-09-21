@@ -164,6 +164,14 @@ describe("durable local library", () => {
     await expect(localRequest("/episodes/999")).rejects.toThrow("not available");
     await expect(localRequest("/shows/999")).rejects.toThrow("unavailable");
     expect(await localRequest("/follows")).toEqual([]);
+    await localRequest("/youtube/videos", { method: "POST", body: JSON.stringify({ url: "https://youtu.be/abcdefghijk" }) });
+    expect((await state()).outbox.some(operation => operation.entity === "listen" && operation.field === "https://youtu.be/abcdefghijk" && operation.value === true)).toBe(true);
+    const video = snapshot();
+    video.episodes[0].audio_url = `/_media/${hash}.mp4`;
+    video.episodes[0].manifest = { ...video.episodes[0].manifest!, media: "video" };
+    expect(() => validateSnapshot(video)).not.toThrow();
+    video.episodes[0].audio_url = `/_media/${hash}.m4a`;
+    expect(() => validateSnapshot(video)).toThrow("Mac supplied an unpublished episode.");
   });
   it("queues subscriptions and settings; exports and imports OPML while disconnected", async () => {
     await seed();

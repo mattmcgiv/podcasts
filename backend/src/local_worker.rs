@@ -154,6 +154,7 @@ pub fn storage_status(backend: &Backend) -> Value {
 }
 
 pub fn step(backend: &Backend) -> Result<bool, Error> {
+    prepare_youtube(backend);
     if backend
         .db
         .scalar_string(
@@ -425,13 +426,18 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     }
     if !source.is_file() {
         stage(backend, id, "downloading")?;
-        let parsed = url::Url::parse(url).map_err(failure)?;
-        if !matches!(parsed.scheme(), "https" | "http") {
-            return Err(failure("unsupported audio URL"));
+        if let Some(video_id) = crate::youtube::video_id_from_source(url) {
+            require_capacity(backend, 1024 * 1024 * 1024)?;
+            download_youtube(video_id, source)?;
+        } else {
+            let parsed = url::Url::parse(url).map_err(failure)?;
+            if !matches!(parsed.scheme(), "https" | "http") {
+                return Err(failure("unsupported audio URL"));
+            }
+            download_source_with_progress(backend, url, source, |done, total| {
+                progress(backend, id, done, total)
+            })?;
         }
-        download_source_with_progress(backend, url, source, |done, total| {
-            progress(backend, id, done, total)
-        })?;
     }
     let (source_hash, _) = ArtifactStore::hash_file(source).map_err(failure)?;
     let transcript_file = work.join(format!("transcript-{source_hash}.json"));
@@ -559,14 +565,24 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         manifest
     } else {
         stage(backend, id, "rendering")?;
-        let rendered = work.join(format!("processed-{run}.m4a"));
+        let video = crate::youtube::video_id_from_source(url).is_some();
+        let rendered = work.join(format!(
+            "processed-{run}.{}",
+            if video { "mp4" } else { "m4a" }
+        ));
         if !rendered.is_file() {
-            // Reserve twice the nominal AAC size plus container/filter overhead.
-            require_capacity(
-                backend,
-                (duration * 32_000.0).ceil() as u64 + 16 * 1024 * 1024,
-            )?;
-            render(source, &rendered, &timeline)?;
+            // Reserve twice the nominal AAC size, or a 720p video, plus container overhead.
+            let reserve = if video {
+                (duration * 250_000.0).ceil() as u64 + 64 * 1024 * 1024
+            } else {
+                (duration * 32_000.0).ceil() as u64 + 16 * 1024 * 1024
+            };
+            require_capacity(backend, reserve)?;
+            if video {
+                render_video(source, &rendered, &timeline)?;
+            } else {
+                render(source, &rendered, &timeline)?;
+            }
         }
         let actual_duration = audio_duration(&rendered)?;
         let expected: f64 = timeline
@@ -590,13 +606,19 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             }
             chunks.push(hex::encode(Sha256::digest(&bytes)));
         }
+        let extension = if video { "mp4" } else { "m4a" };
         let dest = backend
             .artifacts
-            .prepare_dest(&format!("published/{hash}.m4a"))
+            .prepare_dest(&format!("published/{hash}.{extension}"))
             .map_err(failure)?;
         if !dest.exists() {
             fs::rename(&rendered, &dest).map_err(failure)?;
         }
+        let (width, height) = if video {
+            video_dimensions(&dest).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
         let manifest = Manifest {
             version: 1,
             episode_id: id,
@@ -608,7 +630,10 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             chunks,
             timeline,
             model: MODEL.into(),
-            pipeline_version: run,
+            pipeline_version: run.clone(),
+            media: if video { "video".into() } else { String::new() },
+            width,
+            height,
         };
         backend.db.with_transaction(|tx| {
             tx.execute(
@@ -1652,6 +1677,206 @@ fn decoded_duration_secs(progress: &[u8]) -> Option<f64> {
         .filter(|secs| secs.is_finite() && *secs > 0.0)
 }
 
+fn download_youtube(video_id: &str, dest: &Path) -> Result<(), Error> {
+    let output = dest.with_extension("mp4");
+    let mut args = crate::youtube::download_arguments(&output);
+    args.push(format!("https://www.youtube.com/watch?v={video_id}"));
+    let status = Command::new(crate::youtube::ytdlp_bin())
+        .args(&args)
+        .status()
+        .map_err(failure)?;
+    if !status.success() || !output.is_file() {
+        return Err(failure("youtube download failed"));
+    }
+    fs::rename(&output, dest).map_err(failure)?;
+    Ok(())
+}
+
+fn video_dimensions(path: &Path) -> Result<(u32, u32), Error> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+        ])
+        .arg(path)
+        .output()
+        .map_err(failure)?;
+    if !output.status.success() {
+        return Err(failure("invalid video"));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (width, height) = text
+        .trim()
+        .split_once('x')
+        .ok_or_else(|| failure("invalid video dimensions"))?;
+    Ok((
+        width.trim().parse().map_err(failure)?,
+        height.trim().parse().map_err(failure)?,
+    ))
+}
+
+pub fn video_filter_graph(spans: &[Interval]) -> String {
+    let mut filters = String::new();
+    for (index, span) in spans.iter().enumerate() {
+        filters.push_str(&format!(
+            "[0:v]trim=start={:.6}:end={:.6},setpts=PTS-STARTPTS[v{index}];[0:a]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[a{index}];",
+            span.original_start, span.original_end, span.original_start, span.original_end
+        ));
+    }
+    for index in 0..spans.len() {
+        filters.push_str(&format!("[v{index}][a{index}]"));
+    }
+    filters.push_str(&format!(
+        "concat=n={}:v=1:a=1[vc][a];[vc]scale=-2:min(720\\,ih):flags=lanczos[v]",
+        spans.len()
+    ));
+    filters
+}
+
+fn render_video(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
+    let filters = video_filter_graph(spans);
+    let script = dest.with_extension("filters");
+    fs::write(&script, &filters).map_err(failure)?;
+    let temp = dest.with_extension("partial.mp4");
+    let status = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-y", "-i"])
+        .arg(source)
+        .arg("-/filter_complex")
+        .arg(&script)
+        .args([
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&temp)
+        .status()
+        .map_err(failure)?;
+    if !status.success() {
+        return Err(failure("video rendering failed"));
+    }
+    fs::rename(temp, dest).map_err(failure)
+}
+
+fn prepare_youtube(backend: &Backend) {
+    canonicalize_youtube_subscriptions(backend);
+    drain_youtube_listen(backend);
+}
+
+fn canonicalize_youtube_subscriptions(backend: &Backend) {
+    let now = crate::db::now_unix();
+    if backend
+        .db
+        .scalar_string(
+            "SELECT value FROM settings WHERE key=?",
+            [crate::youtube::RESOLVE_AFTER_SETTING],
+        )
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|after| now < after)
+    {
+        return;
+    }
+    let rows: Vec<(i64, String)> = backend
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.prepare("SELECT id, feed_url FROM podcasts WHERE is_subscribed=1")
+                .ok()
+                .and_then(|mut stmt| {
+                    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .ok()
+                        .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                })
+        })
+        .unwrap_or_default();
+    let mut failed = false;
+    for (id, url) in rows {
+        if let Err(error) = backend.canonicalize_youtube_feed(id, &url) {
+            if !matches!(error, Error::Invalid(_)) {
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        let _ = backend.db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![
+                crate::youtube::RESOLVE_AFTER_SETTING,
+                (now + 60).to_string()
+            ],
+        );
+    }
+}
+
+fn drain_youtube_listen(backend: &Backend) {
+    let Some(raw) = backend
+        .db
+        .scalar_string(
+            "SELECT value FROM settings WHERE key=?",
+            [crate::youtube::LISTEN_SETTING],
+        )
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let mut items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&raw).unwrap_or_default();
+    let now = crate::db::now_unix();
+    let Some(index) = items.iter().position(|item| item.next_at <= now) else {
+        return;
+    };
+    let url = items[index].url.clone();
+    match backend.add_youtube_video(&url) {
+        Ok(_) => {
+            items.remove(index);
+        }
+        Err(_) => {
+            items[index].attempts += 1;
+            if items[index].attempts >= 4 {
+                items.remove(index);
+            } else {
+                items[index].next_at = now + 60 * (1_i64 << items[index].attempts.min(6));
+            }
+        }
+    }
+    if items.is_empty() {
+        let _ = backend.db.execute(
+            "DELETE FROM settings WHERE key=?",
+            [crate::youtube::LISTEN_SETTING],
+        );
+    } else if let Ok(value) = serde_json::to_string(&items) {
+        let _ = backend.db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![crate::youtube::LISTEN_SETTING, value],
+        );
+    }
+}
+
 fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     let mut filters = String::new();
     for (i, span) in spans.iter().enumerate() {
@@ -2007,6 +2232,82 @@ mod download_tests {
     impl Drop for TestStorageLimit {
         fn drop(&mut self) {
             TEST_STORAGE_LIMIT.with(|c| c.set(0));
+        }
+    }
+
+    #[test]
+    fn video_filter_graph_scales_to_720_and_keeps_picture_and_sound() {
+        let spans = vec![
+            Interval {
+                original_start: 0.0,
+                original_end: 1.5,
+                processed_start: 0.0,
+            },
+            Interval {
+                original_start: 3.0,
+                original_end: 4.0,
+                processed_start: 1.5,
+            },
+        ];
+        let graph = video_filter_graph(&spans);
+        assert!(graph.contains("concat=n=2:v=1:a=1"));
+        assert!(graph.contains("scale=-2:min(720\\,ih)"));
+        assert!(graph.contains("[0:v]trim=start=0.000000:end=1.500000"));
+        assert!(graph.contains("[0:a]atrim=start=3.000000:end=4.000000"));
+    }
+
+    #[test]
+    fn render_video_writes_a_720p_h264_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin", "-v", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let dest = dir.path().join("cut.mp4");
+        render_video(
+            &source,
+            &dest,
+            &[Interval {
+                original_start: 0.25,
+                original_end: 1.25,
+                processed_start: 0.0,
+            }],
+        )
+        .unwrap();
+        let (width, height) = video_dimensions(&dest).unwrap();
+        assert_eq!((width, height), (1280, 720));
+        let duration = audio_duration(&dest).unwrap();
+        assert!((duration - 1.0).abs() < 0.25, "{duration}");
+    }
+
+    #[test]
+    fn youtube_download_renames_the_mp4_from_the_configured_binary() {
+        let _guard = crate::youtube::YT_DLP_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("yt-dlp");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then out=$2; shift 2; continue; fi\n  shift\ndone\nprintf x > \"$out\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let previous = std::env::var("PODS_YT_DLP").ok();
+        std::env::set_var("PODS_YT_DLP", &bin);
+        let dest = dir.path().join("source.audio");
+        download_youtube("abcdefghijk", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"x");
+        match previous {
+            Some(value) => std::env::set_var("PODS_YT_DLP", value),
+            None => std::env::remove_var("PODS_YT_DLP"),
         }
     }
 
@@ -4148,7 +4449,8 @@ mod download_tests {
                 processed_start: 0.0,
             }],
             model: MODEL.into(),
-            pipeline_version: run,
+            pipeline_version: run.clone(),
+            ..Default::default()
         };
         backend
             .db
@@ -4258,7 +4560,8 @@ mod download_tests {
                 processed_start: 0.0,
             }],
             model: MODEL.into(),
-            pipeline_version: run,
+            pipeline_version: run.clone(),
+            ..Default::default()
         };
         backend
             .db

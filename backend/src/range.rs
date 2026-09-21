@@ -131,7 +131,9 @@ fn header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a st
 fn content_type(path: &str) -> String {
     if path.ends_with(".mp3") {
         "audio/mpeg".into()
-    } else if path.ends_with(".m4a") || path.ends_with(".mp4") {
+    } else if path.ends_with(".mp4") {
+        "video/mp4".into()
+    } else if path.ends_with(".m4a") {
         "audio/mp4".into()
     } else {
         "application/octet-stream".into()

@@ -140,6 +140,8 @@ export const Api = {
     request<Page<EpisodeItem>>(`/shows/${id}/search?q=${encodeURIComponent(q)}`),
   subscribe: (feedUrl: string) =>
     request<Show>("/shows", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
+  addYoutubeVideo: (url: string) =>
+    request<EpisodeItem>("/youtube/videos", { method: "POST", body: JSON.stringify({ url }) }),
   previewFeed: (feedUrl: string) =>
     request<FeedPreview>("/feeds/preview", { method: "POST", body: JSON.stringify({ feed_url: feedUrl }) }),
   addListenEpisode: (feedUrl: string, guid: string) =>

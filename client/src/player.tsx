@@ -13,6 +13,7 @@ import { offlineEnabled, beginPlaybackSession, endPlaybackSession, enqueue, sync
 import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
+  createVideoEngine,
   hasNativeAudioBridge,
   type AudioEngine,
   type AudioMetadata,
@@ -22,6 +23,7 @@ import {
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeAdMarker, EpisodeItem, EpisodeShowNote, PlayContext } from "./types";
+import { isVideoMedia } from "./youtube";
 
 export type PlayerEpisode = EpisodeItem & {
   notes_html?: string;
@@ -56,6 +58,7 @@ export interface PlayerApi {
   retryShowNotes: () => void;
   markPlayedAndClose: () => Promise<void>;
   close: () => void;
+  attachVideo: (node: HTMLVideoElement | null) => void;
 }
 
 const PlayerContext = createContext<PlayerApi | null>(null);
@@ -105,6 +108,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // WebKit can reject play after async sync. The next tap must reach play directly.
   const gestureRetryRef = useRef<number | null>(null);
   const audioRef = useRef<AudioEngine | null>(null);
+  const podcastEngineRef = useRef<AudioEngine | null>(null);
+  const videoEngineRef = useRef<AudioEngine | null>(null);
+  const videoNodeRef = useRef<HTMLVideoElement | null>(null);
+  const videoActiveRef = useRef(false);
+  const videoWiredRef = useRef(false);
+  const pendingVideoRef = useRef<{ item: EpisodeItem; resumeAt: number } | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
   const playingHashRef = useRef<string | undefined>(undefined);
   const contextRef = useRef<PlayContext>("recent");
@@ -319,7 +328,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       flushPosition();
       if (currentRef.current) endPlaybackSession(currentRef.current.id);
-      const a = ensureAudio();
       contextRef.current = context;
       if (offlineEnabled() && (!item.downloaded || !item.manifest)) return;
       if (offlineEnabled()) protectPlayingArtifact(item.manifest?.hash ?? null);
@@ -341,6 +349,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setShowNotesError(null);
       setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
+      if (isVideoMedia(item)) {
+        videoActiveRef.current = true;
+        pendingVideoRef.current = { item, resumeAt };
+        const node = videoNodeRef.current;
+        if (node) {
+          pendingVideoRef.current = null;
+          beginVideo(node, item, resumeAt);
+        }
+        loadEpisodeDetail(item.id);
+        return;
+      }
+      videoActiveRef.current = false;
+      pendingVideoRef.current = null;
+      const videoNode = videoNodeRef.current;
+      if (videoNode) {
+        videoNode.pause();
+        videoNode.removeAttribute("src");
+        videoNode.load();
+      }
+      const a = ensureAudio();
       resumeAtRef.current = hasNativeAudioBridge() || engineOutput(a) === "mac" ? 0 : resumeAt;
       const metadata = audioMetadata(item);
       a.setMetadata?.(metadata);
@@ -416,9 +444,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const endedRef = useRef(handleEnded);
   endedRef.current = handleEnded;
 
-  function ensureAudio(): AudioEngine {
-    if (audioRef.current) return audioRef.current;
-    const a = createAudioEngine();
+  function wireEngine(a: AudioEngine) {
     a.preload = "metadata";
     a.addEventListener("play", () => setPlaying(true));
     a.addEventListener("pause", () => {
@@ -457,10 +483,58 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setPendingAdSkip(null);
       setPosition(a.currentTime);
     });
+  }
+
+  function beginVideo(node: HTMLVideoElement, item: EpisodeItem, resumeAt: number) {
+    if (videoNodeRef.current !== node || !videoEngineRef.current) {
+      videoNodeRef.current = node;
+      videoEngineRef.current = createVideoEngine(node);
+      videoWiredRef.current = false;
+    }
+    const engine = videoEngineRef.current;
+    if (!videoWiredRef.current) {
+      wireEngine(engine);
+      videoWiredRef.current = true;
+    }
+    podcastEngineRef.current?.pause();
+    videoActiveRef.current = true;
+    audioRef.current = engine;
+    engine.playbackRate = speedRef.current;
+    resumeAtRef.current = resumeAt;
+    if (engine.src !== item.audio_url) engine.src = item.audio_url;
+    void engine.play().catch((error: unknown) => {
+      if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
+      setPlaying(false);
+      setInitializing(false);
+    });
+    updateMediaSessionMetadata(audioMetadata(item));
+  }
+
+  function ensureAudio(): AudioEngine {
+    if (videoActiveRef.current && audioRef.current) return audioRef.current;
+    if (podcastEngineRef.current) {
+      audioRef.current = podcastEngineRef.current;
+      return podcastEngineRef.current;
+    }
+    const a = createAudioEngine();
+    wireEngine(a);
     a.requestCastStatus?.();
+    podcastEngineRef.current = a;
     audioRef.current = a;
     return a;
   }
+
+  const attachVideo = useCallback((node: HTMLVideoElement | null) => {
+    videoNodeRef.current = node;
+    if (!node) return;
+    const pending = pendingVideoRef.current;
+    const item = pending?.item ?? (currentRef.current && isVideoMedia(currentRef.current) ? currentRef.current : null);
+    if (!item || !isVideoMedia(item)) return;
+    pendingVideoRef.current = null;
+    beginVideo(node, item, pending?.resumeAt ?? (item.position_secs > 1 ? item.position_secs : 0));
+    // beginVideo closes over the latest player helpers. The node identity is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Ensure cast discovery starts even before the first play.
   useEffect(() => {
@@ -658,6 +732,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       retryShowNotes,
       markPlayedAndClose,
       close,
+      attachVideo,
     }),
     [
       current,
@@ -685,6 +760,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       retryShowNotes,
       markPlayedAndClose,
       close,
+      attachVideo,
     ],
   );
 

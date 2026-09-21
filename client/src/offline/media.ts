@@ -11,7 +11,9 @@ export function byteRange(header: string | null, length: number): [number, numbe
 }
 
 export async function localMedia(request: Request): Promise<Response> {
-  const hash = new URL(request.url).pathname.match(/^\/_media\/([a-f0-9]{64})\.m4a$/)?.[1];
+  const matched = new URL(request.url).pathname.match(/^\/_media\/([a-f0-9]{64})\.(m4a|mp4)$/);
+  const hash = matched?.[1];
+  const extension = matched?.[2];
   if (!hash || !["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 404 });
   const manifest = await readRecord<ArtifactManifest>("meta", `manifest:${hash}`);
   const download = await readRecord<Download>("downloads", hash);
@@ -38,7 +40,7 @@ export async function localMedia(request: Request): Promise<Response> {
       index++;
     },
   });
-  const headers: Record<string, string> = { "Content-Type": "audio/mp4", "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes", "ETag": `"${hash}"` };
+  const headers: Record<string, string> = { "Content-Type": extension === "mp4" ? "video/mp4" : "audio/mp4", "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes", "ETag": `"${hash}"` };
   if (request.headers.has("Range")) headers["Content-Range"] = `bytes ${start}-${end}/${manifest.bytes}`;
   return new Response(request.method === "HEAD" ? null : body, { status: request.headers.has("Range") ? 206 : 200, headers });
 }

@@ -3,6 +3,7 @@ import { SPEEDS } from "../config";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
+import { isVideoMedia } from "../youtube";
 import { PauseIcon, PlayIcon } from "./MiniPlayer";
 
 let nextSpeedInteraction = 1;
@@ -97,9 +98,19 @@ export function PlayerSheet() {
       </header>
 
       <div className="sheet-body sheet-scroll-region">
-        <div className="sheet-art">
-          <Artwork src={ep.image_url || ep.podcast_image} size={224} />
-        </div>
+        {isVideoMedia(ep) ? (
+          <video
+            ref={p.attachVideo}
+            className="player-video"
+            controls
+            playsInline
+            aria-label={ep.title}
+          />
+        ) : (
+          <div className="sheet-art">
+            <Artwork src={ep.image_url || ep.podcast_image} size={224} />
+          </div>
+        )}
         <h2 className="sheet-title">{ep.title}</h2>
 
         <input
@@ -118,9 +129,9 @@ export function PlayerSheet() {
         </div>
 
         {p.initializing && (
-          <div className="stream-initializing" role="status" aria-label="Loading audio">
+          <div className="stream-initializing" role="status" aria-label={isVideoMedia(ep) ? "Loading video" : "Loading audio"}>
             <span className="stream-pulse" aria-hidden />
-            <span>Loading audio</span>
+            <span>{isVideoMedia(ep) ? "Loading video" : "Loading audio"}</span>
           </div>
         )}
 
@@ -177,6 +188,7 @@ export function PlayerSheet() {
         </div>
 
         <div className="player-options">
+          {!isVideoMedia(ep) && (
           <div className="cast-row" role="group" aria-label="Audio output">
             <span className="cast-label">Play on</span>
             <div className="cast-choices">
@@ -221,6 +233,7 @@ export function PlayerSheet() {
               </p>
             )}
           </div>
+          )}
           <div className="player-action-row">
             <button
               type="button"

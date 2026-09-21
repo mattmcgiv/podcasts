@@ -272,6 +272,7 @@ fn fixture() -> (Backend, tempfile::TempDir, Manifest) {
         ],
         model: "local".into(),
         pipeline_version: "v1".into(),
+        ..Default::default()
     };
     backend
         .db
@@ -1285,4 +1286,89 @@ fn two_devices_preserve_rewinds_and_merge_equal_edits_and_watermarks() {
     assert_eq!(state["settings"]["notifications_cleared_through"],9);
     assert_eq!(state["writers"]["1:position"]["device"],"iPad");
     assert_eq!(state["versions"]["1:position"],rewind["revision"]);
+}
+
+#[test]
+fn youtube_sync_subscribes_a_channel_and_queues_one_video_for_listen() {
+    let _guard = pods_backend::youtube::YT_DLP_TEST_LOCK.lock().unwrap();
+    let previous = std::env::var("PODS_YT_DLP").ok();
+    std::env::set_var("PODS_YT_DLP", "/usr/bin/false");
+    let temp = tempfile::tempdir().unwrap();
+    let fetcher = Arc::new(MockFeedFetcher::default());
+    let channel = "UCabcdefghijklmnopqrstuv";
+    let feed = pods_backend::youtube::channel_feed_url(channel);
+    fetcher.set(
+        &feed,
+        format!(
+            r#"<?xml version="1.0"?><feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom"><title>Synced Channel</title><entry><yt:videoId>oldvideo111</yt:videoId><title>Old</title><published>2024-01-01T00:00:00+00:00</published></entry><entry><yt:videoId>midvideo222</yt:videoId><title>Mid</title><published>2024-02-01T00:00:00+00:00</published></entry><entry><yt:videoId>newvideo333</yt:videoId><title>New</title><published>2024-03-01T00:00:00+00:00</published></entry></feed>"#
+        ),
+    );
+    let probe = pods_backend::youtube::MapProbe::default();
+    probe.videos.lock().unwrap().insert(
+        "abcdefghijk".into(),
+        pods_backend::youtube::VideoMeta {
+            video_id: "abcdefghijk".into(),
+            channel_id: "UCzyxwvutsrqponmlkjihgfe".into(),
+            channel_title: "Synced Channel".into(),
+            title: "Single".into(),
+            thumbnail: String::new(),
+            published_at: 1_700_000_000,
+            description: String::new(),
+        },
+    );
+    let mut backend = Backend::with_data_root(
+        Database::open_in_memory().unwrap(),
+        fetcher,
+        Arc::new(DisabledDirectory),
+        Some(temp.path().to_owned()),
+    );
+    backend.local = true;
+    backend.set_youtube_probe(Arc::new(probe));
+    let page = format!("https://www.youtube.com/channel/{channel}");
+    let subscribed = apply_actions(
+        &backend,
+        json!({"client_id":"phone","device_name":"iPhone","actions":[
+            {"id":"sub","sequence":1,"entity":"subscription","field":page,"value":true,"base_revision":0},
+            {"id":"vid","sequence":2,"entity":"listen","field":"https://youtu.be/abcdefghijk","value":true,"base_revision":0}
+        ]}),
+    )
+    .unwrap();
+    assert_eq!(subscribed["results"][0]["status"], "applied");
+    assert_eq!(subscribed["results"][1]["status"], "applied");
+    assert!(pods_backend::local_worker::step(&backend).unwrap());
+    let visible: Vec<String> = {
+        let conn = backend.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.guid FROM episodes e JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id WHERE p.is_subscribed=1 AND s.archived_at IS NULL ORDER BY e.guid",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    };
+    assert_eq!(visible, vec!["midvideo222".to_string(), "newvideo333".to_string()]);
+    let single: String = backend
+        .db
+        .scalar_string(
+            "SELECT e.audio_url FROM episodes e JOIN listen_episodes l ON l.episode_id=e.id WHERE e.guid='abcdefghijk'",
+            [],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(single, "youtube:abcdefghijk");
+    let single_subscribed: i64 = backend
+        .db
+        .scalar_i64(
+            "SELECT p.is_subscribed FROM podcasts p JOIN episodes e ON e.podcast_id=p.id WHERE e.guid='abcdefghijk'",
+            [],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(single_subscribed, 0);
+    match previous {
+        Some(value) => std::env::set_var("PODS_YT_DLP", value),
+        None => std::env::remove_var("PODS_YT_DLP"),
+    }
 }

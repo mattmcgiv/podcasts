@@ -82,6 +82,32 @@ describe("SettingsSheet", () => {
     expect(calls.some((call) => call.key === "POST /api/listen-episodes")).toBe(false);
   });
 
+  it("subscribes to a YouTube channel and adds one video to Listen", async () => {
+    const { calls } = installApi({
+      "POST /api/shows": {
+        id: 4, feed_url: "https://www.youtube.com/@veritasium", title: "Veritasium", description: "",
+        image_url: "", site_url: "", episode_count: 2, unplayed_count: 2,
+      },
+      "POST /api/youtube/videos": episode({ title: "One video" }),
+    });
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.type(screen.getByLabelText("YouTube URL"), "https://www.youtube.com/@veritasium");
+    await user.click(screen.getByRole("button", { name: "Add YouTube" }));
+    await screen.findByText("Subscribed. The two newest videos will be prepared.");
+    expect(JSON.parse(String(calls.find((call) => call.key === "POST /api/shows")?.init.body))).toEqual({
+      feed_url: "https://www.youtube.com/@veritasium",
+    });
+
+    await user.type(screen.getByLabelText("YouTube URL"), "https://youtu.be/abcdefghijk");
+    await user.click(screen.getByRole("button", { name: "Add YouTube" }));
+    await screen.findByText("Added that video to Listen. It will show up after the Mac removes ads and writes show notes.");
+    expect(JSON.parse(String(calls.find((call) => call.key === "POST /api/youtube/videos")?.init.body))).toEqual({
+      url: "https://youtu.be/abcdefghijk",
+    });
+  });
+
   it("looks up a feed and adds one selected episode without subscribing", async () => {
     const { calls } = installApi({
       "POST /api/feeds/preview": {

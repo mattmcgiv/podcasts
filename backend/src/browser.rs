@@ -28,6 +28,50 @@ pub struct Manifest {
     pub timeline: Vec<Interval>,
     pub model: String,
     pub pipeline_version: String,
+    /// `video` publishes an MP4. Empty means the existing AAC/M4A audio file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub media: String,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub width: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub height: u32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            episode_id: 0,
+            hash: String::new(),
+            source_hash: String::new(),
+            bytes: 0,
+            duration: 0.0,
+            chunk_size: CHUNK_SIZE,
+            chunks: Vec::new(),
+            timeline: Vec::new(),
+            model: String::new(),
+            pipeline_version: String::new(),
+            media: String::new(),
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
+pub fn media_extension(manifest: &Manifest) -> &'static str {
+    if manifest.media == "video" {
+        "mp4"
+    } else {
+        "m4a"
+    }
+}
+
+pub fn media_url(manifest: &Manifest) -> String {
+    format!("/_media/{}.{}", manifest.hash, media_extension(manifest))
 }
 
 pub fn original_time(timeline: &[Interval], seconds: f64) -> f64 {
@@ -277,7 +321,7 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
         };
         let mut detail = serde_json::to_value(Backend::episode_detail_row(conn, id)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
-        detail["audio_url"] = json!(format!("/_media/{}.m4a", manifest.hash));
+        detail["audio_url"] = json!(media_url(&manifest));
         detail["duration_secs"] = json!(manifest.duration);
         detail["position_secs"] = json!(processed_time(
             &manifest.timeline,
@@ -415,6 +459,10 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             } else if entity == "subscription" {
                 let subscribed = tx.query_row("SELECT is_subscribed FROM podcasts WHERE feed_url=?",[field],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
                 identical = stale && action["value"].as_bool() == Some(subscribed);
+            } else if entity == "listen" {
+                let queued = tx.query_row("SELECT value FROM settings WHERE key=?", [crate::youtube::LISTEN_SETTING], |r| r.get::<_, String>(0)).optional()?.unwrap_or_else(|| "[]".into());
+                let items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&queued).unwrap_or_default();
+                identical = action["value"].as_bool() == Some(true) && items.iter().any(|item| item.url == field);
             } else if let Ok(episode) = entity.parse::<i64>() {
                 if field == "played" {
                     let played = tx.query_row("SELECT played_at IS NOT NULL FROM episode_state WHERE episode_id=?",[episode],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
@@ -446,7 +494,24 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                         _=>return Err(Error::Invalid("unsupported setting".into())),
                     }
                     crate::db::set_setting(tx,"browser_settings",&settings.to_string())?;
+                } else if entity == "listen" {
+                    let input = crate::youtube::classify(field)?.ok_or_else(|| Error::Invalid("paste a YouTube video URL".into()))?;
+                    if !matches!(input, crate::youtube::YoutubeInput::Video { .. }) {
+                        return Err(Error::Invalid("paste a YouTube video URL".into()));
+                    }
+                    if value.as_bool() != Some(true) {
+                        return Err(Error::Invalid("listen value must be true".into()));
+                    }
+                    let queued = crate::db::setting(tx, crate::youtube::LISTEN_SETTING)?.unwrap_or_else(|| "[]".into());
+                    let mut items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&queued).unwrap_or_default();
+                    if !items.iter().any(|item| item.url == field) {
+                        items.push(crate::youtube::PendingListen { url: field.to_string(), attempts: 0, next_at: 0 });
+                        crate::db::set_setting(tx, crate::youtube::LISTEN_SETTING, &serde_json::to_string(&items).map_err(|e| Error::Invalid(e.to_string()))?)?;
+                    }
                 } else if entity == "subscription" && field.starts_with("http") {
+                    if matches!(crate::youtube::classify(field)?, Some(crate::youtube::YoutubeInput::Video { .. })) {
+                        return Err(Error::Invalid("Paste a channel URL to subscribe. A video URL is added to Listen.".into()));
+                    }
                     let url = url::Url::parse(field).map_err(|_|Error::Invalid("invalid feed URL".into()))?;
                     if !matches!(url.scheme(),"https"|"http") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() { return Err(Error::Invalid("invalid feed URL".into())); }
                     let subscribed = value.as_bool().ok_or_else(||Error::Invalid("subscription boolean required".into()))?;
@@ -531,7 +596,24 @@ fn serve_artifact(
     if !exists {
         return Err(Error::NotFound);
     }
-    let path = backend.artifacts.url(&format!("published/{hash}.m4a"));
+    let media = backend
+        .db
+        .scalar_string(
+            "SELECT json_extract(manifest_json,'$.media') FROM browser_publications WHERE json_extract(manifest_json,'$.hash')=?
+             UNION ALL SELECT json_extract(manifest_json,'$.media') FROM browser_artifacts WHERE hash=? LIMIT 1",
+            [hash, hash],
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let (extension, file_name) = if media == "video" {
+        ("mp4", "video.mp4")
+    } else {
+        ("m4a", "audio.m4a")
+    };
+    let path = backend
+        .artifacts
+        .url(&format!("published/{hash}.{extension}"));
     let mut file = std::fs::File::open(path).map_err(|_| Error::NotFound)?;
     let length = file.metadata().map_err(|_| Error::NotFound)?.len();
     let etag = format!("\"{hash}\"");
@@ -542,7 +624,7 @@ fn serve_artifact(
     }
     let authorization = crate::range::StreamAuthorization {
         episode_id: 1,
-        file_path: "audio.m4a".into(),
+        file_path: file_name.into(),
         byte_count: length as i64,
         token: "internal".into(),
         playback_session_id: String::new(),

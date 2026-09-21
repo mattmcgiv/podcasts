@@ -303,8 +303,11 @@ function isProcessingNotification(value: unknown): value is ProcessingNotificati
 
 export function validateSnapshot(snapshot: Snapshot): void {
   if (snapshot.version !== 1 || !snapshot.replace || !Array.isArray(snapshot.episodes) || !Array.isArray(snapshot.shows)) throw new Error("Unsupported Mac library format.");
-  if (snapshot.episodes.some(e => e.ad_removal_state !== "ad-free" || !e.manifest || !/^[a-f0-9]{64}$/.test(e.manifest.hash)
-    || e.audio_url !== `/_media/${e.manifest.hash}.m4a`)) throw new Error("Mac supplied an unpublished episode.");
+  if (snapshot.episodes.some(e => {
+    const extension = e.manifest?.media === "video" ? "mp4" : "m4a";
+    return e.ad_removal_state !== "ad-free" || !e.manifest || !/^[a-f0-9]{64}$/.test(e.manifest.hash)
+      || e.audio_url !== `/_media/${e.manifest.hash}.${extension}`;
+  })) throw new Error("Mac supplied an unpublished episode.");
   if (snapshot.notifications === undefined) return;
   if (!Array.isArray(snapshot.notifications)) throw new Error("Unsupported Mac library format.");
   let previousId = Number.POSITIVE_INFINITY;
@@ -405,7 +408,11 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
   } else if (route === "/recent") result = page(episodes.filter(e => e.played_at == null && e.archived_at == null && (e.downloaded || e.download_total != null)));
   else if (route === "/played") result = page(episodes.filter(e => e.played_at != null).sort((a, b) => (b.played_at ?? 0) - (a.played_at ?? 0)));
   else if (route === "/shows" && method === "GET") result = snapshot.shows;
-  else if (route === "/shows" && method === "POST") {
+  else if (route === "/youtube/videos" && method === "POST") {
+    const url = String(body.url ?? "");
+    await enqueue("listen", url, true);
+    result = { id: 0, podcast_id: 0, podcast_title: "YouTube", podcast_image: "", title: url, audio_url: url, duration_secs: null, published_at: 0, image_url: "", position_secs: 0, played_at: null, ad_removal_state: "preparing", ad_removal_action: null, ad_removal_stage: "queued", ad_removal_blocking_reason: null };
+  } else if (route === "/shows" && method === "POST") {
     await enqueue("subscription", String(body.feed_url), true);
     result = { id: 0, title: String(body.feed_url), feed_url: body.feed_url };
   } else if (/^\/shows\/\d+/.test(route)) {
@@ -451,7 +458,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     result = { directory_configured: directory.directory_configured ?? false, podcasts: directory.podcasts ?? [], episodes: episodes.filter(e => e.title.toLowerCase().includes(query)) };
   } else if (route === "/opml" && method === "GET") {
     const escape = (text: string) => text.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
-    result = `<?xml version="1.0"?><opml version="2.0"><body>${snapshot.shows.map(show => `<outline text="${escape(show.title)}" xmlUrl="${escape(show.feed_url)}" type="rss"/>`).join("")}</body></opml>`;
+    result = `<?xml version="1.0"?><opml version="2.0"><body>${snapshot.shows.filter(show => !/youtube\.com|youtu\.be/i.test(show.feed_url)).map(show => `<outline text="${escape(show.title)}" xmlUrl="${escape(show.feed_url)}" type="rss"/>`).join("")}</body></opml>`;
   } else if (route === "/opml" && method === "POST") {
     const xml = new DOMParser().parseFromString(String(init.body), "text/xml");
     const feeds = [...xml.querySelectorAll("outline[xmlUrl]")];

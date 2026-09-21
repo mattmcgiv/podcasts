@@ -997,6 +997,7 @@ fn browser_show_notes_queue_and_artifact_manifest() {
         }],
         model: "m".into(),
         pipeline_version: "p".into(),
+        ..Default::default()
     };
     backend
         .db
@@ -2026,6 +2027,7 @@ fn backend_retry_unsubscribe_invalid_position_and_browser_sync() {
         }],
         model: "m".into(),
         pipeline_version: "p".into(),
+        ..Default::default()
     };
     backend
         .artifacts
@@ -2538,6 +2540,7 @@ fn coordinator_caps_steps_and_browser_covers_notes_and_settings() {
         }],
         model: "m".into(),
         pipeline_version: "p".into(),
+        ..Default::default()
     };
     backend
         .artifacts

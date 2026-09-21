@@ -7,6 +7,7 @@ import { refreshFeeds } from "../refreshFeeds";
 import { applyThemePreference, currentThemePreference, type ThemePreference } from "../theme";
 import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration, localProcessingCopy } from "../lib";
 import type { AdRemovalSettings, CarBluetoothSettings, FeedPreview, FeedPreviewEpisode, RefreshStatus } from "../types";
+import { classifyYoutube } from "../youtube";
 
 function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
@@ -40,6 +41,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const [carBluetooth, setCarBluetooth] = useState<CarBluetoothSettings | null>(null);
   const [deepSeekApiKey, setDeepSeekApiKey] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
+  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [oneOffUrl, setOneOffUrl] = useState("");
   const [oneOffQuery, setOneOffQuery] = useState("");
   const [oneOffPreview, setOneOffPreview] = useState<FeedPreview | null>(null);
@@ -89,6 +91,30 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  async function addYoutube() {
+    const url = youtubeUrl.trim();
+    const kind = classifyYoutube(url);
+    if (kind === "channel") {
+      await run("Subscribing", async () => {
+        await Api.subscribe(url);
+        emitEpisodesChanged();
+        setYoutubeUrl("");
+        return "Subscribed. The two newest videos will be prepared.";
+      });
+      return;
+    }
+    if (kind === "video") {
+      await run("Adding video", async () => {
+        await Api.addYoutubeVideo(url);
+        emitEpisodesChanged();
+        setYoutubeUrl("");
+        return "Added that video to Listen. It will show up after the Mac removes ads and writes show notes.";
+      });
+      return;
+    }
+    setStatus("Paste a YouTube channel or video URL.");
   }
 
   async function addByUrl() {
@@ -468,6 +494,26 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
             />
             <button onClick={() => void addByUrl()} disabled={!feedUrl.trim()}>
               Add
+            </button>
+          </div>
+        </section>
+
+        <section className="settings-section" aria-labelledby="youtube-title">
+          <h2 className="section-title" id="youtube-title">YouTube</h2>
+          <p className="settings-detail">
+            Paste a channel URL to subscribe. The two newest videos are downloaded at 720p, with spoken ads removed.
+            Paste a video URL to add that video to Listen without subscribing.
+          </p>
+          <div className="add-url-row">
+            <input
+              type="url"
+              placeholder="https://www.youtube.com/@channel or a video URL"
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              aria-label="YouTube URL"
+            />
+            <button onClick={() => void addYoutube()} disabled={!youtubeUrl.trim()}>
+              Add YouTube
             </button>
           </div>
         </section>

@@ -578,3 +578,125 @@ fn test_search_includes_configured_directory_results() {
     assert!(results.directory_configured);
     assert_eq!(results.podcasts[0].title, "Found Pod");
 }
+
+fn youtube_atom(channel: &str, videos: &[(&str, &str, &str)]) -> String {
+    let mut entries = String::new();
+    for (id, title, published) in videos {
+        entries.push_str(&format!(
+            "<entry><yt:videoId>{id}</yt:videoId><title>{title}</title><published>{published}</published><media:group><media:description>{title} notes</media:description></media:group></entry>"
+        ));
+    }
+    format!(
+        r#"<?xml version="1.0"?><feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom"><title>Example Channel</title><author><name>Example Channel</name></author><link rel="alternate" href="https://www.youtube.com/channel/{channel}"/>{entries}</feed>"#
+    )
+}
+
+#[test]
+fn test_youtube_subscribe_keeps_the_newest_two_videos() {
+    let h = harness();
+    let channel = "UCabcdefghijklmnopqrstuv";
+    let feed = pods_backend::youtube::channel_feed_url(channel);
+    h.fetcher.set(
+        &feed,
+        youtube_atom(
+            channel,
+            &[
+                ("oldvideo111", "Oldest", "2024-01-01T00:00:00+00:00"),
+                ("midvideo222", "Middle", "2024-02-01T00:00:00+00:00"),
+                ("newvideo333", "Newest", "2024-03-01T00:00:00+00:00"),
+            ],
+        ),
+    );
+    let response = call(
+        &h.backend,
+        "POST",
+        "/api/shows",
+        Some(json!({"feed_url": format!("https://www.youtube.com/channel/{channel}")})),
+    );
+    assert_eq!(response.status_code, 201, "{}", String::from_utf8_lossy(&response.body));
+    let show: Show = decode(&response);
+    assert_eq!(show.feed_url, feed);
+    let visible: Vec<String> = {
+        let conn = h.backend.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.guid FROM episodes e LEFT JOIN episode_state s ON s.episode_id=e.id WHERE e.podcast_id=? AND s.archived_at IS NULL ORDER BY e.published_at",
+            )
+            .unwrap();
+        stmt.query_map([show.id], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    };
+    assert_eq!(visible, vec!["midvideo222".to_string(), "newvideo333".to_string()]);
+    let sources: i64 = h
+        .backend
+        .db
+        .scalar_i64(
+            "SELECT COUNT(*) FROM episodes WHERE podcast_id=? AND audio_url LIKE 'youtube:%'",
+            [show.id],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(sources, 3);
+    let opml = call(&h.backend, "GET", "/api/opml", None);
+    let xml = String::from_utf8(opml.body.clone()).unwrap();
+    assert!(!xml.contains("youtube.com"));
+}
+
+#[test]
+fn test_youtube_video_url_is_rejected_as_a_subscription() {
+    let h = harness();
+    let response = call(
+        &h.backend,
+        "POST",
+        "/api/shows",
+        Some(json!({"feed_url": "https://youtu.be/abcdefghijk"})),
+    );
+    assert_eq!(response.status_code, 422);
+}
+
+#[test]
+fn test_add_youtube_video_goes_to_listen_without_a_subscription() {
+    let h = harness();
+    let channel = "UCabcdefghijklmnopqrstuv";
+    let probe = pods_backend::youtube::MapProbe::default();
+    probe.videos.lock().unwrap().insert(
+        "abcdefghijk".into(),
+        pods_backend::youtube::VideoMeta {
+            video_id: "abcdefghijk".into(),
+            channel_id: channel.into(),
+            channel_title: "Example Channel".into(),
+            title: "One video".into(),
+            thumbnail: "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg".into(),
+            published_at: 1_700_000_000,
+            description: "Hello".into(),
+        },
+    );
+    h.backend.set_youtube_probe(Arc::new(probe));
+    let response = call(
+        &h.backend,
+        "POST",
+        "/api/youtube/videos",
+        Some(json!({"url": "https://www.youtube.com/watch?v=abcdefghijk"})),
+    );
+    assert_eq!(response.status_code, 201, "{}", String::from_utf8_lossy(&response.body));
+    let episode: EpisodeItem = decode(&response);
+    assert_eq!(episode.title, "One video");
+    assert_eq!(episode.audio_url, "youtube:abcdefghijk");
+    let subscribed = h
+        .backend
+        .db
+        .scalar_i64("SELECT is_subscribed FROM podcasts WHERE id=?", [episode.podcast_id])
+        .unwrap();
+    assert_eq!(subscribed, Some(0));
+    let listen = h
+        .backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM listen_episodes WHERE episode_id=?", [episode.id])
+        .unwrap();
+    assert_eq!(listen, Some(1));
+    let shows = call(&h.backend, "GET", "/api/shows", None);
+    let page: Vec<Show> = decode(&shows);
+    assert!(page.iter().all(|show| show.id != episode.podcast_id));
+}

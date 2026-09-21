@@ -129,6 +129,7 @@ pub struct Backend {
     pub auth: Auth,
     pub speaker: crate::speaker::Speaker,
     trusted_origins: Vec<String>,
+    youtube: Mutex<Arc<dyn crate::youtube::YoutubeProbe>>,
 }
 
 impl Backend {
@@ -176,6 +177,7 @@ impl Backend {
             auth: Auth::default(),
             speaker: crate::speaker::Speaker::platform(),
             trusted_origins: auth::trusted_origins_from_env(),
+            youtube: Mutex::new(Arc::new(crate::youtube::CommandProbe)),
         };
         let _ = backend.recover_interrupted_state();
         backend
@@ -193,6 +195,10 @@ impl Backend {
 
     pub fn set_credentials(&mut self, store: CredentialStore) {
         self.credentials = store;
+    }
+
+    pub fn set_youtube_probe(&self, probe: Arc<dyn crate::youtube::YoutubeProbe>) {
+        *self.youtube.lock().unwrap() = probe;
     }
 
     pub fn set_directory(&self, directory: Arc<dyn DirectorySearcher>) {
@@ -342,6 +348,11 @@ impl Backend {
             let body = request.json_object()?;
             let feed_url = body.get("feed_url").and_then(Value::as_str).ok_or_else(|| Error::Invalid("feed_url is required".into()))?;
             return Ok(HttpResponse::json(self.subscribe(feed_url)?, 201));
+        }
+        if path == "/api/youtube/videos" && method == "POST" {
+            let body = request.json_object()?;
+            let url = body.get("url").and_then(Value::as_str).ok_or_else(|| Error::Invalid("url is required".into()))?;
+            return Ok(HttpResponse::json(self.add_youtube_video(url)?, 201));
         }
         if path == "/api/follows" && method == "GET" {
             return Ok(HttpResponse::json(self.follows()?, 200));
@@ -689,8 +700,137 @@ impl Backend {
         Ok((feed_url, feeds::parse_feed(&data)?))
     }
 
+    fn canonical_subscribe_url(&self, raw: &str) -> Result<String, Error> {
+        match crate::youtube::classify(raw)? {
+            None => Ok(raw.trim().to_string()),
+            Some(crate::youtube::YoutubeInput::Video { .. }) => Err(Error::Invalid(
+                "Paste a channel URL to subscribe. A video URL is added to Listen.".into(),
+            )),
+            Some(input) => {
+                if let Some(feed) = crate::youtube::canonical_feed_url(&input) {
+                    return Ok(feed);
+                }
+                let crate::youtube::YoutubeInput::ChannelLookup { url } = input else {
+                    return Err(Error::Invalid("invalid YouTube channel URL".into()));
+                };
+                let channel_id = self.youtube.lock().unwrap().channel_id(&url)?;
+                Ok(crate::youtube::channel_feed_url(&channel_id))
+            }
+        }
+    }
+
+    pub fn canonicalize_youtube_feed(&self, podcast_id: i64, feed_url: &str) -> Result<bool, Error> {
+        let Some(input) = crate::youtube::classify(feed_url)? else {
+            return Ok(false);
+        };
+        let canonical = if let Some(feed) = crate::youtube::canonical_feed_url(&input) {
+            if feed == feed_url {
+                return Ok(false);
+            }
+            feed
+        } else {
+            let crate::youtube::YoutubeInput::ChannelLookup { url } = input else {
+                return Err(Error::Invalid("a video URL is not a channel subscription".into()));
+            };
+            let channel_id = self.youtube.lock().unwrap().channel_id(&url)?;
+            crate::youtube::channel_feed_url(&channel_id)
+        };
+        if canonical == feed_url {
+            return Ok(false);
+        }
+        let existing = self.db.scalar_i64(
+            "SELECT id FROM podcasts WHERE feed_url = ? AND id != ?",
+            params![canonical, podcast_id],
+        )?;
+        self.db.with_transaction(|tx| {
+            if let Some(existing) = existing {
+                tx.execute(
+                    "UPDATE podcasts SET is_subscribed = 1 WHERE id = ?",
+                    params![existing],
+                )?;
+                let episodes: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM episodes WHERE podcast_id = ?",
+                    params![podcast_id],
+                    |row| row.get(0),
+                )?;
+                if episodes == 0 {
+                    tx.execute("DELETE FROM podcasts WHERE id = ?", params![podcast_id])?;
+                }
+                crate::jobs::JobStore::archive_except_newest_two(tx, existing)?;
+            } else {
+                tx.execute(
+                    "UPDATE podcasts SET feed_url = ? WHERE id = ?",
+                    params![canonical, podcast_id],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    pub fn add_youtube_video(&self, raw: &str) -> Result<EpisodeItem, Error> {
+        let input = crate::youtube::classify(raw)?
+            .ok_or_else(|| Error::Invalid("paste a YouTube video URL".into()))?;
+        let crate::youtube::YoutubeInput::Video { video_id } = input else {
+            return Err(Error::Invalid("paste a YouTube video URL".into()));
+        };
+        let meta = self.youtube.lock().unwrap().video(&video_id)?;
+        if meta.video_id != video_id {
+            return Err(Error::Upstream("YouTube returned a different video".into()));
+        }
+        let feed_url = crate::youtube::channel_feed_url(&meta.channel_id);
+        let episode = crate::feeds::ParsedEpisode {
+            guid: meta.video_id.clone(),
+            title: meta.title.clone(),
+            notes_html: meta.description.clone(),
+            audio_url: crate::youtube::source_url(&meta.video_id),
+            duration_secs: None,
+            published_at: meta.published_at,
+            image_url: meta.thumbnail.clone(),
+        };
+        let feed = ParsedFeed {
+            title: meta.channel_title.clone(),
+            description: String::new(),
+            image_url: meta.thumbnail.clone(),
+            site_url: format!("https://www.youtube.com/channel/{}", meta.channel_id),
+            episodes: Vec::new(),
+        };
+        let episode_id = self.db.with_transaction(|tx| {
+            let podcast_id = if let Some(id) = tx
+                .query_row(
+                    "SELECT id FROM podcasts WHERE feed_url = ?",
+                    params![feed_url],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                id
+            } else {
+                tx.execute(
+                    "INSERT INTO podcasts (feed_url, is_subscribed, created_at) VALUES (?, 0, ?)",
+                    params![feed_url, db::now_unix()],
+                )?;
+                tx.last_insert_rowid()
+            };
+            upsert_podcast_meta(tx, podcast_id, &feed)?;
+            let episode_id = upsert_episode(tx, podcast_id, &episode)?.0;
+            tx.execute(
+                "INSERT INTO episode_state (episode_id, played_at, archived_at, updated_at) VALUES (?, NULL, NULL, ?) ON CONFLICT(episode_id) DO UPDATE SET played_at = NULL, archived_at = NULL, updated_at = excluded.updated_at",
+                params![episode_id, db::now_unix()],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO listen_episodes (episode_id) VALUES (?)",
+                params![episode_id],
+            )?;
+            Ok(episode_id)
+        })?;
+        self.episode_item(episode_id)?
+            .ok_or_else(|| Error::Database("could not load added video".into()))
+    }
+
     fn subscribe(&self, raw: &str) -> Result<Show, Error> {
-        let (feed_url, url) = Self::normalized_feed_url(raw)?;
+        let requested = self.canonical_subscribe_url(raw)?;
+        let (feed_url, url) = Self::normalized_feed_url(&requested)?;
         let existing = self.db.scalar_i64("SELECT id FROM podcasts WHERE feed_url = ?", params![feed_url])?;
         if let Some(id) = existing {
             if self.db.scalar_i64("SELECT is_subscribed FROM podcasts WHERE id = ?", params![id])? == Some(1) {
@@ -701,7 +841,7 @@ impl Backend {
         let FeedFetchResponse::Data(data, validators) = fetched else {
             return Err(Error::Upstream("feed returned HTTP 304 during subscription".into()));
         };
-        let feed = feeds::parse_feed(&data)?;
+        let feed = crate::youtube::parse_catalog(&feed_url, &data)?;
         let podcast_id = self.db.with_transaction(|tx| {
             let podcast_id = if let Some(id) = existing {
                 tx.execute("UPDATE podcasts SET is_subscribed = 1 WHERE id = ?", params![id])?;
@@ -1163,7 +1303,7 @@ impl Backend {
                         params![id, next.etag, next.last_modified],
                     )?;
                 }
-                Ok(FeedFetchResponse::Data(data, next)) => match feeds::parse_feed(&data) {
+                Ok(FeedFetchResponse::Data(data, next)) => match crate::youtube::parse_catalog(&url, &data) {
                     Ok(feed) => {
                         let stored = self.db.with_transaction(|tx| {
                             upsert_podcast_meta(tx, id, &feed)?;
@@ -1232,6 +1372,10 @@ impl Backend {
         let conn = self.db.lock()?;
         let mut stmt = conn.prepare("SELECT title, feed_url FROM podcasts WHERE is_subscribed = 1 ORDER BY title COLLATE NOCASE")?;
         let shows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        let shows: Vec<_> = shows
+            .into_iter()
+            .filter(|(_, url)| crate::youtube::classify(url).ok().flatten().is_none())
+            .collect();
         Ok(crate::opml::render(&shows))
     }
 

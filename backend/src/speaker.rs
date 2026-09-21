@@ -596,6 +596,7 @@ mod tests {
             }],
             model: "local".into(),
             pipeline_version: "v1".into(),
+            ..Default::default()
         };
         backend
             .db

@@ -64,6 +64,43 @@ function setup() {
 }
 
 describe("PlayerSheet + MiniPlayer", () => {
+  it("uses the native video element for a YouTube publication", async () => {
+    HTMLMediaElement.prototype.play = () => Promise.resolve();
+    HTMLMediaElement.prototype.pause = () => {};
+    HTMLMediaElement.prototype.load = () => {};
+    const hash = "c".repeat(64);
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/9": {
+        ...episode({ id: 9, title: "Channel Video", audio_url: `/_media/${hash}.mp4` }),
+        notes_html: "",
+        show_notes: [],
+        ad_markers: [],
+        archived_at: null,
+        manifest: { media: "video" },
+      },
+      "PUT /api/episodes/9/position": null,
+    });
+    function StartVideo() {
+      const p = usePlayer();
+      return <button onClick={() => p.playEpisode(episode({
+        id: 9,
+        title: "Channel Video",
+        audio_url: `/_media/${hash}.mp4`,
+        manifest: { version: 1, episode_id: 9, hash, source_hash: "s", bytes: 8, duration: 10, chunk_size: 1024 ** 2, chunks: [hash], timeline: [], media: "video" },
+      }), "recent")}>play video</button>;
+    }
+    const user = userEvent.setup();
+    render(<PlayerProvider><StartVideo /><PlayerSheet /></PlayerProvider>);
+    await user.click(screen.getByRole("button", { name: "play video" }));
+    const video = await screen.findByLabelText("Channel Video");
+    expect(video.tagName).toBe("VIDEO");
+    expect(video).toHaveAttribute("controls");
+    expect(video).toHaveAttribute("playsinline");
+    expect(screen.queryByRole("group", { name: "Audio output" })).not.toBeInTheDocument();
+  });
+
   it("shows a minimal indicator while the audio stream initializes", async () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));

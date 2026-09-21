@@ -30,6 +30,7 @@ pub mod speaker;
 pub mod storage;
 pub mod transcribe;
 pub mod usage;
+pub mod youtube;
 
 pub use backend::{Backend, DirectorySearcher, DisabledDirectory};
 pub use db::Database;

@@ -4,6 +4,10 @@ export interface ArtifactManifest {
   version: number; episode_id: number; hash: string; source_hash: string; bytes: number;
   duration: number; chunk_size: number; chunks: string[];
   timeline: { original_start: number; original_end: number; processed_start: number }[];
+  /** Present for YouTube publications. Absent publications are audio. */
+  media?: "video" | "audio" | "";
+  width?: number;
+  height?: number;
 }
 export interface Snapshot {
   version: number; cursor: number; replace: boolean; episodes: EpisodeDetail[]; shows: Show[];
