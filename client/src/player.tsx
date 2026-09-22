@@ -105,7 +105,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [showNotesError, setShowNotesError] = useState<string | null>(null);
 
   const playRequestRef = useRef(0);
-  // WebKit can reject play after async sync. The next tap must reach play directly.
+  // WebKit can reject play(). The next tap must reach play directly.
   const gestureRetryRef = useRef<number | null>(null);
   const audioRef = useRef<AudioEngine | null>(null);
   const podcastEngineRef = useRef<AudioEngine | null>(null);
@@ -120,6 +120,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const speedRef = useRef(1);
   const autoplayRef = useRef(true);
   const resumeAtRef = useRef(0);
+  /** Cleared when the listener seeks, so a late sync cannot move the playhead. */
+  const adoptRemoteResumeRef = useRef(false);
   /** True while mark-played → next is in flight for one asynchronous completion. */
   const endInFlightRef = useRef(false);
   const nextEpisodeVisitGenerationRef = useRef(0);
@@ -311,7 +313,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [requestShowNotes]);
 
   const playEpisode = useCallback(
-    async (item: EpisodeItem, context: PlayContext) => {
+    (item: EpisodeItem, context: PlayContext) => {
       if (currentRef.current?.id === item.id) {
         contextRef.current = context;
         setExpanded(true);
@@ -320,19 +322,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       const request = ++playRequestRef.current;
       gestureRetryRef.current = null;
-      if (offlineEnabled()) {
-        await syncBeforePlayback();
-        try { item = await Api.episode(item.id); } catch { /* Use the local episode offline. */ }
-        if (request !== playRequestRef.current) return;
-        beginPlaybackSession(item.id, item.position_revision);
-      }
+      if (offlineEnabled() && (!item.downloaded || !item.manifest)) return;
       flushPosition();
       if (currentRef.current) endPlaybackSession(currentRef.current.id);
       contextRef.current = context;
-      if (offlineEnabled() && (!item.downloaded || !item.manifest)) return;
       if (offlineEnabled()) protectPlayingArtifact(item.manifest?.hash ?? null);
       playingHashRef.current = item.manifest?.hash;
-      if (offlineEnabled()) void enqueue("settings", "last_listened", item.id).catch(() => {});
+      if (offlineEnabled()) {
+        beginPlaybackSession(item.id, item.position_revision);
+        void enqueue("settings", "last_listened", item.id).catch(() => {});
+      }
       setCurrent(item);
       currentRef.current = item;
       currentEpisodeVisitRef.current = {
@@ -349,6 +348,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setShowNotesError(null);
       setInitializing(true);
       const resumeAt = item.position_secs > 1 ? item.position_secs : 0;
+      // The tapped row already has the file and position. Sync the shared playhead after playback starts.
+      const queueSharedResume = () => {
+        adoptRemoteResumeRef.current = true;
+        void syncBeforePlayback().then(() => Api.episode(item.id)).then(fresh => {
+          if (!adoptRemoteResumeRef.current) return;
+          if (request !== playRequestRef.current || currentRef.current?.id !== fresh.id) return;
+          beginPlaybackSession(fresh.id, fresh.position_revision);
+          if (Math.abs(fresh.position_secs - item.position_secs) <= 0.25) return;
+          resumeAtRef.current = fresh.position_secs > 1 ? fresh.position_secs : 0;
+          const audio = audioRef.current;
+          if (!audio) return;
+          audio.currentTime = fresh.position_secs;
+          setPosition(fresh.position_secs);
+        }).catch(() => {});
+      };
       if (isVideoMedia(item)) {
         videoActiveRef.current = true;
         pendingVideoRef.current = { item, resumeAt };
@@ -358,6 +372,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           beginVideo(node, item, resumeAt);
         }
         loadEpisodeDetail(item.id);
+        if (offlineEnabled()) queueSharedResume();
         return;
       }
       videoActiveRef.current = false;
@@ -387,6 +402,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       updateMediaSessionMetadata(metadata);
       // Upgrade to full detail, then generate chapters once for ready transcripts.
       loadEpisodeDetail(item.id);
+      if (offlineEnabled()) queueSharedResume();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [flushPosition, loadEpisodeDetail],
@@ -637,6 +653,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const seekTo = useCallback((secs: number) => {
     const a = audioRef.current;
     if (!a || !Number.isFinite(secs)) return;
+    adoptRemoteResumeRef.current = false;
     resumeAtRef.current = 0;
     a.currentTime = Math.max(0, secs);
     setPosition(a.currentTime);

@@ -1177,6 +1177,21 @@ describe("PlayerProvider offline position flush", () => {
     return { setPosition };
   }
 
+  it("starts playback before the Mac sync returns", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", () => new Promise(() => {}));
+    const episode = vi.spyOn(Api, "episode").mockResolvedValue(downloadedEpisode());
+    try {
+      renderOffline(downloadedEpisode());
+      act(() => { screen.getByText("play-offline").click(); });
+      expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+      expect(FakeAudio.last().paused).toBe(false);
+      expect(FakeAudio.last().src).not.toBe("");
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
   it("retries a WebKit gesture rejection synchronously on the next Play tap", async () => {
     renderOffline(downloadedEpisode());
     const audio = FakeAudio.last();
