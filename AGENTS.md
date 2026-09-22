@@ -14,6 +14,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 ## Dev workflow
 
 - After every turn, commit that turn's work on `main` and push it to `origin/main`.
+- After a turn that changes the Mac backend (`backend/` or the `mac/backend/` runtime the installed service runs), install that backend in the same turn. Do not wait to be asked. From the repo root run `python3 mac/backend/manage.py install`, then `launchctl kickstart -k gui/$(id -u)/dev.mcgiv.pods-backend`. Install builds the release binary, rebuilds the client in `pods-dev`, and atomically retargets `~/.local/share/pods/current`. The running service resolves `current` once at start, so the kickstart is what loads the new binary. If `pods-dev` is down, install a backend-only release instead: copy the live `current` tree into `releases/<YYYYMMDD-HHMMSS>`, replace `pods-backend` (and `runtime/manage.py` when it changed), retarget `current` the way `install()` does (write `current.next` as a symlink, then `Path.replace` it onto `current`), then kickstart. Do not `mv` or `ln` onto `current` while the shell is following that symlink. A client-only or docs-only turn does not reinstall the backend. Client production deploy stays the Cloudflare Pages steps below.
 - `dev/up.sh` — build the image and start the long-lived `pods-dev` container (mounts, ports, resources).
 - `dev/sh.sh [cmd...]` — exec into the container (interactive shell if no args).
 - `dev/check.sh` — the merge gate: frontend Vitest coverage (≥90% lines, statements, and functions, enforced in `vite.config.ts`).
