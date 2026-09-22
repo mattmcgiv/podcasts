@@ -424,6 +424,21 @@ describe("verified downloads and local Range playback", () => {
     await downloadEpisode(1); // Verified stored chunks avoid a second transfer.
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
+  it("serves a video range as one buffered body across chunks", async () => {
+    const videoHash = "c".repeat(64);
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    await writeRecord("meta", `manifest:${videoHash}`, { ...manifest, episode_id: 9, hash: videoHash, bytes: 8, chunk_size: 4, chunks: ["aa", "bb"], media: "video" });
+    await writeRecord("downloads", videoHash, { hash: videoHash, episode: 9, bytes: 8, complete: true, touched: 0 });
+    await writeRecord("chunks", `${videoHash}:0`, bytes.slice(0, 4).buffer);
+    await writeRecord("chunks", `${videoHash}:1`, bytes.slice(4).buffer);
+    const response = await localMedia(new Request(`https://pods.mcgiv.dev/_media/${videoHash}.mp4`, { headers: { Range: "bytes=2-6" } }));
+    expect(response.status).toBe(206);
+    expect(response.statusText).toBe("Partial Content");
+    expect(response.headers.get("content-type")).toBe("video/mp4");
+    expect(response.headers.get("content-range")).toBe("bytes 2-6/8");
+    expect(response.headers.get("content-length")).toBe("5");
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([3, 4, 5, 6, 7]);
+  });
   it("detects eviction, prevents false ready state, and protects the playing file", async () => {
     await prepareAudio(); await downloadEpisode(1);
     expect(await readRecord("meta", `manifest:${hash}`)).toBeTruthy();

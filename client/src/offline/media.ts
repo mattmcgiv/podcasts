@@ -22,25 +22,30 @@ export async function localMedia(request: Request): Promise<Response> {
   if (!range) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${manifest.bytes}` } });
   const [start, end] = range;
   const first = Math.floor(start / manifest.chunk_size), last = Math.floor(end / manifest.chunk_size);
-  // Check requested chunk existence before committing a successful response header.
+  const pieces: Uint8Array[] = [];
   for (let index = first; index <= last; index++) {
-    if (!await readRecord("chunks", `${hash}:${index}`)) {
+    const chunk = await readRecord<ArrayBuffer>("chunks", `${hash}:${index}`);
+    if (!chunk) {
       await writeRecord("downloads", hash, { ...download, complete: false });
       return new Response("Browser removed this download. Reconnect to restore it.", { status: 503 });
     }
+    if (request.method === "HEAD") continue;
+    const offset = index * manifest.chunk_size;
+    pieces.push(new Uint8Array(chunk).slice(Math.max(0, start - offset), Math.min(chunk.byteLength, end - offset + 1)));
   }
-  let index = first;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (index > last) { controller.close(); return; }
-      const chunk = await readRecord<ArrayBuffer>("chunks", `${hash}:${index}`);
-      if (!chunk) { controller.error(new Error("Download no longer available")); return; }
-      const offset = index * manifest.chunk_size;
-      controller.enqueue(new Uint8Array(chunk).slice(Math.max(0, start - offset), Math.min(chunk.byteLength, end - offset + 1)));
-      index++;
-    },
-  });
-  const headers: Record<string, string> = { "Content-Type": extension === "mp4" ? "video/mp4" : "audio/mp4", "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes", "ETag": `"${hash}"` };
+  const length = end - start + 1;
+  let body: Uint8Array | null = null;
+  if (request.method !== "HEAD") {
+    body = new Uint8Array(length);
+    let cursor = 0;
+    for (const piece of pieces) {
+      body.set(piece, cursor);
+      cursor += piece.byteLength;
+    }
+  }
+  const headers: Record<string, string> = { "Content-Type": extension === "mp4" ? "video/mp4" : "audio/mp4", "Content-Length": String(length), "Accept-Ranges": "bytes", "ETag": `"${hash}"` };
   if (request.headers.has("Range")) headers["Content-Range"] = `bytes ${start}-${end}/${manifest.bytes}`;
-  return new Response(request.method === "HEAD" ? null : body, { status: request.headers.has("Range") ? 206 : 200, headers });
+  // iPhone WebKit plays the audio track of a streamed mp4 and leaves the picture black.
+  const ranged = request.headers.has("Range");
+  return new Response(body, { status: ranged ? 206 : 200, statusText: ranged ? "Partial Content" : "OK", headers });
 }
