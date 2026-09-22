@@ -200,7 +200,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
             ORDER BY j.priority DESC,CASE WHEN j.stage='retry' THEN 1 ELSE 0 END,e.published_at,e.id LIMIT 1",[crate::db::now_unix(), MAX_FAILED_ATTEMPTS],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?
     };
     let Some((episode, url, _)) = candidate else {
-        return Ok(false);
+        return retitle_one_published(backend);
     };
     if storage_status(backend)["blocked"] == true {
         backend.db.execute(
@@ -574,7 +574,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     let duration = audio_duration(source)?;
     let timeline = retained_intervals(&segments, &labels, duration)?;
     let existing = stored_manifest(backend, id)?;
-    let manifest = if let Some(manifest) =
+    let mut manifest = if let Some(manifest) =
         existing.filter(|m| m.source_hash == source_hash && m.pipeline_version == run)
     {
         manifest
@@ -649,6 +649,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             media: if video { "video".into() } else { String::new() },
             width,
             height,
+            listen_title: String::new(),
         };
         backend.db.with_transaction(|tx| {
             tx.execute(
@@ -678,6 +679,9 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         &notes_permit,
         |done, total| progress(backend, id, done, total),
     )?;
+    if let Ok(title) = generate_listen_title(backend, id, &notes, &notes_permit) {
+        manifest.listen_title = title;
+    }
     drop(notes_permit);
     backend.db.with_transaction(|tx| {
         tx.execute(
@@ -1991,6 +1995,110 @@ pub fn evidence_quote(segment: &Segment) -> String {
     segment.text.chars().take(64).collect()
 }
 
+fn chapter_source(notes: &Value) -> String {
+    notes
+        .as_array()
+        .map(|chapters| {
+            chapters
+                .iter()
+                .filter_map(|chapter| {
+                    let title = chapter.get("title")?.as_str()?;
+                    let summary = chapter.get("summary").and_then(Value::as_str).unwrap_or("");
+                    Some(format!("- {title}: {summary}"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn generate_listen_title(
+    backend: &Backend,
+    id: i64,
+    notes: &Value,
+    permit: &crate::omlx_lock::InferencePermit,
+) -> Result<String, Error> {
+    let (feed, show) = {
+        let conn = backend.db.lock().map_err(failure)?;
+        conn.query_row(
+            "SELECT e.title, p.title FROM episodes e JOIN podcasts p ON p.id=e.podcast_id WHERE e.id=?",
+            [id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(failure)?
+    };
+    let chapters = chapter_source(notes);
+    let source = format!("{feed}\n{chapters}");
+    let prompt = crate::classify::listen_title_prompt(&show, &feed, &chapters);
+    let schema = json!({"type":"object","additionalProperties":false,"required":["title"],"properties":{
+        "title":{"type":"string","minLength":1,"maxLength":80}
+    }});
+    let mut last = "listen title rejected".to_string();
+    for _ in 0..3 {
+        let value = chat_json_schema(permit, &prompt, Some(schema.clone()))?;
+        let title = value.get("title").and_then(Value::as_str).unwrap_or("");
+        match crate::classify::accept_listen_title(title, &source) {
+            Ok(title) => return Ok(title),
+            Err(err) => last = err,
+        }
+    }
+    Err(failure(last))
+}
+
+fn retitle_one_published(backend: &Backend) -> Result<bool, Error> {
+    let row: Option<(i64, String)> = {
+        let conn = backend.db.lock().map_err(failure)?;
+        conn.query_row(
+            "SELECT b.episode_id, b.notes_json FROM browser_publications b
+             WHERE json_array_length(b.notes_json) > 0
+             AND COALESCE(json_extract(b.manifest_json, '$.listen_title'), '') = ''
+             AND COALESCE(json_extract(b.manifest_json, '$.listen_title_attempts'), 0) < 3
+             ORDER BY b.episode_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(failure)?
+    };
+    let Some((id, notes_raw)) = row else {
+        return Ok(false);
+    };
+    let notes: Value = serde_json::from_str(&notes_raw).map_err(failure)?;
+    let titled = (|| -> Result<(), Error> {
+        crate::power_gate::require_external_power()?;
+        crate::pipeline_pause::require_not_paused()?;
+        crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
+        let permit = crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
+        let title = generate_listen_title(backend, id, &notes, &permit)?;
+        backend.db.with_transaction(|tx| {
+            tx.execute(
+                "UPDATE browser_publications SET manifest_json=json_set(manifest_json, '$.listen_title', ?) WHERE episode_id=?",
+                params![title, id],
+            )?;
+            tx.execute("UPDATE browser_clock SET revision=revision+1", [])?;
+            Ok(())
+        })
+    })();
+    match titled {
+        Ok(()) => Ok(true),
+        Err(error)
+            if crate::omlx_lock::is_busy_error(&error)
+                || crate::power_gate::is_power_error(&error)
+                || crate::pipeline_pause::is_paused_error(&error)
+                || crate::memory_gate::is_busy_error(&error) =>
+        {
+            Ok(false)
+        }
+        Err(_) => {
+            backend.db.execute(
+                "UPDATE browser_publications SET manifest_json=json_set(manifest_json, '$.listen_title_attempts', 3) WHERE episode_id=?",
+                [id],
+            )?;
+            Ok(false)
+        }
+    }
+}
+
 pub fn chat_json(permit: &crate::omlx_lock::InferencePermit, prompt: &str) -> Result<Value, Error> {
     chat_json_schema(permit, prompt, None)
 }
@@ -2881,6 +2989,12 @@ mod download_tests {
             return json!({"chapters":[{"segment_id":"s0","title":"Hello","summary":"A short summary."}]})
                 .to_string();
         }
+        if unescaped.contains("Write a Listen title") {
+            if unescaped.contains("John Doe") {
+                return json!({"title":"John Doe: Bitcoin macro update"}).to_string();
+            }
+            return json!({"title":"Bitcoin macro update"}).to_string();
+        }
         json!({"ok":true}).to_string()
     }
 
@@ -3473,6 +3587,57 @@ mod download_tests {
         ] {
             assert_safe_message(notification_message(category));
         }
+    }
+
+    #[test]
+    fn idle_worker_writes_a_listen_title_from_the_local_model() {
+        let (backend, _temp) = download_fail_backend();
+        backend
+            .db
+            .execute(
+                "UPDATE episodes SET title='Interview with John Doe' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_publications(episode_id,manifest_json,notes_json,published_at) VALUES(1,'{}','[{\"title\":\"Markets\",\"summary\":\"John Doe talks about Bitcoin.\"}]',1)",
+                [],
+            )
+            .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage) VALUES(1,'ready')",
+                [],
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mock = start_mock_omlx(
+            json!({"active_requests":0,"waiting_requests":0}),
+            Duration::from_millis(0),
+        );
+        crate::omlx_lock::with_test_lock_env(
+            dir.path(),
+            crate::omlx_lock::Occupancy::idle(),
+            true,
+            || {
+                crate::omlx_lock::set_test_omlx_endpoint(&mock.url, "test-key");
+                assert!(step(&backend).unwrap());
+            },
+        );
+        assert_eq!(
+            backend
+                .db
+                .scalar_string(
+                    "SELECT json_extract(manifest_json, '$.listen_title') FROM browser_publications WHERE episode_id=1",
+                    [],
+                )
+                .unwrap()
+                .as_deref(),
+            Some("John Doe: Bitcoin macro update")
+        );
     }
 
     #[test]

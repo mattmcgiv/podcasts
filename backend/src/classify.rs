@@ -101,6 +101,115 @@ pub fn parse_show_notes(raw: &str, known_ids: &[String]) -> Result<Vec<ShowNoteD
     Ok(out)
 }
 
+const GUEST_PARTICLES: &[&str] = &["and", "of", "the", "de", "van", "da", "di", "von"];
+
+/// A Listen title is "Guest Name: three to five lowercase words", or just the
+/// description when the episode has no guest. Proper names stay capitalized.
+pub fn accept_listen_title(raw: &str, source: &str) -> Result<String, String> {
+    let title = raw.trim();
+    if title.is_empty() || title.chars().count() > 80 {
+        return Err("listen title length".into());
+    }
+    if title.contains(['\n', '\r', '"']) || title.to_ascii_lowercase().contains("http") {
+        return Err("listen title shape".into());
+    }
+    if title.ends_with(['.', '!', '?']) {
+        return Err("listen title punctuation".into());
+    }
+    let (guest, description) = match title.split_once(':') {
+        Some((guest, rest)) => {
+            let guest = guest.trim();
+            let rest = rest.trim();
+            if guest.is_empty() || rest.is_empty() || rest.contains(':') {
+                return Err("listen title colon".into());
+            }
+            (Some(guest), rest)
+        }
+        None => (None, title),
+    };
+    let desc_words: Vec<&str> = description.split_whitespace().collect();
+    if !(3..=5).contains(&desc_words.len()) {
+        return Err("listen title word count".into());
+    }
+    if let Some(guest) = guest {
+        let words: Vec<&str> = guest.split_whitespace().collect();
+        if words.is_empty() || words.len() > 6 {
+            return Err("listen title guest".into());
+        }
+        for word in words {
+            let bare = bare_word(word);
+            if bare.is_empty() {
+                return Err("listen title guest".into());
+            }
+            if GUEST_PARTICLES.contains(&bare.to_ascii_lowercase().as_str()) {
+                if bare.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    return Err("listen title guest case".into());
+                }
+                continue;
+            }
+            if bare.chars().next().is_some_and(|c| c.is_lowercase()) {
+                return Err("listen title guest case".into());
+            }
+            if !source.to_ascii_lowercase().contains(&bare.to_ascii_lowercase()) {
+                return Err("listen title invented guest".into());
+            }
+        }
+    }
+    let mut after_break = true;
+    for word in &desc_words {
+        let bare = bare_word(word);
+        if bare.is_empty() {
+            continue;
+        }
+        let first = bare.chars().next().unwrap();
+        if after_break {
+            if !first.is_uppercase() {
+                return Err("listen title opening case".into());
+            }
+        } else if first.is_uppercase() && !acronym(&bare) && !source_has_token(source, &bare) {
+            return Err("listen title title case".into());
+        }
+        after_break = word.ends_with(';');
+    }
+    if !desc_words.iter().skip(1).any(|word| {
+        bare_word(word).chars().next().is_some_and(|c| c.is_lowercase())
+    }) {
+        return Err("listen title title case".into());
+    }
+    Ok(title.to_string())
+}
+
+fn bare_word(word: &str) -> &str {
+    word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+}
+
+fn acronym(word: &str) -> bool {
+    let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+    letters.len() >= 2 && letters.iter().all(|c| c.is_uppercase())
+}
+
+fn source_has_token(source: &str, word: &str) -> bool {
+    source
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .any(|token| token == word)
+}
+
+pub fn listen_title_prompt(show: &str, feed_title: &str, chapters: &str) -> String {
+    format!(
+        "Write a Listen title for this episode.\n\
+         Host show: {show}\n\
+         The host is not a guest. Do not invent a person.\n\
+         Original episode title: {feed_title}\n\
+         Chapters:\n{chapters}\n\
+         Return JSON {{\"title\":\"...\"}}.\n\
+         Shape: if a guest is named in the original title or chapters, \"Guest Name: \" plus a 3 to 5 word description. Otherwise only the 3 to 5 word description.\n\
+         Example with a guest: \"John Doe: Bitcoin macro update\"\n\
+         Example without a guest: \"Bitcoin macro update\"\n\
+         Casing: capitalize proper names, the first word of the title, and the first word after a colon or semicolon. Every other word is lowercase. Do not use Title Case.\n\
+         No episode numbers, quotes, hashtags, or trailing punctuation."
+    )
+}
+
 pub const PRODUCTION_BATCH: usize = 64;
 pub const PRODUCTION_OVERLAP: usize = 4;
 
@@ -184,4 +293,44 @@ pub fn classification_prompt(segment_ids: &[String], corrections: &[CorrectionEx
         prompt.push_str(&format!("correction {} {}\n", correction.id, correction.text));
     }
     prompt
+}
+
+#[cfg(test)]
+mod listen_title_tests {
+    use super::*;
+
+    const SOURCE: &str = "John Doe on Bitcoin. Jane Roe joins. The Fed holds rates.";
+
+    #[test]
+    fn accepts_a_guest_and_a_subdued_description() {
+        let title = accept_listen_title("John Doe: Bitcoin macro update", SOURCE).unwrap();
+        assert_eq!(title, "John Doe: Bitcoin macro update");
+        assert_eq!(
+            accept_listen_title("Jane Roe: Fed holds rates", SOURCE).unwrap(),
+            "Jane Roe: Fed holds rates"
+        );
+        assert_eq!(
+            accept_listen_title("Bitcoin macro update", SOURCE).unwrap(),
+            "Bitcoin macro update"
+        );
+    }
+
+    #[test]
+    fn rejects_title_case_invented_guests_and_the_wrong_length() {
+        assert!(accept_listen_title("John Doe: Bitcoin Macro Update", SOURCE).is_err());
+        assert!(accept_listen_title("John Doe: Bitcoin macro", SOURCE).is_err());
+        assert!(accept_listen_title("John Doe: a very long bitcoin macro update", SOURCE).is_err());
+        assert!(accept_listen_title("bitcoin macro update", SOURCE).is_err());
+        assert!(accept_listen_title("Pat Smith: Bitcoin macro update", SOURCE).is_err());
+        assert!(accept_listen_title("John Doe: bitcoin; fed outlook today", SOURCE).is_err());
+        assert!(accept_listen_title("John Doe: Rates; Fed outlook now", SOURCE).is_ok());
+    }
+
+    #[test]
+    fn prompt_states_the_casing_example() {
+        let prompt = listen_title_prompt("Odd Lots", "John Doe on markets", "- intro");
+        assert!(prompt.contains("John Doe: Bitcoin macro update"));
+        assert!(prompt.contains("Do not use Title Case"));
+        assert!(prompt.contains("semicolon"));
+    }
 }

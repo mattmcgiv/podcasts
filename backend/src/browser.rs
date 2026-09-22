@@ -35,6 +35,9 @@ pub struct Manifest {
     pub width: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub height: u32,
+    /// Short Listen title. Empty keeps the feed title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub listen_title: String,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -58,6 +61,7 @@ impl Default for Manifest {
             media: String::new(),
             width: 0,
             height: 0,
+            listen_title: String::new(),
         }
     }
 }
@@ -347,6 +351,9 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
         detail["ad_removal_action"] = Value::Null;
         detail["ad_markers"] = json!([]);
         detail["show_notes"] = notes;
+        if !manifest.listen_title.is_empty() {
+            detail["title"] = json!(manifest.listen_title);
+        }
         detail["manifest"] = serde_json::to_value(manifest).unwrap();
         episodes.push(detail);
     }

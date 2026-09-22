@@ -801,6 +801,23 @@ fn snapshot_hides_publication_until_show_notes_exist() {
 }
 
 #[test]
+fn snapshot_replaces_the_feed_title_with_the_listen_title() {
+    let (backend, _temp, mut manifest) = fixture();
+    manifest.listen_title = "John Doe: Bitcoin macro update".into();
+    backend
+        .db
+        .execute(
+            "UPDATE browser_publications SET manifest_json=? WHERE episode_id=1",
+            [json!(manifest).to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot(&backend).unwrap()["episodes"][0]["title"],
+        "John Doe: Bitcoin macro update"
+    );
+}
+
+#[test]
 fn published_snapshot_never_exposes_original_or_unprocessed_episode() {
     let (backend, _temp, manifest) = fixture();
     let value = snapshot(&backend).unwrap();
