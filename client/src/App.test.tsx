@@ -34,6 +34,7 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByText("Fresh Episode");
+    expect(document.querySelector(".shell")?.firstElementChild).toHaveClass("safe-area-guard");
     expect(screen.getByRole("button", { name: "Listen" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Played" })).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Access token")).not.toBeInTheDocument();

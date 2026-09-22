@@ -63,13 +63,17 @@ export function OfflineSettings() {
     <p className="settings-detail">Keep Pods open to download automatically. Browser storage can be removed by iOS.</p>
     {(status || syncError() || downloadError()) && <p role="status">{status || syncError() || downloadError()}</p>}
     {local.outbox.filter(o => o.conflict != null).map(operation => <div key={operation.id}>
-      <p>{local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.title ?? operation.field}: conflicting changes.</p>
+      <p>{local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.title ?? operation.field}: this device and the shared library both changed this.</p>
       <p>{local.device_name ?? defaultDeviceName()}: {changeDescription(local, operation.entity, operation.field, local.outbox.filter(o => o.entity === operation.entity && o.field === operation.field).at(-1)?.value)}</p>
       <p>{local.snapshot?.writers?.[`${operation.entity}:${operation.field}`]?.device ?? "Shared library"}: {changeDescription(local, operation.entity, operation.field,
         operation.entity === "settings" ? local.snapshot?.settings[operation.field] : operation.field === "position" ? {seconds:local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.position_secs} : operation.field === "played" ? local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.played_at != null : "Subscription")}</p>
       <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, true))}>Keep this device’s change</button>
-      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, false))}>Use shared change</button>
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(operation.id, false))}>Use the shared change</button>
     </div>)}
-    {local.outbox.filter(o => o.error).map(o => <p key={o.id} role="alert">{o.error} Your change is saved on this device.</p>)}
+    {local.outbox.filter(o => o.error).map(o => <div key={o.id}>
+      <p role="alert">{o.error} The change is still saved on this device.</p>
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(o.id, true))}>Try again</button>
+      <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(() => resolveConflict(o.id, false))}>Discard this change</button>
+    </div>)}
   </section>;
 }

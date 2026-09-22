@@ -1815,11 +1815,40 @@ fn canonicalize_youtube_subscriptions(backend: &Backend) {
         })
         .unwrap_or_default();
     let mut failed = false;
+    let mut changed = Vec::new();
     for (id, url) in rows {
-        if let Err(error) = backend.canonicalize_youtube_feed(id, &url) {
-            if !matches!(error, Error::Invalid(_)) {
-                failed = true;
+        match backend.canonicalize_youtube_feed(id, &url) {
+            Ok(true) => changed.push(id),
+            Ok(false) => {}
+            Err(error) if matches!(error, Error::Invalid(_)) => {}
+            Err(_) => failed = true,
+        }
+    }
+    if !changed.is_empty() {
+        let _ = backend.db.execute(
+            "INSERT INTO settings(key,value) VALUES('browser_refresh_requested','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [],
+        );
+        let mut ids: Vec<i64> = backend
+            .db
+            .scalar_string(
+                "SELECT value FROM settings WHERE key='browser_trim_podcast_ids'",
+                [],
+            )
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        for id in changed {
+            if !ids.contains(&id) {
+                ids.push(id);
             }
+        }
+        if let Ok(value) = serde_json::to_string(&ids) {
+            let _ = backend.db.execute(
+                "INSERT INTO settings(key,value) VALUES('browser_trim_podcast_ids',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![value],
+            );
         }
     }
     if failed {

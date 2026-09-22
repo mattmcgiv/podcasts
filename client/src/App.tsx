@@ -82,6 +82,7 @@ function Shell() {
 
   return (
     <div className="shell">
+      <div className="safe-area-guard" aria-hidden="true" />
       <main className="content" onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
         <SyncStatus />
         <div className={`tab-swipe-screen${swipeDirection ? ` tab-swipe-${swipeDirection}` : ""}`} key={`${route.tab}-${route.showId ?? "root"}-${route.notifications ? "n" : "t"}`}>

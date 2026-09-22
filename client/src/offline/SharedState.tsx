@@ -3,25 +3,63 @@ import { Api } from "../api";
 import { usePlayer } from "../player";
 import { fmtTime } from "../lib";
 import type { EpisodeDetail } from "../types";
-import { applyOverlay, offlineEnabled, state, syncError } from "./client";
+import { applyOverlay, offlineEnabled, resolveConflict, state, syncError, synchronize } from "./client";
+import { prefetch } from "./downloads";
 import { signInAndSync } from "./signIn";
-import type { LocalState } from "./store";
+import type { LocalState, Operation } from "./store";
 
 const NOTICE_KEY = "pods-sync-notice";
 
-type SyncNotice = { key: string; tone: "auth" | "offline" | "pending"; text: string };
+type SyncNotice =
+  | { kind: "sign-in"; key: "auth"; text: string }
+  | { kind: "offline"; key: string; text: string }
+  | { kind: "conflict"; key: string; text: string; operationId: string }
+  | { kind: "rejected"; key: string; text: string; operationId: string }
+  | { kind: "pending"; key: string; text: string }
+  | { kind: "unsynced"; key: "never"; text: string };
 
-function syncNotice(local: LocalState): SyncNotice | null {
+function changedThing(local: LocalState, operation: Operation): string {
+  if (operation.entity === "subscription") {
+    return local.snapshot?.shows.find(show => show.feed_url === operation.field)?.title ?? "a subscription";
+  }
+  if (operation.entity === "settings") return "a setting";
+  return local.snapshot?.episodes.find(episode => String(episode.id) === operation.entity)?.title ?? "an item";
+}
+
+/** The blocking sync state, and nothing when the library is already in the good state. */
+export function syncNotice(local: LocalState): SyncNotice | null {
   const error = syncError();
   if (error && /Sign in/.test(error)) {
-    return { key: "auth", tone: "auth", text: "Sign in to update episodes from the Mac." };
+    return { kind: "sign-in", key: "auth", text: "Sign in to update episodes from the Mac." };
   }
-  if (error) return { key: `offline:${error}`, tone: "offline", text: "Offline. Downloaded episodes still play." };
-  if (local.outbox.some(operation => operation.conflict != null || operation.error)) {
-    return { key: "attention", tone: "pending", text: "Sync needs a choice in Settings." };
+  if (error) {
+    return { kind: "offline", key: `offline:${error}`, text: "The Mac is not reachable. Downloaded episodes still play." };
   }
-  if (local.outbox.length) return { key: `pending:${local.outbox.length}`, tone: "pending", text: "Changes waiting to sync." };
-  if (!local.lastSync) return { key: "never", tone: "pending", text: "Not synchronized yet." };
+  const conflicts = local.outbox.filter(operation => operation.conflict != null);
+  if (conflicts.length > 0) {
+    const operation = conflicts[0];
+    const more = conflicts.length > 1 ? ` ${conflicts.length - 1} more need the same choice after this.` : "";
+    return {
+      kind: "conflict",
+      key: `conflict:${operation.id}`,
+      operationId: operation.id,
+      text: `This device and the shared library both changed ${changedThing(local, operation)}.${more}`,
+    };
+  }
+  const rejected = local.outbox.filter(operation => operation.error);
+  if (rejected.length > 0) {
+    const operation = rejected[0];
+    return {
+      kind: "rejected",
+      key: `rejected:${operation.id}`,
+      operationId: operation.id,
+      text: `The Mac did not accept a change to ${changedThing(local, operation)}. ${operation.error}`,
+    };
+  }
+  if (local.outbox.length) {
+    return { kind: "pending", key: `pending:${local.outbox.length}`, text: "Changes on this device are waiting to sync." };
+  }
+  if (!local.lastSync) return { kind: "unsynced", key: "never", text: "This device has not synchronized with the Mac." };
   return null;
 }
 
@@ -45,8 +83,8 @@ export function useLocalState(): LocalState | null {
 export function SyncStatus() {
   const local = useLocalState();
   const [dismissed, setDismissed] = useState<string | null>(readDismissedNotice);
-  const [signingIn, setSigningIn] = useState(false);
-  const [signInError, setSignInError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const notice = local ? syncNotice(local) : null;
   const noticeKey = notice?.key ?? "";
   useEffect(() => {
@@ -61,29 +99,66 @@ export function SyncStatus() {
     try { sessionStorage.setItem(NOTICE_KEY, notice!.key); } catch { /* The notice still hides for this view. */ }
   }
 
-  async function signIn() {
-    setSigningIn(true);
-    setSignInError(null);
+  async function run(label: string, work: () => Promise<void>) {
+    setBusy(label);
+    setActionError(null);
     try {
-      await signInAndSync();
+      await work();
     } catch (error) {
-      setSignInError(error instanceof Error ? error.message : "Passkey sign-in failed");
+      setActionError(error instanceof Error ? error.message : "That did not work.");
     } finally {
-      setSigningIn(false);
+      setBusy(null);
     }
   }
 
-  return <div className={`sync-badge sync-badge-${notice.tone}`}>
+  async function syncNow() {
+    await synchronize();
+    await prefetch();
+  }
+
+  async function choose(operationId: string, keepDevice: boolean) {
+    await resolveConflict(operationId, keepDevice);
+    try { await prefetch(); } catch { /* A later sync retries the download. */ }
+  }
+
+  const working = busy != null;
+
+  return <div className={`sync-badge sync-badge-${notice.kind}`}>
     <div className="sync-badge-copy">
       <p role="status">{notice.text}</p>
-      {notice.tone === "auth" && (
-        <button type="button" className={`settings-btn primary${signingIn ? " is-busy" : ""}`} disabled={signingIn} aria-busy={signingIn} onClick={() => void signIn()}>
-          {signingIn ? "Signing in…" : "Continue with passkey"}
+      {notice.kind === "sign-in" && (
+        <button type="button" className={`settings-btn primary${busy === "sign-in" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "sign-in"} onClick={() => void run("sign-in", signInAndSync)}>
+          {busy === "sign-in" ? "Signing in…" : "Continue with passkey"}
         </button>
       )}
-      {signInError && <p className="auth-error" role="alert">{signInError}</p>}
+      {(notice.kind === "offline" || notice.kind === "pending" || notice.kind === "unsynced") && (
+        <button type="button" className={`settings-btn primary${busy === "sync" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "sync"} onClick={() => void run("sync", syncNow)}>
+          {busy === "sync" ? "Syncing…" : notice.kind === "offline" ? "Try again" : "Sync now"}
+        </button>
+      )}
+      {notice.kind === "conflict" && (
+        <>
+          <button type="button" className={`settings-btn primary${busy === "keep" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "keep"} onClick={() => void run("keep", () => choose(notice.operationId, true))}>
+            {busy === "keep" ? "Keeping this device’s change…" : "Keep this device’s change"}
+          </button>
+          <button type="button" className={`settings-btn${busy === "shared" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "shared"} onClick={() => void run("shared", () => choose(notice.operationId, false))}>
+            {busy === "shared" ? "Using the shared change…" : "Use the shared change"}
+          </button>
+        </>
+      )}
+      {notice.kind === "rejected" && (
+        <>
+          <button type="button" className={`settings-btn primary${busy === "retry" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "retry"} onClick={() => void run("retry", () => choose(notice.operationId, true))}>
+            {busy === "retry" ? "Trying again…" : "Try again"}
+          </button>
+          <button type="button" className={`settings-btn${busy === "discard" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "discard"} onClick={() => void run("discard", () => choose(notice.operationId, false))}>
+            {busy === "discard" ? "Discarding…" : "Discard this change"}
+          </button>
+        </>
+      )}
+      {actionError && <p className="auth-error" role="alert">{actionError}</p>}
     </div>
-    <button type="button" className="sync-badge-dismiss" onClick={dismiss}>Dismiss</button>
+    <button type="button" className="sync-badge-dismiss" onClick={dismiss} disabled={working}>Dismiss</button>
   </div>;
 }
 

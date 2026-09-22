@@ -320,7 +320,7 @@ struct PipelineRepository {
         var items: [PipelineEpisode] = []
         while true {
             let result = sqlite3_step(statement)
-            if result == SQLITE_DONE { return items }
+            if result == SQLITE_DONE { break }
             guard result == SQLITE_ROW else { throw CocoaError(.fileReadUnknown) }
             let episodeID = Int(sqlite3_column_int64(statement, 0))
             items.append(PipelineEpisode(id: String(episodeID), episodeId: episodeID,
@@ -328,6 +328,51 @@ struct PipelineRepository {
                 stage: string(3) ?? "queued", blockingReason: nil, lastErrorMessage: string(4),
                 completedUnits: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 5)),
                 totalUnits: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 6))))
+        }
+        items.append(contentsOf: Self.pendingListens(database))
+        return items
+    }
+
+    private static func pendingListens(_ database: OpaquePointer?) -> [PipelineEpisode] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT value FROM settings WHERE key='browser_youtube_listen'", -1, &statement, nil) == SQLITE_OK else {
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else { return [] }
+        return PipelineListenQueue.episodes(from: String(cString: value))
+    }
+}
+
+enum PipelineListenQueue {
+    struct Item: Decodable {
+        let url: String
+        let attempts: Int
+        let nextAt: Int
+
+        enum CodingKeys: String, CodingKey {
+            case url
+            case attempts
+            case nextAt = "next_at"
+        }
+    }
+
+    static func episodes(from json: String, now: Int = Int(Date().timeIntervalSince1970)) -> [PipelineEpisode] {
+        guard let data = json.data(using: .utf8),
+              let items = try? JSONDecoder().decode([Item].self, from: data) else { return [] }
+        return items.enumerated().map { index, item in
+            let waiting = item.attempts == 0 || item.nextAt <= now
+            return PipelineEpisode(
+                id: "listen:\(item.url)",
+                episodeId: -(index + 1),
+                title: item.url,
+                podcastTitle: "YouTube",
+                stage: waiting ? "queued" : "retry",
+                blockingReason: nil,
+                lastErrorMessage: nil,
+                completedUnits: nil,
+                totalUnits: nil
+            )
         }
     }
 }
@@ -388,7 +433,9 @@ struct PipelineMenu: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-                .padding(.bottom, 24)
+                .padding(.bottom, 22)
+            PipelineAddLink()
+                .padding(.bottom, 22)
             if monitor.unavailable {
                 Text(monitor.lastUpdated == nil ? "Pipeline status unavailable" : "Showing last update · server unavailable")
                     .font(.system(size: 11)).foregroundStyle(PipelineTheme.danger)
@@ -491,6 +538,222 @@ struct PipelineMenu: View {
             troubleshootError = nil
         } catch {
             troubleshootError = "Could not open Ghostty for \(episode.title)"
+        }
+    }
+}
+
+enum PipelineLibraryKind: String {
+    case channel
+    case video
+    case podcast
+    case invalid
+}
+
+enum PipelineLibraryLink {
+    static let refusal = "Paste a podcast feed, a channel, or a video."
+
+    static func preview(_ kind: PipelineLibraryKind) -> String {
+        switch kind {
+        case .channel: return "Subscribe to this channel. The two newest videos will be prepared."
+        case .video: return "Add this video to Listen. The channel is not subscribed."
+        case .podcast: return "Subscribe to this podcast."
+        case .invalid: return refusal
+        }
+    }
+
+    static func confirmation(_ kind: PipelineLibraryKind) -> String {
+        switch kind {
+        case .channel: return "Subscribed. The two newest videos will be prepared."
+        case .video: return "Added that video to Listen."
+        case .podcast: return "Subscribed."
+        case .invalid: return refusal
+        }
+    }
+
+    static func classify(_ raw: String) -> PipelineLibraryKind {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .invalid }
+        if trimmed.hasPrefix("@") {
+            let name = String(trimmed.dropFirst())
+            return handleOk(name) && !name.contains("/") ? .channel : .invalid
+        }
+        if channelOk(trimmed) { return .channel }
+        let lower = trimmed.lowercased()
+        if !lower.contains("youtube.com") && !lower.contains("youtu.be") {
+            return podcastURL(trimmed) ? .podcast : .invalid
+        }
+        guard let components = URLComponents(string: trimmed),
+              let scheme = components.scheme,
+              scheme == "https" || scheme == "http",
+              let host = components.host
+        else { return .invalid }
+        var normalized = host
+        if normalized.hasPrefix("www.") { normalized.removeFirst(4) }
+        if normalized.hasPrefix("m.") { normalized.removeFirst(2) }
+        let parts = (components.path as NSString).pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        if normalized == "youtu.be" {
+            return parts.count == 1 && videoOk(parts[0]) ? .video : .invalid
+        }
+        if normalized != "youtube.com" && normalized != "music.youtube.com" {
+            return podcastURL(trimmed) ? .podcast : .invalid
+        }
+        if parts.first == "feeds" && parts.dropFirst().first == "videos.xml" {
+            return channelOk(query(components, "channel_id") ?? "") ? .channel : .invalid
+        }
+        if parts.first == "watch" || parts.isEmpty {
+            if let id = query(components, "v"), videoOk(id) { return .video }
+        }
+        if let kind = parts.first, let id = parts.dropFirst().first, parts.count == 2,
+           kind == "shorts" || kind == "embed" || kind == "live" || kind == "v", videoOk(id) {
+            return .video
+        }
+        if let handle = parts.first, handle.hasPrefix("@"), handleOk(String(handle.dropFirst())) {
+            return .channel
+        }
+        if parts.first == "channel", channelOk(parts.dropFirst().first ?? "") { return .channel }
+        if let kind = parts.first, kind == "c" || kind == "user", handleOk(parts.dropFirst().first ?? "") {
+            return .channel
+        }
+        return .invalid
+    }
+
+    private static func query(_ components: URLComponents, _ name: String) -> String? {
+        components.queryItems?.first { $0.name == name }?.value
+    }
+
+    private static func podcastURL(_ raw: String) -> Bool {
+        guard let components = URLComponents(string: raw),
+              let scheme = components.scheme,
+              scheme == "https" || scheme == "http",
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil
+        else { return false }
+        return true
+    }
+
+    private static func handleOk(_ name: String) -> Bool {
+        (1...60).contains(name.count) && name.allSatisfy(handleCharacter)
+    }
+
+    private static func channelOk(_ id: String) -> Bool {
+        id.count == 24 && id.hasPrefix("UC") && id.allSatisfy(idCharacter)
+    }
+
+    private static func videoOk(_ id: String) -> Bool {
+        id.count == 11 && id.allSatisfy(idCharacter)
+    }
+
+    private static func handleCharacter(_ character: Character) -> Bool {
+        idCharacter(character) || character == "."
+    }
+
+    private static func idCharacter(_ character: Character) -> Bool {
+        character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-")
+    }
+}
+
+enum PipelineLibraryAdd {
+    case accepted(PipelineLibraryKind)
+    case rejected(String)
+}
+
+enum PipelineLibraryClient {
+    static var endpoint = URL(string: "http://127.0.0.1:18180/api/internal/library")!
+
+    static func add(_ url: String) async -> PipelineLibraryAdd {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["url": url])
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if status == 201, let kind = json?["kind"] as? String, let parsed = PipelineLibraryKind(rawValue: kind), parsed != .invalid {
+                return .accepted(parsed)
+            }
+            if let error = json?["error"] as? String, !error.isEmpty {
+                return .rejected(error)
+            }
+            return .rejected("The Mac did not accept that link.")
+        } catch {
+            return .rejected("The Mac is not reachable. The link was not added.")
+        }
+    }
+}
+
+private struct PipelineAddLink: View {
+    @State private var link = ""
+    @State private var message = ""
+    @State private var messageIsError = false
+    @State private var adding = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Podcast feed or YouTube link")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(PipelineTheme.muted)
+            HStack(spacing: 8) {
+                TextField("", text: $link)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .background(PipelineTheme.surface, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    .accessibilityLabel("Podcast feed or YouTube link")
+                    .onSubmit(submit)
+                Button(action: submit) {
+                    Text(adding ? "Adding…" : "Add")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(red: 4/255, green: 16/255, blue: 24/255))
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                        .background(PipelineTheme.blue, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(adding)
+                .opacity(adding ? 0.55 : 1)
+                .accessibilityLabel(adding ? "Adding" : "Add")
+            }
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(messageIsError ? PipelineTheme.danger : Color(red: 197/255, green: 206/255, blue: 214/255))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onChange(of: link) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return }
+            let kind = PipelineLibraryLink.classify(trimmed)
+            message = PipelineLibraryLink.preview(kind)
+            messageIsError = kind == .invalid
+        }
+    }
+
+    private func submit() {
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind = PipelineLibraryLink.classify(trimmed)
+        if trimmed.isEmpty || kind == .invalid {
+            message = PipelineLibraryLink.refusal
+            messageIsError = true
+            return
+        }
+        adding = true
+        Task {
+            let result = await PipelineLibraryClient.add(trimmed)
+            adding = false
+            switch result {
+            case .accepted(let accepted):
+                link = ""
+                message = PipelineLibraryLink.confirmation(accepted)
+                messageIsError = false
+            case .rejected(let error):
+                message = error
+                messageIsError = true
+            }
         }
     }
 }

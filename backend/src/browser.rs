@@ -134,7 +134,22 @@ pub fn handle(backend: &Backend, request: &HttpRequest) -> HttpResponse {
         .with_header("cache-control", "no-store")
 }
 
+const LIBRARY_PASTE: &str = "Paste a podcast feed, a channel, or a video.";
+
 fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error> {
+    if request.method == "POST" && request.path() == "/api/internal/library" {
+        if request.header("origin").is_some() {
+            return Err(Error::Forbidden("untrusted request origin".into()));
+        }
+        let url = request
+            .json_object()?
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Invalid("url is required".into()))?
+            .to_string();
+        let kind = ingest_library_url(backend, &url)?;
+        return Ok(HttpResponse::json(json!({ "kind": kind }), 201));
+    }
     crate::auth::require_session(&backend.auth, &backend.db, request)?;
     let path = request.path();
     if path.starts_with("/api/auth/") {
@@ -386,6 +401,79 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
             "memory":crate::memory_gate::status_json()}}),
     )
     })
+}
+
+fn ingest_library_url(backend: &Backend, raw: &str) -> Result<&'static str, Error> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Error::Invalid(LIBRARY_PASTE.into()));
+    }
+    let (kind, entity, field) = match crate::youtube::classify(trimmed) {
+        Ok(Some(crate::youtube::YoutubeInput::Video { .. })) => ("video", "listen", trimmed.to_string()),
+        Ok(Some(input)) => ("channel", "subscription", channel_subscription_url(&input, trimmed)?),
+        Ok(None) => ("podcast", "subscription", podcast_subscription_url(trimmed)?),
+        Err(_) => return Err(Error::Invalid(LIBRARY_PASTE.into())),
+    };
+    queue_library_action(backend, entity, &field)?;
+    Ok(kind)
+}
+
+fn channel_subscription_url(input: &crate::youtube::YoutubeInput, raw: &str) -> Result<String, Error> {
+    match input {
+        crate::youtube::YoutubeInput::ChannelLookup { url } => Ok(url.clone()),
+        crate::youtube::YoutubeInput::ChannelPage { channel_id }
+        | crate::youtube::YoutubeInput::ChannelFeed { channel_id } => {
+            if raw.starts_with("https://") || raw.starts_with("http://") {
+                Ok(raw.to_string())
+            } else {
+                Ok(format!("https://www.youtube.com/channel/{channel_id}"))
+            }
+        }
+        crate::youtube::YoutubeInput::Video { .. } => Err(Error::Invalid(LIBRARY_PASTE.into())),
+    }
+}
+
+fn podcast_subscription_url(raw: &str) -> Result<String, Error> {
+    let url = url::Url::parse(raw).map_err(|_| Error::Invalid(LIBRARY_PASTE.into()))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(Error::Invalid(LIBRARY_PASTE.into()));
+    }
+    Ok(raw.to_string())
+}
+
+fn queue_library_action(backend: &Backend, entity: &str, field: &str) -> Result<(), Error> {
+    let revision = backend
+        .db
+        .scalar_i64(
+            "SELECT revision FROM browser_field_versions WHERE entity=? AND field=?",
+            params![entity, field],
+        )?
+        .unwrap_or(0);
+    let result = apply_actions(
+        backend,
+        json!({
+            "client_id": "pipeline-menu",
+            "device_name": "Pipeline",
+            "actions": [{
+                "id": uuid::Uuid::new_v4().to_string(),
+                "sequence": 1,
+                "entity": entity,
+                "field": field,
+                "value": true,
+                "base_revision": revision
+            }]
+        }),
+    )?;
+    if result["results"][0]["status"].as_str() != Some("applied") {
+        return Err(Error::Conflict(
+            "That link changed while it was being added. Try again.".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn queue_browser_back_catalog_trim(tx: &rusqlite::Transaction, podcast_id: i64) -> Result<(), Error> {

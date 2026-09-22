@@ -88,8 +88,8 @@ it("synchronizes, changes limits, signs in, and resolves both conflict choices",
   await waitFor(() => expect(screen.getByRole("button", { name: "Keep this device’s change" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Keep this device’s change" }));
   await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith("a", true));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Use shared change" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Use shared change" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Use the shared change" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Use the shared change" }));
   await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith("a", false));
   fireEvent.change(screen.getByLabelText("Automatic episodes"), { target: { value: "5" } });
   await waitFor(() => expect(downloads.savePreferences).toHaveBeenCalledWith({ ...s.preferences, count: 5 }));

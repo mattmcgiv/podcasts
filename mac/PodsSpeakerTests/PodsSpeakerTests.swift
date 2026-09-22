@@ -330,4 +330,60 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertFalse(controller.isPaused)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
+
+    func testLibraryLinkClassifiesFeedsChannelsAndVideos() {
+        XCTAssertEqual(PipelineLibraryLink.classify("https://www.youtube.com/@t3dotgg"), .channel)
+        XCTAssertEqual(PipelineLibraryLink.classify("@t3dotgg"), .channel)
+        XCTAssertEqual(PipelineLibraryLink.classify("UCbRP3c757lWg9M-U7TyEkXA"), .channel)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://www.youtube.com/channel/UCbRP3c757lWg9M-U7TyEkXA"), .channel)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://www.youtube.com/watch?v=F3YXg7AaKWE"), .video)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://youtu.be/F3YXg7AaKWE"), .video)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://www.youtube.com/shorts/F3YXg7AaKWE"), .video)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://feeds.example/show.xml"), .podcast)
+        XCTAssertEqual(PipelineLibraryLink.classify("https://www.youtube.com/playlist?list=PL123"), .invalid)
+        XCTAssertEqual(PipelineLibraryLink.classify("not a link"), .invalid)
+        XCTAssertEqual(
+            PipelineLibraryLink.preview(.channel),
+            "Subscribe to this channel. The two newest videos will be prepared."
+        )
+        XCTAssertEqual(PipelineLibraryLink.confirmation(.video), "Added that video to Listen.")
+        XCTAssertEqual(PipelineLibraryLink.confirmation(.podcast), "Subscribed.")
+    }
+
+    func testPendingYouTubeListenAppearsInTheQueueBeforeAJobExists() throws {
+        let episodes = PipelineListenQueue.episodes(
+            from: #"[{"url":"https://www.youtube.com/watch?v=O4G5neJScvU","attempts":0,"next_at":0}]"#,
+            now: 100
+        )
+        XCTAssertEqual(episodes.map(\.title), ["https://www.youtube.com/watch?v=O4G5neJScvU"])
+        XCTAssertEqual(episodes.map(\.podcastTitle), ["YouTube"])
+        XCTAssertEqual(episodes.map(\.stageLabel), ["Waiting to download"])
+        XCTAssertTrue(episodes[0].isWaiting)
+        let delayed = PipelineListenQueue.episodes(
+            from: #"[{"url":"https://youtu.be/abcdefghijk","attempts":1,"next_at":200}]"#,
+            now: 100
+        )
+        XCTAssertEqual(delayed.map(\.stageLabel), ["Waiting to retry"])
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pipeline-listen-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &database), SQLITE_OK)
+        let fixture = """
+            CREATE TABLE podcasts(id INTEGER, title TEXT);
+            CREATE TABLE episodes(id INTEGER, podcast_id INTEGER, title TEXT, published_at INTEGER);
+            CREATE TABLE browser_jobs(episode_id INTEGER, stage TEXT, error TEXT, priority INTEGER);
+            CREATE VIEW browser_pending_jobs AS SELECT * FROM browser_jobs WHERE stage!='ready';
+            CREATE TABLE settings(key TEXT, value TEXT);
+            INSERT INTO podcasts VALUES(1,'Show');
+            INSERT INTO episodes VALUES(1,1,'Active',1);
+            INSERT INTO browser_jobs VALUES(1,'show_notes',NULL,0);
+            INSERT INTO settings VALUES('browser_youtube_listen','[{\"url\":\"https://www.youtube.com/watch?v=O4G5neJScvU\",\"attempts\":0,\"next_at\":0}]');
+            """
+        XCTAssertEqual(sqlite3_exec(database, fixture, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        let items = try PipelineRepository(databaseURL: url).snapshot()
+        XCTAssertEqual(items.map(\.title), ["Active", "https://www.youtube.com/watch?v=O4G5neJScvU"])
+        XCTAssertTrue(items[1].isWaiting)
+    }
 }

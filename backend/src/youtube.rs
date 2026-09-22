@@ -58,9 +58,24 @@ impl YoutubeProbe for CommandProbe {
             "--playlist-end".into(),
             "1".into(),
             "--print".into(),
-            "channel_id".into(),
+            "%(channel_id)s\t%(id)s".into(),
             "--no-warnings".into(),
             page_url.to_string(),
+        ])?;
+        let (channel, video_id) = flat_channel_fields(&output);
+        if let Some(channel) = channel {
+            return Ok(channel);
+        }
+        let Some(video_id) = video_id else {
+            return Err(Error::Upstream("YouTube did not return a channel id".into()));
+        };
+        let output = ytdlp_output(&[
+            "--skip-download".into(),
+            "--no-warnings".into(),
+            "--no-playlist".into(),
+            "--print".into(),
+            "channel_id".into(),
+            format!("https://www.youtube.com/watch?v={video_id}"),
         ])?;
         output
             .lines()
@@ -380,6 +395,20 @@ pub fn ytdlp_bin() -> String {
     std::env::var("PODS_YT_DLP").unwrap_or_else(|_| "yt-dlp".into())
 }
 
+fn flat_channel_fields(output: &str) -> (Option<String>, Option<String>) {
+    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut parts = line.split('\t');
+        let channel = parts.next().unwrap_or("").trim();
+        let video = parts.next().unwrap_or("").trim();
+        let channel = valid_channel_id(channel).then(|| channel.to_string());
+        let video = valid_video_id(video).then(|| video.to_string());
+        if channel.is_some() || video.is_some() {
+            return (channel, video);
+        }
+    }
+    (None, None)
+}
+
 fn ytdlp_output(args: &[String]) -> Result<String, Error> {
     let output = Command::new(ytdlp_bin())
         .args(args)
@@ -605,6 +634,87 @@ mod tests {
         assert_eq!(meta.video_id, "abcdefghijk");
         assert_eq!(meta.channel_title, "Example");
         assert_eq!(meta.published_at, 1_700_000_000);
+    }
+
+    fn ytdlp_stub() -> &'static str {
+        r#"#!/usr/bin/env python3
+import re, sys
+args = sys.argv[1:]
+url = args[-1] if args else ""
+printed = args[args.index("--print") + 1] if "--print" in args else ""
+
+def emit(channel_id, video_id):
+    if printed == "channel_id":
+        print(channel_id)
+    elif "%(" in printed:
+        print(
+            printed.replace("%(channel_id)s", channel_id)
+            .replace("%(id)s", video_id)
+            .replace("%(channel)s", "Channel")
+            .replace("%(uploader_id)s", "NA")
+        )
+    else:
+        print(channel_id)
+
+if "watch?v=" in url or "--print-json" in args:
+    if "abcdefghijk" in url:
+        sys.exit(1)
+    if "--print-json" in args:
+        print('{"id":"F3YXg7AaKWE","channel_id":"UCbRP3c757lWg9M-U7TyEkXA","channel":"Theo","title":"One","thumbnail":"","timestamp":1700000000,"description":""}')
+        sys.exit(0)
+    if "F3YXg7AaKWE" in url:
+        emit("UCbRP3c757lWg9M-U7TyEkXA", "F3YXg7AaKWE")
+        sys.exit(0)
+    sys.exit(1)
+
+match = re.search(r"(UC[A-Za-z0-9_-]{22})", url)
+if match:
+    emit(match.group(1), "abcdefghijk")
+    sys.exit(0)
+if printed == "channel_id":
+    print("NA")
+    sys.exit(0)
+if "%(" in printed:
+    emit("NA", "F3YXg7AaKWE")
+    sys.exit(0)
+print("NA")
+"#
+    }
+
+    fn with_ytdlp_stub<T>(test: impl FnOnce() -> T) -> T {
+        let _guard = YT_DLP_TEST_LOCK.lock().unwrap();
+        let previous = std::env::var("PODS_YT_DLP").ok();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("yt-dlp");
+        std::fs::write(&bin, ytdlp_stub()).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::env::set_var("PODS_YT_DLP", &bin);
+        let result = test();
+        match previous {
+            Some(value) => std::env::set_var("PODS_YT_DLP", value),
+            None => std::env::remove_var("PODS_YT_DLP"),
+        }
+        result
+    }
+
+    #[test]
+    fn channel_lookup_reads_a_channel_id_printed_by_the_flat_playlist() {
+        with_ytdlp_stub(|| {
+            let id = CommandProbe
+                .channel_id("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv")
+                .unwrap();
+            assert_eq!(id, "UCabcdefghijklmnopqrstuv");
+        });
+    }
+
+    #[test]
+    fn channel_lookup_follows_a_video_when_the_flat_playlist_channel_id_is_na() {
+        with_ytdlp_stub(|| {
+            let id = CommandProbe
+                .channel_id("https://www.youtube.com/@t3dotgg")
+                .unwrap();
+            assert_eq!(id, "UCbRP3c757lWg9M-U7TyEkXA");
+        });
     }
 
     #[test]

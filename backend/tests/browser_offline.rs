@@ -1372,3 +1372,175 @@ fn youtube_sync_subscribes_a_channel_and_queues_one_video_for_listen() {
         None => std::env::remove_var("PODS_YT_DLP"),
     }
 }
+
+#[test]
+fn youtube_handle_resolves_na_channel_id_and_keeps_two_videos() {
+    let _guard = pods_backend::youtube::YT_DLP_TEST_LOCK.lock().unwrap();
+    let previous = std::env::var("PODS_YT_DLP").ok();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("yt-dlp");
+    std::fs::write(
+        &bin,
+        r#"#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+url = args[-1] if args else ""
+printed = args[args.index("--print") + 1] if "--print" in args else ""
+if "watch?v=F3YXg7AaKWE" in url and printed == "channel_id":
+    print("UCbRP3c757lWg9M-U7TyEkXA")
+    sys.exit(0)
+if printed == "channel_id":
+    print("NA")
+    sys.exit(0)
+if "%(id)s" in printed:
+    print(printed.replace("%(channel_id)s", "NA").replace("%(id)s", "F3YXg7AaKWE"))
+    sys.exit(0)
+sys.exit(1)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::env::set_var("PODS_YT_DLP", &bin);
+    let channel = "UCbRP3c757lWg9M-U7TyEkXA";
+    let feed = pods_backend::youtube::channel_feed_url(channel);
+    let fetcher = Arc::new(MockFeedFetcher::default());
+    fetcher.set(
+        &feed,
+        r#"<?xml version="1.0"?><feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom"><title>Theo - t3.gg</title><entry><yt:videoId>oldvideo111</yt:videoId><title>Old</title><published>2024-01-01T00:00:00+00:00</published><media:group><media:description>Old notes</media:description></media:group></entry><entry><yt:videoId>midvideo222</yt:videoId><title>Mid</title><published>2024-02-01T00:00:00+00:00</published><media:group><media:description>Mid notes</media:description></media:group></entry><entry><yt:videoId>newvideo333</yt:videoId><title>New</title><published>2024-03-01T00:00:00+00:00</published><media:group><media:description>New notes</media:description></media:group></entry></feed>"#,
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let mut backend = Backend::with_data_root(
+        Database::open_in_memory().unwrap(),
+        fetcher,
+        Arc::new(DisabledDirectory),
+        Some(temp.path().to_owned()),
+    );
+    backend.local = true;
+    backend
+        .db
+        .execute(
+            "INSERT INTO podcasts(feed_url,title,created_at,is_subscribed) VALUES('https://www.youtube.com/@t3dotgg','www.youtube.com',0,1)",
+            [],
+        )
+        .unwrap();
+    pods_backend::local_worker::step(&backend).unwrap();
+    let stored: String = backend
+        .db
+        .scalar_string("SELECT feed_url FROM podcasts WHERE is_subscribed=1", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, feed);
+    let visible: Vec<String> = {
+        let conn = backend.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.guid FROM episodes e JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id WHERE p.is_subscribed=1 AND s.archived_at IS NULL ORDER BY e.guid",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    };
+    assert_eq!(visible, vec!["midvideo222".to_string(), "newvideo333".to_string()]);
+    match previous {
+        Some(value) => std::env::set_var("PODS_YT_DLP", value),
+        None => std::env::remove_var("PODS_YT_DLP"),
+    }
+}
+
+fn library_request(url: &str) -> HttpRequest {
+    HttpRequest::new("POST", "/api/internal/library").with_json(&json!({ "url": url }))
+}
+
+#[test]
+fn pipeline_menu_ingests_a_channel_a_video_and_a_podcast_without_a_session() {
+    let _guard = pods_backend::youtube::YT_DLP_TEST_LOCK.lock().unwrap();
+    let previous = std::env::var("PODS_YT_DLP").ok();
+    std::env::set_var("PODS_YT_DLP", "/usr/bin/false");
+    let (backend, _temp, _) = fixture();
+    backend
+        .auth
+        .enable_passkey("test-reset-secret", "https://pods.mcgiv.dev");
+    assert_eq!(
+        backend.handle(HttpRequest::new("GET", "/api/sync")).status_code,
+        401
+    );
+
+    let channel = backend.handle(library_request("@t3dotgg"));
+    assert_eq!(channel.status_code, 201, "{}", String::from_utf8_lossy(&channel.body));
+    let channel_body: Value = serde_json::from_slice(&channel.body).unwrap();
+    assert_eq!(channel_body["kind"], "channel");
+    let stored: String = backend
+        .db
+        .scalar_string("SELECT feed_url FROM podcasts WHERE feed_url LIKE '%t3dotgg'", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, "https://www.youtube.com/@t3dotgg");
+    assert_eq!(
+        backend
+            .db
+            .scalar_string("SELECT value FROM settings WHERE key='browser_refresh_requested'", [])
+            .unwrap()
+            .as_deref(),
+        Some("true")
+    );
+
+    let again = backend.handle(library_request("@t3dotgg"));
+    assert_eq!(again.status_code, 201, "{}", String::from_utf8_lossy(&again.body));
+
+    let bare = backend.handle(library_request("UCabcdefghijklmnopqrstuv"));
+    assert_eq!(bare.status_code, 201, "{}", String::from_utf8_lossy(&bare.body));
+    let bare_url: String = backend
+        .db
+        .scalar_string(
+            "SELECT feed_url FROM podcasts WHERE feed_url LIKE '%UCabcdefghijklmnopqrstuv'",
+            [],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(bare_url, "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
+
+    let video = backend.handle(library_request("https://youtu.be/abcdefghijk"));
+    assert_eq!(video.status_code, 201, "{}", String::from_utf8_lossy(&video.body));
+    let video_body: Value = serde_json::from_slice(&video.body).unwrap();
+    assert_eq!(video_body["kind"], "video");
+    let queued: String = backend
+        .db
+        .scalar_string(
+            "SELECT value FROM settings WHERE key='browser_youtube_listen'",
+            [],
+        )
+        .unwrap()
+        .unwrap();
+    assert!(queued.contains("https://youtu.be/abcdefghijk"));
+
+    let podcast = backend.handle(library_request("https://feeds.example/show.xml"));
+    assert_eq!(podcast.status_code, 201, "{}", String::from_utf8_lossy(&podcast.body));
+    let podcast_body: Value = serde_json::from_slice(&podcast.body).unwrap();
+    assert_eq!(podcast_body["kind"], "podcast");
+    let feed: String = backend
+        .db
+        .scalar_string(
+            "SELECT feed_url FROM podcasts WHERE feed_url='https://feeds.example/show.xml'",
+            [],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(feed, "https://feeds.example/show.xml");
+
+    let playlist = backend.handle(library_request("https://www.youtube.com/playlist?list=PL123"));
+    assert_eq!(playlist.status_code, 422);
+    let playlist_body: Value = serde_json::from_slice(&playlist.body).unwrap();
+    assert_eq!(playlist_body["error"], "Paste a podcast feed, a channel, or a video.");
+
+    let browser = backend.handle(
+        library_request("https://feeds.example/other.xml").with_header("origin", "https://pods.mcgiv.dev"),
+    );
+    assert_eq!(browser.status_code, 403);
+
+    match previous {
+        Some(value) => std::env::set_var("PODS_YT_DLP", value),
+        None => std::env::remove_var("PODS_YT_DLP"),
+    }
+}
