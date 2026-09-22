@@ -181,6 +181,10 @@ export function defaultDeviceName(): string {
     ? "iPad" : /iPhone/.test(navigator.userAgent) ? "iPhone" : "Browser";
 }
 
+export function syncInFlight(): boolean {
+  return syncing != null;
+}
+
 export function synchronize(refresh = true): Promise<void> {
   refreshRequested ||= refresh;
   syncAgain = true;

@@ -1,15 +1,15 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ContinueListening, SyncStatus } from "./SharedState";
 import { emptyState, type LocalState } from "./store";
 import { Api } from "../api";
-import { resolveConflict, state, syncError, synchronize } from "./client";
+import { resolveConflict, state, syncError, syncInFlight, synchronize } from "./client";
 import { prefetch } from "./downloads";
 import { signInAndSync } from "./signIn";
 import type { EpisodeDetail } from "../types";
 const player = vi.hoisted(() => ({current:null as {id:number}|null,playEpisode:vi.fn()}));
 vi.mock("../player", () => ({ usePlayer: () => player }));
-vi.mock("./client", async original => ({ ...await original<typeof import("./client")>(), offlineEnabled:()=>true,state:vi.fn(),syncError:vi.fn(),synchronize:vi.fn(),resolveConflict:vi.fn() }));
+vi.mock("./client", async original => ({ ...await original<typeof import("./client")>(), offlineEnabled:()=>true,state:vi.fn(),syncError:vi.fn(),synchronize:vi.fn(),resolveConflict:vi.fn(),syncInFlight:vi.fn(()=>false) }));
 vi.mock("./downloads", () => ({ prefetch: vi.fn() }));
 vi.mock("./signIn", () => ({ signInAndSync: vi.fn() }));
 let local:LocalState;
@@ -20,6 +20,7 @@ beforeEach(() => {
   local.snapshot={version:1,cursor:0,replace:true,shows:[],episodes:[episode],settings:{last_listened:1},versions:{}};
   vi.mocked(state).mockImplementation(async()=>structuredClone(local));
   vi.mocked(syncError).mockReturnValue(null);
+  vi.mocked(syncInFlight).mockReset().mockReturnValue(false);
   vi.mocked(synchronize).mockReset().mockResolvedValue();
   vi.mocked(resolveConflict).mockReset().mockResolvedValue();
   vi.mocked(prefetch).mockReset().mockResolvedValue();
@@ -61,6 +62,20 @@ it("distinguishes queued changes, conflicts, and the last successful sync", asyn
   window.dispatchEvent(new Event("pods-offline-changed"));
   await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("The Mac is not reachable"));
   expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+});
+it("does not flash Sync now while a played change is already syncing", async()=>{
+  local.lastSync=123;
+  local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0}];
+  vi.mocked(syncInFlight).mockReturnValue(true);
+  render(<SyncStatus/>);
+  await act(async () => { await vi.mocked(state).mock.results[0]?.value; });
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Sync now" })).not.toBeInTheDocument();
+  vi.mocked(syncInFlight).mockReturnValue(false);
+  local.outbox=[];
+  window.dispatchEvent(new Event("pods-offline-changed"));
+  await act(async () => { await vi.mocked(state).mock.results.at(-1)?.value; });
+  expect(screen.queryByRole("button", { name: "Sync now" })).not.toBeInTheDocument();
 });
 it("keeps this device's change or the shared one, and retries or discards a rejected change", async()=>{
   local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0,conflict:4}];

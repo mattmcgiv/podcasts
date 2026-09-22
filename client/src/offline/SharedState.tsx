@@ -3,7 +3,7 @@ import { Api } from "../api";
 import { usePlayer } from "../player";
 import { fmtTime } from "../lib";
 import type { EpisodeDetail } from "../types";
-import { applyOverlay, offlineEnabled, resolveConflict, state, syncError, synchronize } from "./client";
+import { applyOverlay, offlineEnabled, resolveConflict, state, syncError, syncInFlight, synchronize } from "./client";
 import { prefetch } from "./downloads";
 import { signInAndSync } from "./signIn";
 import type { LocalState, Operation } from "./store";
@@ -85,7 +85,9 @@ export function SyncStatus() {
   const [dismissed, setDismissed] = useState<string | null>(readDismissedNotice);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const notice = local ? syncNotice(local) : null;
+  const detected = local ? syncNotice(local) : null;
+  // A played mark syncs immediately. Showing "Sync now" for that round trip only flashes.
+  const notice = detected?.kind === "pending" && syncInFlight() ? null : detected;
   const noticeKey = notice?.key ?? "";
   useEffect(() => {
     if (!local || noticeKey) return;
