@@ -165,6 +165,13 @@ fn snapshot_notifications_are_newest_id_first_with_titles_and_four_categories() 
             )
             .unwrap();
     }
+    backend
+        .db
+        .execute(
+            "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'retry',1),(2,'blocked',4)",
+            [],
+        )
+        .unwrap();
     let value = snapshot(&backend).unwrap();
     assert_eq!(value["version"], 1);
     let notes = value["notifications"].as_array().unwrap();
@@ -221,6 +228,20 @@ fn snapshot_notifications_are_newest_id_first_with_titles_and_four_categories() 
     for item in notes {
         assert_notification_shape(item);
     }
+    backend
+        .db
+        .execute(
+            "UPDATE browser_jobs SET stage='ready',error=NULL WHERE episode_id=1",
+            [],
+        )
+        .unwrap();
+    let resolved = snapshot(&backend).unwrap()["notifications"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved.iter().all(|n| n["episode_id"] == 2));
+
     let dump = value["notifications"].to_string();
     assert!(!dump.contains("https://secret.example/feed.xml"));
     assert!(!dump.contains("private show notes"));

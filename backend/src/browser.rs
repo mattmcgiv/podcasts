@@ -375,6 +375,7 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
              FROM browser_processing_notifications n
              LEFT JOIN episodes e ON e.id = n.episode_id
              LEFT JOIN podcasts p ON p.id = e.podcast_id
+             JOIN browser_jobs j ON j.episode_id = n.episode_id AND j.stage IN ('retry', 'blocked')
              ORDER BY n.id DESC",
         )?;
         let notifications = stmt

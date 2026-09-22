@@ -210,9 +210,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         return Ok(false);
     }
     match process(backend, episode, &url) {
-        Ok(()) => {
-            backend.db.execute("UPDATE browser_jobs SET stage='ready',error=NULL,completed_units=1,total_units=1,next_retry_at=? WHERE episode_id=?",params![crate::db::now_unix()+300,episode])?;
-        }
+        Ok(()) => mark_ready(backend, episode)?,
         Err(error) => {
             if crate::omlx_lock::is_busy_error(&error) {
                 persist_busy(
@@ -345,6 +343,23 @@ fn with_validation_stage<T>(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Processing finished. Drop failure notices so a playable episode does not
+/// keep showing "Retry scheduled" for an attempt that already recovered.
+fn mark_ready(backend: &Backend, episode: i64) -> Result<(), Error> {
+    let next = crate::db::now_unix() + 300;
+    backend.db.with_transaction(|tx| {
+        tx.execute(
+            "DELETE FROM browser_processing_notifications WHERE episode_id=?",
+            [episode],
+        )?;
+        tx.execute(
+            "UPDATE browser_jobs SET stage='ready',error=NULL,completed_units=1,total_units=1,next_retry_at=? WHERE episode_id=?",
+            params![next, episode],
+        )?;
+        Ok(())
+    })
 }
 
 fn persist_failed_attempt(
@@ -3458,6 +3473,67 @@ mod download_tests {
         ] {
             assert_safe_message(notification_message(category));
         }
+    }
+
+    #[test]
+    fn mark_ready_drops_that_episodes_failure_notices() {
+        let (backend, _temp) = download_fail_backend();
+        backend
+            .db
+            .execute(
+                "INSERT INTO episodes(id,podcast_id,guid,title,audio_url,published_at) VALUES(2,1,'g2','Other','https://example.org/original.mp3',2)",
+                [],
+            )
+            .unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_jobs(episode_id,stage,attempts) VALUES(1,'retry',2),(2,'blocked',4)",
+                [],
+            )
+            .unwrap();
+        persist_failed_attempt(&backend, 1, "downloading", "err", "retry", 0).unwrap();
+        persist_failed_attempt(&backend, 2, "downloading", "err", "blocked", 0).unwrap();
+        mark_ready(&backend, 1).unwrap();
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT COUNT(*) FROM browser_processing_notifications WHERE episode_id=1",
+                    [],
+                )
+                .unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT COUNT(*) FROM browser_processing_notifications WHERE episode_id=2",
+                    [],
+                )
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(job_stage(&backend, 1).unwrap(), "ready");
+        assert_eq!(job_stage(&backend, 2).unwrap(), "blocked");
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64("SELECT attempts FROM browser_jobs WHERE episode_id=1", [])
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            backend
+                .db
+                .scalar_i64(
+                    "SELECT completed_units FROM browser_jobs WHERE episode_id=1",
+                    []
+                )
+                .unwrap(),
+            Some(1)
+        );
     }
 
     #[test]
