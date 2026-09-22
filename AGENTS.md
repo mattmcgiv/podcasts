@@ -13,6 +13,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 
 ## Dev workflow
 
+- After every turn, commit that turn's work on `main` and push it to `origin/main`.
 - `dev/up.sh` — build the image and start the long-lived `pods-dev` container (mounts, ports, resources).
 - `dev/sh.sh [cmd...]` — exec into the container (interactive shell if no args).
 - `dev/check.sh` — the merge gate: frontend Vitest coverage (≥90% lines, statements, and functions, enforced in `vite.config.ts`).
