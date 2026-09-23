@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -47,6 +48,32 @@ def group_words(words):
     if not segments:
         raise ValueError("No speech found")
     return segments
+
+
+def decode_for_dictation(source, wav):
+    """MediaRecorder WebM often has no container duration. Decode before probing.
+
+    `MediaRecorder.start(timeslice)` stores a WebM blob whose format duration is
+    `N/A`. `float()` of that probe raises ValueError before Whisper runs.
+    ffmpeg still reads the Opus packets, and the WAV has a real duration.
+    """
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source), "-ac", "1", "-ar", "16000", str(wav)],
+        check=True, timeout=120,
+    )
+
+
+def transcribe_dictation(source, destination):
+    wav = destination.with_name(f"{destination.stem}.dictation.wav")
+    try:
+        decode_for_dictation(source, wav)
+        transcribe(wav, destination)
+    finally:
+        if wav.is_file():
+            with wav.open("rb") as audio:
+                digest = hashlib.file_digest(audio, "sha256").hexdigest()
+            shutil.rmtree(destination.parent / f"words-{digest}-{MODEL_REVISION}", ignore_errors=True)
+            wav.unlink(missing_ok=True)
 
 
 def transcribe(source, destination):
@@ -100,7 +127,11 @@ def transcribe(source, destination):
 
 if __name__ == "__main__":
     try:
-        transcribe(Path(sys.argv[1]), Path(sys.argv[2]))
+        source, destination = Path(sys.argv[1]), Path(sys.argv[2])
+        if os.environ.get("PODS_TRANSCRIBE_MODE") == "dictation":
+            transcribe_dictation(source, destination)
+        else:
+            transcribe(source, destination)
     except Exception as error:
         # Do not write transcript text, credentials, or provider payloads to service logs.
         print(f"Local transcription failed: {type(error).__name__}", file=sys.stderr)

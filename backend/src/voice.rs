@@ -486,7 +486,7 @@ mod tests {
         );
         let program = script(
             temp.path(),
-            "import json,sys\njson.dump([{\"id\":\"s0\",\"start\":0.0,\"end\":1.0,\"text\":\"Dark mode.\"},{\"id\":\"s1\",\"start\":1.0,\"end\":2.0,\"text\":\"Please.\"}], open(sys.argv[2],'w'))\n",
+            "import json,os,sys\nassert os.environ.get('PODS_TRANSCRIBE_MODE')=='dictation'\njson.dump([{\"id\":\"s0\",\"start\":0.0,\"end\":1.0,\"text\":\"Dark mode.\"},{\"id\":\"s1\",\"start\":1.0,\"end\":2.0,\"text\":\"Please.\"}], open(sys.argv[2],'w'))\n",
         );
         let ran = whisper_env(temp.path(), || {
             with_script(&program, || step(&backend).unwrap())

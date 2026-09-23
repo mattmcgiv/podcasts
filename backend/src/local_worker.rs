@@ -496,7 +496,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
         let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
             .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
-        run_whisper_child_with_progress(&python, &script, source, &transcript_file, || {
+        run_whisper_child_with_progress(&python, &script, source, &transcript_file, false, || {
             let (done, total) = transcription_progress(&checkpoints, duration);
             progress(backend, id, done, total)
         })?;
@@ -821,7 +821,7 @@ fn transcription_progress(checkpoints: &Path, duration: f64) -> (u64, u64) {
 
 #[cfg(test)]
 fn run_whisper_child(python: &str, script: &str, source: &Path, dest: &Path) -> Result<(), Error> {
-    run_whisper_child_with_progress(python, script, source, dest, || Ok(()))
+    run_whisper_child_with_progress(python, script, source, dest, false, || Ok(()))
 }
 
 fn run_whisper_child_with_progress(
@@ -829,6 +829,7 @@ fn run_whisper_child_with_progress(
     script: &str,
     source: &Path,
     dest: &Path,
+    dictation: bool,
     mut report: impl FnMut() -> Result<(), Error>,
 ) -> Result<(), Error> {
     #[cfg(test)]
@@ -836,13 +837,12 @@ fn run_whisper_child_with_progress(
     crate::power_gate::require_external_power()?;
     #[cfg(unix)]
     {
-        let mut child = Command::new(python)
-            .arg(script)
-            .arg(source)
-            .arg(dest)
-            .process_group(0)
-            .spawn()
-            .map_err(failure)?;
+        let mut command = Command::new(python);
+        command.arg(script).arg(source).arg(dest).process_group(0);
+        if dictation {
+            command.env("PODS_TRANSCRIBE_MODE", "dictation");
+        }
+        let mut child = command.spawn().map_err(failure)?;
         let pgid = child.id() as libc::pid_t;
         register_whisper_pgid(pgid);
         struct ClearPgid(libc::pid_t);
@@ -876,12 +876,12 @@ fn run_whisper_child_with_progress(
     }
     #[cfg(not(unix))]
     {
-        let status = Command::new(python)
-            .arg(script)
-            .arg(source)
-            .arg(dest)
-            .status()
-            .map_err(failure)?;
+        let mut command = Command::new(python);
+        command.arg(script).arg(source).arg(dest);
+        if dictation {
+            command.env("PODS_TRANSCRIBE_MODE", "dictation");
+        }
+        let status = command.status().map_err(failure)?;
         if status.success() {
             Ok(())
         } else {
@@ -913,7 +913,7 @@ pub fn transcribe_audio(source: &Path) -> Result<String, Error> {
     let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
     let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
         .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
-    run_whisper_child_with_progress(&python, &script, source, &dest, || Ok(()))?;
+    run_whisper_child_with_progress(&python, &script, source, &dest, true, || Ok(()))?;
     let segments: Vec<Segment> =
         serde_json::from_slice(&fs::read(&dest).map_err(failure)?).map_err(failure)?;
     validate_segments(&segments)?;
