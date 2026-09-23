@@ -259,6 +259,11 @@ describe("synchronization", () => {
     expect(() => validateSnapshot({ ...snapshot(), notifications: [...newestFirst].reverse() })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], category: "download" as never }] })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], outcome: "pending" as never }] })).toThrow("Unsupported");
+    const feedback = [{ id: "r1", kind: "bug" as const, status: "queued" as const, created_at: 10 }];
+    expect(() => validateSnapshot({ ...snapshot(), feedback })).not.toThrow();
+    expect(() => validateSnapshot({ ...snapshot(), feedback: [{ ...feedback[0], kind: "rant" as never }] })).toThrow("Unsupported");
+    expect(() => validateSnapshot({ ...snapshot(), feedback: [{ ...feedback[0], status: "pending" as never }] })).toThrow("Unsupported");
+    expect(() => validateSnapshot({ ...snapshot(), feedback: "queued" as never })).toThrow("Unsupported");
     await updateState(s => { s.snapshot = { ...snapshot(), notifications: newestFirst }; });
     expect((await state()).snapshot?.notifications?.map(n => n.id)).toEqual([3, 2, 1]);
     expect((await state()).snapshot?.notifications?.[0]).toMatchObject({ category: "show_notes", episode_title: "C" });

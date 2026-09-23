@@ -1,4 +1,4 @@
-import type { EpisodeDetail, ProcessingNotification, Show, RefreshStatus } from "../types";
+import type { EpisodeDetail, FeedbackStatus, ProcessingNotification, Show, RefreshStatus } from "../types";
 
 export interface ArtifactManifest {
   version: number; episode_id: number; hash: string; source_hash: string; bytes: number;
@@ -16,6 +16,7 @@ export interface Snapshot {
   refresh_status?: RefreshStatus;
   processing?: { pending: number; failed?: number; blocked?: number; storage: { used: number; limit: number; free: number; blocked: boolean } };
   notifications?: ProcessingNotification[];
+  feedback?: FeedbackStatus[];
 }
 export interface Operation {
   id: string; sequence: number; entity: string; field: string; value: unknown;

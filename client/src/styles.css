@@ -1768,3 +1768,24 @@ input[type="search"]::-webkit-search-cancel-button {
 @media (min-width: 1000px) and (orientation: landscape) {
   .sheet-art .art { max-width: 180px; max-height: 180px; }
 }
+.feedback-view { padding-bottom: 24px; }
+.feedback-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  padding: 12px 14px;
+  outline: none;
+  font: inherit;
+  resize: vertical;
+  margin-top: 8px;
+}
+.feedback-input:focus { border-color: var(--accent); }
+.feedback-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.feedback-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.feedback-item { background: var(--bg-raised); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.feedback-item p { margin: 4px 0; }
+.feedback-item-kind { font-weight: 600; }
+.feedback-item-body { white-space: pre-wrap; overflow-wrap: anywhere; }

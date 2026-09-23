@@ -154,6 +154,9 @@ pub fn storage_status(backend: &Backend) -> Value {
 }
 
 pub fn step(backend: &Backend) -> Result<bool, Error> {
+    if crate::feedback::step(backend)? {
+        return Ok(true);
+    }
     prepare_youtube(backend);
     if backend
         .db

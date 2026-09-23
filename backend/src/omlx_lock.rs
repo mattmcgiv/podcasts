@@ -50,6 +50,7 @@ pub const OWNER_PODS: &str = "pods";
 pub const PURPOSE_CLASSIFICATION: &str = "classification";
 pub const PURPOSE_SHOW_NOTES: &str = "show_notes";
 pub const PURPOSE_WHISPER: &str = "speech_to_text";
+pub const PURPOSE_CODE_FIX: &str = "code_fix";
 pub const DEFAULT_CHAT_URL: &str = "http://127.0.0.1:8000/v1/chat/completions";
 const OMLX_APP_CLI: &str = "/Applications/oMLX.app/Contents/MacOS/omlx-cli";
 const OMLX_START_WAIT: Duration = Duration::from_secs(180);
@@ -264,10 +265,13 @@ pub fn acquire_pods(purpose: &str, model: &str) -> Result<InferencePermit, Error
     try_acquire(&paths, &claim, probe_occupancy).map_err(Error::from)
 }
 
-/// Acquire the cooperative lock for classification or show notes, start oMLX
-/// if the loopback server is down, and load `model` if it is not already loaded.
+/// Acquire the cooperative lock for classification, show notes, or a code fix,
+/// start oMLX if the loopback server is down, and load `model` if needed.
 pub fn acquire_chat(purpose: &str, model: &str) -> Result<ChatPermit, Error> {
-    if purpose != PURPOSE_CLASSIFICATION && purpose != PURPOSE_SHOW_NOTES {
+    if purpose != PURPOSE_CLASSIFICATION
+        && purpose != PURPOSE_SHOW_NOTES
+        && purpose != PURPOSE_CODE_FIX
+    {
         return Err(LockError::Busy.into());
     }
     let paths = LockPaths::configured()?;
@@ -1208,6 +1212,28 @@ mod tests {
         });
         server.join().unwrap();
         assert!(cli_log(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn chat_permits_code_fix_purpose() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, server) = lifecycle_server(vec![
+            ("GET /api/status ", idle_models(&["model"])),
+            ("GET /api/status ", idle_models(&["model"])),
+            (
+                "POST /v1/models/model/unload ",
+                json!({"status":"ok","model_id":"model"}),
+            ),
+            ("GET /api/status ", idle_models(&[])),
+        ]);
+        with_test_lock_env(dir.path(), Occupancy::idle(), true, || {
+            set_test_omlx_endpoint(url, "test-key");
+            let permit = acquire_chat(PURPOSE_CODE_FIX, "model").unwrap();
+            assert_eq!(permit.purpose(), PURPOSE_CODE_FIX);
+            drop(permit);
+            assert!(lock_available(&LockPaths::in_dir(dir.path())));
+        });
+        server.join().unwrap();
     }
 
     #[test]

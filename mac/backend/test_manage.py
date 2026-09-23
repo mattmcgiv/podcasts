@@ -331,6 +331,25 @@ class ManageTests(unittest.TestCase):
             self.assertEqual(env["PODS_CLASSIFIER"], "jev")
             self.assertNotIn("jev-placeholder", env["PODS_WHISPER_MODEL"])
 
+    def test_backend_env_forwards_feedback_keys(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            env = manage.backend_env({
+                "whisper_model": "/models/w",
+                "feedback_repo": "/Users/matthewmcgivney/projects/podcasts",
+                "feedback_timeout_secs": 600,
+                "feedback_model": "Qwen3.8-27B-4bit",
+            })
+            self.assertEqual(env["PODS_FEEDBACK_REPO"], "/Users/matthewmcgivney/projects/podcasts")
+            self.assertEqual(env["PODS_FEEDBACK_TIMEOUT_SECS"], "600")
+            self.assertEqual(env["PODS_FEEDBACK_MODEL"], "Qwen3.8-27B-4bit")
+
+    def test_backend_env_omits_feedback_keys_by_default(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            env = manage.backend_env({"whisper_model": "/models/w"})
+            self.assertNotIn("PODS_FEEDBACK_REPO", env)
+            self.assertNotIn("PODS_FEEDBACK_TIMEOUT_SECS", env)
+            self.assertNotIn("PODS_FEEDBACK_MODEL", env)
+
     def test_launch_forwards_typesafe_key_from_credentials_file(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
             current = Path(directory) / "current"

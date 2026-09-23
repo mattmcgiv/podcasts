@@ -402,9 +402,26 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
             .collect::<Result<Vec<_>, _>>()?;
         notifications
     };
+    let feedback = {
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, status, created_at FROM browser_feedback ORDER BY created_at DESC, id LIMIT 50",
+        )?;
+        let feedback = stmt
+            .query_map([], |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "kind": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "created_at": row.get::<_, i64>(3)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        feedback
+    };
     Ok(
         json!({"version":1,"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
         "settings":settings,"versions":versions,"writers":writers,"refresh_status":refresh_status,"notifications":notifications,
+        "feedback":feedback,
         "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":storage,
             "memory":crate::memory_gate::status_json()}}),
     )
@@ -559,6 +576,8 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                 let queued = tx.query_row("SELECT value FROM settings WHERE key=?", [crate::youtube::LISTEN_SETTING], |r| r.get::<_, String>(0)).optional()?.unwrap_or_else(|| "[]".into());
                 let items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&queued).unwrap_or_default();
                 identical = action["value"].as_bool() == Some(true) && items.iter().any(|item| item.url == field);
+            } else if entity == "feedback" {
+                identical = tx.query_row("SELECT COUNT(*) FROM browser_feedback WHERE id=?", [field], |r| r.get::<_, i64>(0))? > 0;
             } else if let Ok(episode) = entity.parse::<i64>() {
                 if field == "played" {
                     let played = tx.query_row("SELECT played_at IS NOT NULL FROM episode_state WHERE episode_id=?",[episode],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
@@ -604,6 +623,32 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                         items.push(crate::youtube::PendingListen { url: field.to_string(), attempts: 0, next_at: 0 });
                         crate::db::set_setting(tx, crate::youtube::LISTEN_SETTING, &serde_json::to_string(&items).map_err(|e| Error::Invalid(e.to_string()))?)?;
                     }
+                } else if entity == "feedback" {
+                    if field.is_empty() || field.len() > 128 {
+                        return Err(Error::Invalid("invalid report id".into()));
+                    }
+                    let kind = value["kind"]
+                        .as_str()
+                        .ok_or_else(|| Error::Invalid("report kind required".into()))?;
+                    if kind != "feature" && kind != "bug" {
+                        return Err(Error::Invalid("unknown report kind".into()));
+                    }
+                    let body = value["body"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .ok_or_else(|| Error::Invalid("report body required".into()))?;
+                    if body.len() > 4096 {
+                        return Err(Error::Invalid("report too long".into()));
+                    }
+                    let created = value["created_at"]
+                        .as_i64()
+                        .filter(|at| *at > 0)
+                        .unwrap_or_else(crate::db::now_unix);
+                    tx.execute(
+                        "INSERT OR IGNORE INTO browser_feedback(id,kind,body,device,client_id,created_at) VALUES(?,?,?,?,?,?)",
+                        params![field, kind, body, device, client, created],
+                    )?;
                 } else if entity == "subscription" && field.starts_with("http") {
                     if matches!(crate::youtube::classify(field)?, Some(crate::youtube::YoutubeInput::Video { .. })) {
                         return Err(Error::Invalid("Paste a channel URL to subscribe. A video URL is added to Listen.".into()));

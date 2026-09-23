@@ -23,6 +23,7 @@ function changedThing(local: LocalState, operation: Operation): string {
     return local.snapshot?.shows.find(show => show.feed_url === operation.field)?.title ?? "a subscription";
   }
   if (operation.entity === "settings") return "a setting";
+  if (operation.entity === "feedback") return "a feedback report";
   return local.snapshot?.episodes.find(episode => String(episode.id) === operation.entity)?.title ?? "an item";
 }
 

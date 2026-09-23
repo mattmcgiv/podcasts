@@ -54,6 +54,15 @@ describe("SettingsSheet", () => {
     expect(screen.getByText(/1 feed failed/)).toBeInTheDocument();
   });
 
+  it("opens the feedback view from Settings", async () => {
+    installApi({});
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await user.click(screen.getByRole("button", { name: "Send feedback" }));
+    expect(window.location.hash).toBe("#/feedback");
+  });
+
   it("persists the selected appearance preference", async () => {
     installApi({});
     const user = userEvent.setup();

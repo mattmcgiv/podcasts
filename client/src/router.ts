@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { FOLLOW_APPEARANCES_ENABLED } from "./config";
 
-export type Tab = "recent" | "played" | "shows" | "settings" | "follows";
+export type Tab = "recent" | "played" | "shows" | "settings" | "follows" | "feedback";
 
 export interface Route {
   tab: Tab;
@@ -20,6 +20,8 @@ export function parseHash(hash: string): Route {
       return { tab: "recent", notifications: true };
     case "settings":
       return { tab: "settings" };
+    case "feedback":
+      return { tab: "feedback" };
     case "follows":
       return FOLLOW_APPEARANCES_ENABLED ? { tab: "follows" } : { tab: "recent" };
     case "shows": {

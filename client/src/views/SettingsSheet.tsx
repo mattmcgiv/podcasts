@@ -8,6 +8,7 @@ import { applyThemePreference, currentThemePreference, type ThemePreference } fr
 import { formatOptionalUSD, formatUSD, fmtDate, fmtDuration, localProcessingCopy } from "../lib";
 import type { AdRemovalSettings, CarBluetoothSettings, FeedPreview, FeedPreviewEpisode, RefreshStatus } from "../types";
 import { classifyYoutube } from "../youtube";
+import { navigate } from "../router";
 
 function formatGB(bytes: number): string {
   return `${(Math.max(0, bytes) / 1_000_000_000).toFixed(2)} GB`;
@@ -312,6 +313,17 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
             </button>
           </section>
         )}
+        <section className="settings-section" aria-labelledby="feedback-title">
+          <h2 className="section-title" id="feedback-title">Feedback</h2>
+          <p className="settings-detail">Type a feature request or bug report. It syncs to the Mac, which dispatches a fix.</p>
+          <button
+            type="button"
+            className="ghost-btn"
+            onClick={() => navigate("#/feedback")}
+          >
+            Send feedback
+          </button>
+        </section>
         <section className="settings-section settings-appearance" aria-labelledby="appearance-title">
           <h2 className="section-title" id="appearance-title">Appearance</h2>
           <p className="settings-detail">Choose how Pods looks on this iPhone.</p>

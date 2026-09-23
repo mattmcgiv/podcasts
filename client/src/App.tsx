@@ -5,6 +5,7 @@ import { TabBar } from "./components/TabBar";
 import { PlayerProvider } from "./player";
 import { postPodsLifecycleEvent } from "./podsLifecycle";
 import { navigate, useRoute } from "./router";
+import { FeedbackView } from "./views/FeedbackView";
 import { PlayedView } from "./views/PlayedView";
 import { RecentView } from "./views/RecentView";
 import { NotificationsView } from "./views/NotificationsView";
@@ -91,6 +92,7 @@ function Shell() {
           {route.tab === "shows" &&
             (route.showId != null ? <ShowDetailView showId={route.showId} /> : <ShowsView />)}
           {route.tab === "settings" && <SettingsSheet onClose={() => navigate("#/shows")} />}
+          {route.tab === "feedback" && <FeedbackView />}
           {FOLLOW_APPEARANCES_ENABLED && route.tab === "follows" && <FollowsView />}
         </div>
       </main>
