@@ -367,9 +367,30 @@ Classification and show notes start the managed oMLX server if loopback port 800
 Optional: set `"omlx_autostart": true` on that same object if the Mac manager should also request `omlx start --no-wait` when loopback port 8000 is down. The request waits 60 seconds of continuous downtime, requires pending classification or show-notes work, and then waits 15 minutes between start requests. It does not restart a live server. Restart the agent after that change. Rollback: set `"omlx_autostart": false` or remove the key, then restart the agent. The worker start/stop path does not use this flag.
 
 Never put real tokens in Git, chat, the client, or shell arguments.
-The service reads the oMLX key from `~/.pi/agent/models.json`. It does not invoke Pi.
+The service reads the oMLX key from `~/.pi/agent/models.json`.
 An optional `omlx_key` in the private configuration overrides that source.
 The model endpoint must use loopback. The default is `http://127.0.0.1:8000/v1/chat/completions`.
+
+## Feedback reports and Pi dispatch
+
+Settings has a Send feedback view for typed feature requests and bug reports.
+Reports queue in the browser outbox and sync through `/api/sync/actions` (entity `feedback`) when the Mac is connected.
+The snapshot carries each received report's dispatch state: `queued`, `running`, `done`, or `failed`.
+
+Dispatch stays disabled until `mac.json` names the checkout Pi should edit:
+
+```json
+{
+  "feedback_repo": "/Users/matthewmcgivney/projects/podcasts"
+}
+```
+
+Optional keys: `feedback_model` (default `Qwen3.8-27B-4bit`, the show-notes model) and `feedback_timeout_secs` (default 1800).
+Each pipeline step dispatches at most one queued report: it holds the cooperative oMLX lock under purpose `code_fix`,
+runs `pi --provider omlx --model <model> --print` in the checkout, and records the outcome in `browser_feedback`.
+Busy power, memory, or oMLX gates defer the report without consuming an attempt; three failed runs mark it `failed`.
+Pi is instructed to leave the fix uncommitted for review. It never commits, pushes, or changes branches.
+Restart the agent after changing these keys. Rollback: remove `feedback_repo` and restart the agent; queued reports wait.
 
 Podcast Index credentials remain in `~/.config/podcasts/credentials.env`.
 The service reads `PODCASTINDEX_KEY` and `PODCASTINDEX_SECRET` from that file. It does not execute the file.

@@ -252,3 +252,15 @@ export interface AdRemovalStatusItem {
 export interface AdRemovalStatusesPayload {
   items: AdRemovalStatusItem[];
 }
+
+export type FeedbackKind = "feature" | "bug";
+
+export type FeedbackStatusState = "queued" | "running" | "done" | "failed";
+
+/** A user-typed report the Mac has received, with its dispatch state. */
+export interface FeedbackStatus {
+  id: string;
+  kind: FeedbackKind;
+  status: FeedbackStatusState;
+  created_at: number;
+}

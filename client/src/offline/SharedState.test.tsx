@@ -63,6 +63,14 @@ it("distinguishes queued changes, conflicts, and the last successful sync", asyn
   await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("The Mac is not reachable"));
   expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
 });
+it("names a feedback report in conflict and rejection notices", async()=>{
+  local.outbox=[{id:"1",sequence:1,entity:"feedback",field:"r1",value:{kind:"bug",body:"x"},base_revision:0,conflict:4}];
+  render(<SyncStatus/>);
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed a feedback report"));
+  local.outbox=[{id:"1",sequence:1,entity:"feedback",field:"r1",value:{kind:"bug",body:"x"},base_revision:0,error:"report too long"}];
+  window.dispatchEvent(new Event("pods-offline-changed"));
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("did not accept a change to a feedback report"));
+});
 it("does not flash Sync now while a played change is already syncing", async()=>{
   local.lastSync=123;
   local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0}];

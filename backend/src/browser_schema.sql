@@ -64,6 +64,25 @@ BEGIN
     );
 END;
 
+-- User-typed feature requests and bug reports synced from the browser.
+-- status: queued (awaiting pi dispatch), running (pi child active),
+-- done (pi exited 0), failed (terminal dispatch failure).
+CREATE TABLE IF NOT EXISTS browser_feedback (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('feature','bug')),
+    body TEXT NOT NULL,
+    device TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL DEFAULT 0,
+    result TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_browser_feedback_dispatch
+    ON browser_feedback(status, next_at, created_at);
+
 -- Recreate views on every open. CREATE VIEW IF NOT EXISTS keeps a stale definition.
 DROP VIEW IF EXISTS browser_pending_jobs;
 DROP VIEW IF EXISTS browser_episode_catalog;

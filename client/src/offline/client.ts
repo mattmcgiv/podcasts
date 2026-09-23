@@ -1,7 +1,7 @@
 import { emitEpisodesChanged } from "../events";
 import { applyThemePreference, currentThemePreference, THEME_PREFERENCE_KEY } from "../theme";
 import { LOCAL_OMLX_MODEL } from "../lib";
-import type { EpisodeDetail, ProcessingNotification, RefreshStatus, Settings } from "../types";
+import type { EpisodeDetail, FeedbackStatus, ProcessingNotification, RefreshStatus, Settings } from "../types";
 import { cleanupPlayedDownload, prefetch, sweepStaleDownloads } from "./downloads";
 import { currentDownloadProgress } from "./progress";
 import { allDownloads, readRecord, updateState, type ArtifactManifest, type Download, type LocalState, type Operation, type Snapshot } from "./store";
@@ -312,13 +312,32 @@ export function validateSnapshot(snapshot: Snapshot): void {
     return e.ad_removal_state !== "ad-free" || !e.manifest || !/^[a-f0-9]{64}$/.test(e.manifest.hash)
       || e.audio_url !== `/_media/${e.manifest.hash}.${extension}`;
   })) throw new Error("Mac supplied an unpublished episode.");
-  if (snapshot.notifications === undefined) return;
-  if (!Array.isArray(snapshot.notifications)) throw new Error("Unsupported Mac library format.");
-  let previousId = Number.POSITIVE_INFINITY;
-  for (const item of snapshot.notifications) {
-    if (!isProcessingNotification(item) || item.id >= previousId) throw new Error("Unsupported Mac library format.");
-    previousId = item.id;
+  if (snapshot.notifications === undefined && snapshot.feedback === undefined) return;
+  if (snapshot.notifications !== undefined) {
+    if (!Array.isArray(snapshot.notifications)) throw new Error("Unsupported Mac library format.");
+    let previousId = Number.POSITIVE_INFINITY;
+    for (const item of snapshot.notifications) {
+      if (!isProcessingNotification(item) || item.id >= previousId) throw new Error("Unsupported Mac library format.");
+      previousId = item.id;
+    }
   }
+  if (snapshot.feedback !== undefined) {
+    if (!Array.isArray(snapshot.feedback) || snapshot.feedback.some(item => !isFeedbackStatus(item))) {
+      throw new Error("Unsupported Mac library format.");
+    }
+  }
+}
+
+const FEEDBACK_KINDS = new Set(["feature", "bug"]);
+const FEEDBACK_STATUSES = new Set(["queued", "running", "done", "failed"]);
+
+function isFeedbackStatus(value: unknown): value is FeedbackStatus {
+  if (value == null || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.id === "string" && item.id.length > 0
+    && typeof item.kind === "string" && FEEDBACK_KINDS.has(item.kind)
+    && typeof item.status === "string" && FEEDBACK_STATUSES.has(item.status)
+    && typeof item.created_at === "number" && Number.isFinite(item.created_at);
 }
 
 function idleRefreshStatus(): RefreshStatus {

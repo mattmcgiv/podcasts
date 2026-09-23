@@ -2,6 +2,13 @@
 
 Pods is a personal podcast app for Chrome on iPhone and iPad. The phone keeps the library and downloaded episodes. A Mac on the same [Tailscale](https://tailscale.com) network refreshes feeds, removes ads, writes show notes, and syncs listening state while it is awake.
 
+Listen is the unplayed queue, oldest first. Open an episode for the player.
+
+<p>
+  <img src="docs/images/listen.png" alt="Listen: unplayed episodes, oldest first, each marked ad-free" width="260">
+  <img src="docs/images/player.png" alt="Player: scrubber, next chapter, skip, speed, and chapters" width="260">
+</p>
+
 The app is [MIT licensed](LICENSE). It is built for one person, with a passkey on that person's devices. Listen shows subscriptions only.
 
 The deployed client is [pods.mcgiv.dev](https://pods.mcgiv.dev). A checkout is the source for that app. Running it yourself means running the Mac backend and hosting the static client. The native iPhone app under `ios/` is deprecated as of 1 October 2026 and is kept only for history. See [ios/DEPRECATED.md](ios/DEPRECATED.md).

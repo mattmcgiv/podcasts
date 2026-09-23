@@ -1582,3 +1582,101 @@ fn pipeline_menu_ingests_a_channel_a_video_and_a_podcast_without_a_session() {
         None => std::env::remove_var("PODS_YT_DLP"),
     }
 }
+
+fn feedback_payload(id: &str, sequence: i64, report: &str, value: Value) -> Value {
+    json!({"client_id":"phone","device_name":"iPhone","actions":[{
+        "id":id,"sequence":sequence,"entity":"feedback","field":report,
+        "value":value,"base_revision":0
+    }]})
+}
+
+#[test]
+fn feedback_action_stores_report_for_dispatch() {
+    let (backend, _temp, _) = fixture();
+    let result = apply_actions(
+        &backend,
+        feedback_payload(
+            "op-1",
+            1,
+            "report-1",
+            json!({"kind":"bug","body":"  crash on launch  ","created_at":1700000000}),
+        ),
+    )
+    .unwrap();
+    assert_eq!(result["results"][0]["status"], "applied");
+    assert!(result["results"][0]["revision"].as_i64().unwrap() > 0);
+    let row: (String, String, String, String, i64) = backend
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT kind, body, device, status, created_at FROM browser_feedback WHERE id='report-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "bug".to_string(),
+            "crash on launch".to_string(),
+            "iPhone".to_string(),
+            "queued".to_string(),
+            1700000000
+        )
+    );
+}
+
+#[test]
+fn feedback_action_rejects_invalid_reports() {
+    let (backend, _temp, _) = fixture();
+    for (name, value, message) in [
+        ("kind", json!({"kind":"rant","body":"nope"}), "unknown report kind"),
+        ("body", json!({"kind":"bug","body":"   "}), "report body required"),
+        (
+            "length",
+            json!({"kind":"feature","body":"x".repeat(5000)}),
+            "report too long",
+        ),
+    ] {
+        let error = apply_actions(&backend, feedback_payload(name, 1, name, value)).unwrap_err();
+        assert_eq!(error.to_string(), message, "{name}");
+    }
+    let count: i64 = backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM browser_feedback", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn feedback_redelivery_is_idempotent() {
+    let (backend, _temp, _) = fixture();
+    let payload = feedback_payload("op-1", 1, "report-1", json!({"kind":"feature","body":"dark mode"}));
+    let first = apply_actions(&backend, payload.clone()).unwrap();
+    assert_eq!(first, apply_actions(&backend, payload).unwrap());
+    let count: i64 = backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM browser_feedback", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn snapshot_includes_feedback_statuses() {
+    let (backend, _temp, _) = fixture();
+    backend
+        .db
+        .execute(
+            "INSERT INTO browser_feedback(id,kind,body,device,client_id,created_at,status) VALUES('r1','bug','b','iPhone','phone',10,'done')",
+            [],
+        )
+        .unwrap();
+    let feedback = &snapshot(&backend).unwrap()["feedback"];
+    assert_eq!(
+        feedback,
+        &json!([{"id":"r1","kind":"bug","status":"done","created_at":10}])
+    );
+}

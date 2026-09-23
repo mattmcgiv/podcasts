@@ -10,6 +10,7 @@ describe("parseHash", () => {
     expect(parseHash("#/played")).toEqual({ tab: "played" });
     expect(parseHash("#/search")).toEqual({ tab: "shows" });
     expect(parseHash("#/settings")).toEqual({ tab: "settings" });
+    expect(parseHash("#/feedback")).toEqual({ tab: "feedback" });
     expect(parseHash("#/notifications")).toEqual({ tab: "recent", notifications: true });
     expect(parseHash("#/follows")).toEqual({ tab: "recent" });
     expect(parseHash("#/shows")).toEqual({ tab: "shows" });
