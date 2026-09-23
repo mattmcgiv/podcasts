@@ -1,0 +1,1581 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pods screens</title>
+<link rel="stylesheet" href="../client/src/styles.css">
+<style>
+  html, body {
+    background: #e6e9ee !important;
+    color: #1a1d23 !important;
+  }
+
+  .catalog {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 48px 28px 96px;
+  }
+
+  .catalog-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .catalog-head h1 {
+    margin: 0 0 8px;
+    font-size: 34px;
+    letter-spacing: -0.03em;
+    color: #1a1d23;
+  }
+
+  .lede, .frame-copy p, .frame-copy li {
+    color: #3c4450;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  .lede { max-width: 68ch; margin: 0; }
+  .lede + .lede { margin-top: 10px; }
+
+  .switch { display: flex; gap: 8px; }
+  .switch button {
+    font: inherit;
+    font-size: 14px;
+    font-weight: 650;
+    color: #1a1d23;
+    background: #fff;
+    border: 1px solid #cfd6de;
+    border-radius: 999px;
+    padding: 8px 14px;
+    min-height: 36px;
+    cursor: pointer;
+  }
+  .switch button[aria-pressed="true"] {
+    background: #1f2747;
+    border-color: #1f2747;
+    color: #fff;
+  }
+
+  .toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 28px 0 8px;
+    padding: 0;
+    list-style: none;
+  }
+  .toc a {
+    color: #1f2747;
+    background: #fff;
+    border: 1px solid #d5dbe3;
+    border-radius: 999px;
+    padding: 6px 11px;
+    font-size: 13px;
+    font-weight: 650;
+    text-decoration: none;
+  }
+
+  code, .route {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .route { color: #5c6775; margin: 0 0 6px; }
+
+  h2.group {
+    margin: 48px 0 0;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #5c6775;
+  }
+
+  .token-card {
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 18px;
+    padding: 20px;
+    margin-top: 28px;
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .token-card h2 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--text);
+  }
+  .token-card .fine {
+    margin: 8px 0 0;
+    color: var(--text-dim);
+    font-size: 13.5px;
+    line-height: 1.45;
+  }
+  .swatches {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px 16px;
+    list-style: none;
+    margin: 16px 0 0;
+    padding: 0;
+  }
+  .swatches li { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    flex: none;
+  }
+  .swatches code { color: var(--text-dim); }
+  .when-light { display: none; }
+  :root[data-theme="light"] .when-dark { display: none; }
+  :root[data-theme="light"] .when-light { display: inline; }
+
+  .type-list {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 6px 16px;
+    margin: 16px 0 0;
+    font-size: 13.5px;
+  }
+  .type-list dt { color: var(--text-dim); }
+  .type-list dd { margin: 0; }
+
+  .control-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 22px;
+    align-items: flex-end;
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+  .sample { display: grid; justify-items: center; gap: 6px; }
+  .sample span { color: var(--text-dim); font-size: 11px; text-align: center; }
+
+  .frame {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 390px;
+    gap: 12px 36px;
+    align-items: start;
+    margin-top: 28px;
+    padding-top: 28px;
+    border-top: 1px solid #d5dbe3;
+  }
+  .frame-copy h2 {
+    margin: 0 0 8px;
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: #1a1d23;
+  }
+  .frame-copy p { margin: 0 0 10px; }
+  .frame-copy ul { margin: 0; padding-left: 18px; }
+  .frame-copy li + li { margin-top: 4px; }
+
+  .phone {
+    --safe-top: 54px;
+    --safe-bottom: 34px;
+    --safe-left: 0px;
+    --safe-right: 0px;
+    position: relative;
+    isolation: isolate;
+    display: flex;
+    flex-direction: column;
+    width: 390px;
+    height: 844px;
+    justify-self: end;
+    overflow: hidden;
+    border-radius: 44px;
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: 0 0 0 1px rgba(20, 24, 32, 0.16), 0 18px 50px rgba(16, 18, 22, 0.16);
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+  }
+  .phone.tall { height: auto; overflow: visible; }
+  .phone::after {
+    content: "";
+    position: absolute;
+    z-index: 80;
+    left: 50%;
+    bottom: 8px;
+    width: 128px;
+    height: 5px;
+    transform: translateX(-50%);
+    border-radius: 999px;
+    background: #f2f4f7;
+    pointer-events: none;
+  }
+  :root[data-theme="light"] .phone::after { background: #1c1c1e; }
+
+  .phone .shell {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-height: 0;
+    max-width: none !important;
+    margin: 0 !important;
+    border: 0 !important;
+  }
+  .phone.tall .shell { flex: none; height: auto; }
+
+  .phone .safe-area-guard {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    flex: none;
+    padding: 0 24px 7px;
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  .island {
+    position: absolute;
+    top: 11px;
+    left: 50%;
+    width: 104px;
+    height: 32px;
+    margin-left: -52px;
+    border-radius: 18px;
+    background: #000;
+  }
+
+  .phone .content {
+    flex: 1 1 auto;
+    min-height: 0 !important;
+    height: auto;
+    overflow: auto;
+  }
+  .phone.tall .content {
+    flex: none;
+    overflow: visible;
+    padding-bottom: 12px !important;
+  }
+  .phone .view-header { top: 0; }
+  .phone .auth-gate {
+    flex: 1;
+    min-height: 0 !important;
+    padding-top: 32px;
+  }
+
+  .phone .tabbar,
+  .phone .miniplayer,
+  .phone .notification-stack,
+  .phone .player-sheet,
+  .phone .top-confirmation {
+    position: absolute !important;
+  }
+  .phone .tabbar {
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    width: auto !important;
+  }
+  .phone.tall .tabbar {
+    position: relative !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+  }
+  .phone .miniplayer,
+  .phone .notification-stack {
+    max-width: none !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    width: auto !important;
+  }
+  .phone .player-sheet {
+    top: var(--safe-top) !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    border: 0 !important;
+  }
+  .phone.tall .player-sheet {
+    position: relative !important;
+    top: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: auto !important;
+    overflow: visible;
+  }
+  .phone .top-confirmation {
+    top: calc(8px + var(--safe-top)) !important;
+    left: 12px !important;
+    right: 12px !important;
+  }
+  .phone .player-sheet .top-confirmation { top: 8px !important; }
+  .phone .tab { font-size: 12px !important; }
+  .phone .sheet-body {
+    max-width: none !important;
+    width: auto !important;
+    margin-inline: 0 !important;
+    padding-inline: 22px !important;
+  }
+  .phone .sheet-art { margin-block: 14px 18px !important; }
+  .phone .sheet-art .art {
+    width: 224px !important;
+    height: 224px !important;
+    max-width: 224px !important;
+    max-height: 224px !important;
+  }
+  .phone .settings-sheet { min-height: 0 !important; }
+  .phone .player-video {
+    max-height: 220px;
+    aspect-ratio: 16 / 9;
+    background: #000;
+  }
+
+  .cover-tetra { background: linear-gradient(145deg, #2c241c, #c4a574); }
+  .cover-acquired { background: linear-gradient(145deg, #1a2744, #6aa7f8); }
+  .cover-dwarkesh { background: linear-gradient(145deg, #173028, #3d9a78); }
+  .cover-tyler { background: linear-gradient(145deg, #2a2438, #9b88cc); }
+  .cover-huberman { background: linear-gradient(145deg, #3a2818, #e0a15c); }
+  .cover-sharp { background: linear-gradient(145deg, #163038, #5ec0d0); }
+  .cover-hardfork { background: linear-gradient(145deg, #3a2028, #e07a84); }
+  .cover-theo { background: linear-gradient(145deg, #1c1a33, #8aa6ee); }
+  .art.s40 { width: 40px; height: 40px; }
+  .art.s48 { width: 48px; height: 48px; }
+  .art.s56 { width: 56px; height: 56px; }
+  .art.s88 { width: 88px; height: 88px; }
+  .art.s224 { width: 224px; height: 224px; }
+
+  @media (max-width: 860px) {
+    .frame { grid-template-columns: 1fr; justify-items: center; }
+    .frame-copy { max-width: 390px; }
+    .phone { justify-self: center; }
+  }
+</style>
+</head>
+<body>
+<div class="catalog">
+  <header class="catalog-head">
+    <div>
+      <h1>Pods screens</h1>
+      <p class="lede">Static render of the browser client for design reference. Layout, color, type, and copy match <code>client/src</code>. The clock, island, and home indicator are the phone frame. Everything inside them is the app.</p>
+    </div>
+    <div class="switch" role="group" aria-label="Preview palette">
+      <button type="button" data-set-theme="dark" aria-pressed="true">Dark</button>
+      <button type="button" data-set-theme="light" aria-pressed="false">Light</button>
+    </div>
+  </header>
+  <p class="lede">Phones are 390 points wide, the iPhone width Pods is built for. Tall frames grow so the whole scroll is visible. The tab bar stays fixed to the phone while a normal screen scrolls. Listen, Played, Shows, and Settings are the tabs, and a sideways swipe moves between them. The Listen screen title is Pods.</p>
+  <p class="lede">The production build keeps the library on the phone and syncs with the Mac. Follows is built and turned off. “Add one episode” and the DeepSeek API key block appear only when that on-phone library is off.</p>
+
+  <ul class="toc">
+    <li><a href="#loading">Loading</a></li>
+    <li><a href="#sign-in">Sign in</a></li>
+    <li><a href="#passkey">Passkey</a></li>
+    <li><a href="#setup">Setup</a></li>
+    <li><a href="#listen">Listen</a></li>
+    <li><a href="#listen-empty">Listen empty</a></li>
+    <li><a href="#sync">Sync</a></li>
+    <li><a href="#attention">Attention</a></li>
+    <li><a href="#rows">Row states</a></li>
+    <li><a href="#notifications">Notifications</a></li>
+    <li><a href="#played">Played</a></li>
+    <li><a href="#shows">Shows</a></li>
+    <li><a href="#search">Search</a></li>
+    <li><a href="#show">Show</a></li>
+    <li><a href="#unsubscribe">Unsubscribe</a></li>
+    <li><a href="#player">Player</a></li>
+    <li><a href="#video">Video</a></li>
+    <li><a href="#settings">Settings</a></li>
+    <li><a href="#follows">Follows</a></li>
+  </ul>
+
+  <section class="token-card" id="foundations" aria-labelledby="foundations-title">
+    <h2 id="foundations-title">Color, type, controls</h2>
+    <p class="fine">Dark is the base palette. Light replaces it. System follows the phone. The low-storage banner stays brown in both: background #2a1d0e, border #6b4a1f, text #ffd9a8. Font is the system UI stack. Episode titles wrap in full. Show names and dates stay on one line.</p>
+    <ul class="swatches">
+      <li><i class="swatch" style="background:var(--bg)"></i> Background <code><span class="when-dark">#0b0d10</span><span class="when-light">#f4f7fb</span></code></li>
+      <li><i class="swatch" style="background:var(--bg-raised)"></i> Raised <code><span class="when-dark">#14181d</span><span class="when-light">#ffffff</span></code></li>
+      <li><i class="swatch" style="background:var(--bg-overlay)"></i> Overlay <code><span class="when-dark">#181d23</span><span class="when-light">#ffffff</span></code></li>
+      <li><i class="swatch" style="background:var(--text)"></i> Text <code><span class="when-dark">#e8ecf1</span><span class="when-light">#172033</span></code></li>
+      <li><i class="swatch" style="background:var(--text-dim)"></i> Secondary <code><span class="when-dark">#97a1ad</span><span class="when-light">#5d6b7e</span></code></li>
+      <li><i class="swatch" style="background:var(--accent)"></i> Accent <code><span class="when-dark">#4f9cf9</span><span class="when-light">#1468d4</span></code></li>
+      <li><i class="swatch" style="background:var(--danger)"></i> Danger <code><span class="when-dark">#f06a6a</span><span class="when-light">#bd2731</span></code></li>
+      <li><i class="swatch" style="background:var(--line)"></i> Hairline <code><span class="when-dark">#232a32</span><span class="when-light">#d9e1eb</span></code></li>
+      <li><i class="swatch" style="background:var(--success)"></i> Success text <code><span class="when-dark">#d8f5e3</span><span class="when-light">#14684a</span></code></li>
+      <li><i class="swatch" style="background:var(--success-border)"></i> Success border <code><span class="when-dark">#22553a</span><span class="when-light">#a8d4ba</span></code></li>
+    </ul>
+    <dl class="type-list">
+      <dt>Screen title</dt><dd>22px, bold. Listen’s title is the app name.</dd>
+      <dt>Row title</dt><dd>15px, semibold. Episode titles are not clamped.</dd>
+      <dt>Subtitle</dt><dd>13px, secondary, one line. Show subtitles may wrap.</dd>
+      <dt>Meta and stage</dt><dd>12.5px and 11px, secondary. Failed is danger.</dd>
+      <dt>Player title</dt><dd>18px, centered. Show name above it is 13.5px.</dd>
+      <dt>Tab</dt><dd>12px, semibold. Active tab is accent. No icons.</dd>
+      <dt>Section label</dt><dd>13px, uppercase, 0.06em tracking, secondary.</dd>
+      <dt>Corners</dt><dd>Artwork 10, player art 18, mini player 14, settings cards 16, buttons 12, chips full pill.</dd>
+      <dt>Chrome</dt><dd>Page padding 16. Tab bar 56 plus the home inset. Mini player 56, inset 8, sitting 6 above the tab bar. Hit targets are at least 44.</dd>
+    </dl>
+    <div class="control-row">
+      <div class="sample">
+        <button class="play-big" type="button" aria-label="Play"><svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></button>
+        <span>Play. Light uses a page fill, accent ring, accent icon.</span>
+      </div>
+      <div class="sample">
+        <button class="primary-btn" type="button">Continue with passkey</button>
+        <span>Passkey. Ink is #06121f, which turns accent on accent in Light.</span>
+      </div>
+      <div class="sample">
+        <button class="primary-action" type="button">Check for new episodes</button>
+        <span>Empty Listen. White text.</span>
+      </div>
+      <div class="sample">
+        <button class="settings-btn primary" type="button">Sync now</button>
+        <span>Filled settings. White text.</span>
+      </div>
+      <div class="sample">
+        <div class="add-url-row"><button type="button">Add</button></div>
+        <span>Add feed. Ink #06121f.</span>
+      </div>
+      <div class="sample">
+        <button class="subscribe-btn" type="button">Subscribe</button>
+        <span>Subscribe</span>
+      </div>
+      <div class="sample">
+        <button class="subscribe-btn done" type="button">Subscribed</button>
+        <span>Subscribed</span>
+      </div>
+      <div class="sample">
+        <span class="chip">1×</span>
+        <span>Chip</span>
+      </div>
+      <div class="sample">
+        <span class="chip active">1.5×</span>
+        <span>Selected chip</span>
+      </div>
+      <div class="sample">
+        <button class="ghost-btn danger small" type="button">Unsubscribe</button>
+        <span>Danger ghost</span>
+      </div>
+      <div class="sample">
+        <button class="sort-toggle" type="button" role="switch" aria-checked="true" aria-label="Oldest first Newest">
+          <span class="sort-toggle-label is-active">Oldest first</span>
+          <span class="sort-toggle-track" aria-hidden="true"><span class="sort-toggle-thumb"></span></span>
+          <span class="sort-toggle-label">Newest</span>
+        </button>
+        <span>Checked means oldest first. The thumb sits on the left.</span>
+      </div>
+    </div>
+  </section>
+
+  <h2 class="group" id="entering">Entering</h2>
+
+  <article class="frame" id="loading">
+    <div class="frame-copy">
+      <p class="route">Session check</p>
+      <h2>Loading</h2>
+      <p>First paint, before the library or a sign-in choice. One line, no tabs.</p>
+    </div>
+    <div class="phone">
+      <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+      <div class="auth-gate" role="status"><p>Loading Pods…</p></div>
+    </div>
+  </article>
+
+  <article class="frame" id="sign-in">
+    <div class="frame-copy">
+      <p class="route">Passkey</p>
+      <h2>Sign in</h2>
+      <p>A passkey already exists. A failed attempt adds a danger line under the sentence, then the same button.</p>
+    </div>
+    <div class="phone">
+      <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+      <div class="auth-gate">
+        <h1>Pods</h1>
+        <p>Continue with your 1Password passkey.</p>
+        <button class="primary-btn" type="button">Continue with passkey</button>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="passkey">
+    <div class="frame-copy">
+      <p class="route">Enrollment link</p>
+      <h2>Create passkey</h2>
+      <p>Shown when the page was opened with an enrollment token. This is the only account creation.</p>
+    </div>
+    <div class="phone">
+      <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+      <div class="auth-gate">
+        <h1>Pods</h1>
+        <p>Create a passkey in 1Password. This is the only sign-in for this app.</p>
+        <button class="primary-btn" type="button">Create passkey</button>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="setup">
+    <div class="frame-copy">
+      <p class="route">No passkey yet</p>
+      <h2>Setup</h2>
+      <p>The phone has no cached library and no enrollment token. Reconnect has no button styling. With the Mac unreachable and no local library, the same screen is the fallback.</p>
+    </div>
+    <div class="phone">
+      <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+      <div class="auth-gate" role="status">
+        <h1>Pods</h1>
+        <p>Connect this device and your Mac to Tailscale, then open the enrollment link from the Mac.</p>
+        <button type="button">Reconnect</button>
+      </div>
+    </div>
+  </article>
+
+  <h2 class="group">Library</h2>
+
+  <article class="frame" id="listen">
+    <div class="frame-copy">
+      <p class="route">#/recent</p>
+      <h2>Listen</h2>
+      <p>Default tab. Unplayed episodes that finished ad removal, oldest first. The header toggle flips to newest. A row’s check marks it played and removes it. While a file is still arriving, the stage line becomes the download percent.</p>
+      <p>Continue listening is the last episode when it is downloaded and not the one already in the player. Resume starts it. If it is not on the phone yet, the card says “Keep Pods open to download this episode on this device.”</p>
+      <p>The mini player shows the open episode. “Mac ·” means audio is coming out of the Mac. Progress still belongs to the phone.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <div class="continue-listening">
+              <strong>Continue listening</strong>
+              <p>Tyler Cowen: talent and cities · 12:40</p>
+              <button type="button">Resume</button>
+            </div>
+            <header class="view-header">
+              <h1>Pods</h1>
+              <button class="sort-toggle" type="button" role="switch" aria-checked="true" aria-label="Oldest first Newest">
+                <span class="sort-toggle-label is-active">Oldest first</span>
+                <span class="sort-toggle-track" aria-hidden="true"><span class="sort-toggle-thumb"></span></span>
+                <span class="sort-toggle-label">Newest</span>
+              </button>
+            </header>
+            <ul class="episode-list">
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Rick Rubin: making records slowly</span>
+                    <span class="row-sub">Tetragrammaton</span>
+                    <span class="row-meta">Sep 4 · 1h 20m left</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                    <span class="row-progress" role="progressbar" aria-valuenow="38"><span style="width:38%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-downloading">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-dwarkesh" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Dwarkesh Patel: scaling laws</span>
+                    <span class="row-sub">Dwarkesh Podcast</span>
+                    <span class="row-meta">Sep 18 · 54m</span>
+                    <span class="download-state">Downloading 64%</span>
+                    <span class="download-progress" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="64"><span style="width:64%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-huberman" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Andrew Huberman: light, sleep, and the morning</span>
+                    <span class="row-sub">Huberman Lab</span>
+                    <span class="row-meta">Yesterday · 1h 42m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button" aria-label="Open player">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full"><span class="mini-cast">Mac · </span>Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab active" type="button" aria-current="page"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="listen-empty">
+    <div class="frame-copy">
+      <p class="route">#/recent</p>
+      <h2>Listen, nothing ready</h2>
+      <p>While episodes are still being prepared, the empty line is “Nothing ready yet. Preparing 3 episodes.” If nothing is queued, it is “No processed episodes are ready to listen to yet. Your subscriptions are listed in Shows.”</p>
+      <p>The button reads “Checking feeds” with a moving bar while a check is running, then a status such as “Checked 12 feeds” or “Checked 12 feeds · 1 failed”.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header">
+              <h1>Pods</h1>
+              <button class="sort-toggle" type="button" role="switch" aria-checked="true" aria-label="Oldest first Newest">
+                <span class="sort-toggle-label is-active">Oldest first</span>
+                <span class="sort-toggle-track" aria-hidden="true"><span class="sort-toggle-thumb"></span></span>
+                <span class="sort-toggle-label">Newest</span>
+              </button>
+            </header>
+            <div class="empty listen-empty-state">
+              <p>Nothing ready yet. Preparing 3 episodes.</p>
+              <button class="primary-action refresh-action" type="button">Check for new episodes</button>
+            </div>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab active" type="button" aria-current="page"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="sync">
+    <div class="frame-copy">
+      <p class="route">#/recent</p>
+      <h2>Sync choice</h2>
+      <p>The badge sits under the status bar when the phone and the Mac disagree. Dismiss hides it for the rest of the visit. This frame is the conflict, the choice with two actions.</p>
+      <ul>
+        <li>Sign in: “Sign in to update episodes from the Mac.” Button “Continue with passkey”.</li>
+        <li>Mac unreachable: “The Mac is not reachable. Downloaded episodes still play.” Button “Try again”.</li>
+        <li>Waiting: “Changes on this device are waiting to sync.” Button “Sync now”. Hidden while a sync is already running, so a played-mark does not flash the badge.</li>
+        <li>Never synced: “This device has not synchronized with the Mac.” Button “Sync now”.</li>
+        <li>Rejected: “The Mac did not accept a change to {title}. {error}” Buttons “Try again” and “Discard this change”.</li>
+      </ul>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <div class="sync-badge sync-badge-conflict">
+            <div class="sync-badge-copy">
+              <p role="status">This device and the shared library both changed Rick Rubin: making records slowly. 1 more need the same choice after this.</p>
+              <button class="settings-btn primary" type="button">Keep this device’s change</button>
+              <button class="settings-btn" type="button">Use the shared change</button>
+            </div>
+            <button class="sync-badge-dismiss" type="button">Dismiss</button>
+          </div>
+          <section class="view">
+            <header class="view-header"><h1>Pods</h1></header>
+            <ul class="episode-list">
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Rick Rubin: making records slowly</span>
+                    <span class="row-sub">Tetragrammaton</span>
+                    <span class="row-meta">Sep 4 · 1h 20m left</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab active" type="button" aria-current="page"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="attention">
+    <div class="frame-copy">
+      <p class="route">#/recent</p>
+      <h2>Storage and a failure</h2>
+      <p>The brown banner appears when ad removal is on and free space is under the minimum. One processing failure floats above the player. Tapping it opens Notifications. The failure line is danger colored.</p>
+      <p>A second banner, “Ad finding paused”, is for the cloud classifier and does not appear in the production client.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header"><h1>Pods</h1></header>
+            <p class="low-storage-banner" role="alert">Ad removal paused · 1.20 GB free · 5 GB required</p>
+            <button class="notification-stack" type="button" aria-label="Open 1 processing failure notification">
+              <span class="notification-bar">
+                <span class="notification-bar-title">Ben Gilbert: Costco's model</span>
+                <span class="notification-bar-meta">Ad classification · Retry scheduled</span>
+              </span>
+            </button>
+            <ul class="episode-list">
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Rick Rubin: making records slowly</span>
+                    <span class="row-sub">Tetragrammaton</span>
+                    <span class="row-meta">Sep 4 · 1h 20m left</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-sharp" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Ben Thompson: platforms and power</span>
+                    <span class="row-sub">Sharp Tech</span>
+                    <span class="row-meta">Sep 20 · 48m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full">Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab active" type="button" aria-current="page"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="rows">
+    <div class="frame-copy">
+      <p class="route">#/shows/1</p>
+      <h2>Every row state</h2>
+      <p>While ad removal is on, Listen only lists ad-free episodes. These labels show on a show and in search. A row that is not ad-free is dimmed there, and Play waits. Prepare and Retry are the only row actions. The accent “Downloading 64%” line is the phone saving the file, and it replaces the stage line. On the cloud path, “Paused · Mac unavailable” reads “Waiting for DeepSeek API key.”</p>
+      <p>The plus adds the episode to Listen. The same circle with a check is Mark played on Listen, and Mark unplayed on Played.</p>
+    </div>
+    <div class="phone tall">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header">
+              <button class="icon-btn" type="button" aria-label="Back to shows"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+              <h1 class="ellipsis">Tetragrammaton</h1>
+            </header>
+            <ul class="episode-list">
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Rick Rubin: making records slowly</span>
+                    <span class="row-meta">Sep 4 · 1h 20m left</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                    <span class="row-progress" role="progressbar" aria-valuenow="38"><span style="width:38%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-downloading">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Dwarkesh Patel: scaling laws</span>
+                    <span class="row-meta">Sep 18 · 54m</span>
+                    <span class="download-state">Downloading 64%</span>
+                    <span class="download-progress" role="progressbar" aria-valuenow="64"><span style="width:64%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">A guest: the long take</span>
+                    <span class="row-meta">Sep 21 · 2h 4m</span>
+                    <span class="ad-removal-state is-preparing">Finding ads</span>
+                    <span class="ad-classification-progress" role="progressbar" aria-label="Finding ads progress" aria-valuenow="62"><span style="width:62%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Preparing a session</span><span class="row-meta">Sep 22 · 1h 12m</span><span class="ad-removal-state is-preparing">Preparing</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Waiting its turn</span><span class="row-meta">Sep 22 · 46m</span><span class="ad-removal-state is-preparing">Queued</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">On the way to the transcript</span><span class="row-meta">Sep 19 · 1h 5m</span><span class="ad-removal-state is-preparing">Downloading</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Audio is on the Mac</span><span class="row-meta">Sep 19 · 1h 5m</span><span class="ad-removal-state is-preparing">Downloaded</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Speech is being written down</span><span class="row-meta">Sep 16 · 2h 11m</span><span class="ad-removal-state is-preparing">Transcribing</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">The pass that stopped</span><span class="row-meta">Sep 12 · 58m</span><span class="ad-removal-state is-failed">Failed</span></span>
+                </button>
+                <button class="ad-removal-action ad-removal-retry" type="button">Retry</button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Left as published</span><span class="row-meta">Aug 30 · 1h 8m</span><span class="ad-removal-state is-unfiltered">Unfiltered</span></span>
+                </button>
+                <button class="ad-removal-action" type="button">Prepare</button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Held for disk space</span><span class="row-meta">Sep 2 · 1h 1m</span><span class="ad-removal-state is-preparing">Paused · low storage</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Waiting on the Mac</span><span class="row-meta">Sep 2 · 44m</span><span class="ad-removal-state is-preparing">Paused · Mac unavailable</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Held while the battery is low</span><span class="row-meta">Sep 1 · 39m</span><span class="ad-removal-state is-preparing">Paused · low power</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Held while the phone is hot</span><span class="row-meta">Sep 1 · 1h 15m</span><span class="ad-removal-state is-preparing">Paused · thermal</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title episode-title-full">Held during playback</span><span class="row-meta">Aug 28 · 52m</span><span class="ad-removal-state is-preparing">Paused during playback</span></span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="notifications">
+    <div class="frame-copy">
+      <p class="route">#/notifications</p>
+      <h2>Notifications</h2>
+      <p>Opened from the failure bar on Listen. Clear all removes them. An empty list says “No processing failures.” Times follow the phone’s medium date and short time.</p>
+      <p>The four messages are “Audio download failed.”, “Speech-to-text failed.”, “Ad classification failed.”, and “Show-note generation failed.” The outcome is “Retry scheduled” or “Automatic processing stopped”.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header">
+              <button class="icon-btn" type="button" aria-label="Back to Listen"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+              <h1>Notifications</h1>
+              <button class="notification-clear" type="button">Clear all</button>
+            </header>
+            <ul class="notification-list">
+              <li class="notification-row">
+                <p class="notification-row-title">Ben Gilbert: Costco's model<span class="notification-row-show"> · Acquired</span></p>
+                <p class="notification-row-area">Ad classification · Retry scheduled</p>
+                <p class="notification-row-message">Ad classification failed.</p>
+                <time class="notification-row-time">Sep 23, 2026, 7:41 AM</time>
+              </li>
+              <li class="notification-row">
+                <p class="notification-row-title">Dwarkesh Patel: scaling laws<span class="notification-row-show"> · Dwarkesh Podcast</span></p>
+                <p class="notification-row-area">Speech-to-text · Automatic processing stopped</p>
+                <p class="notification-row-message">Speech-to-text failed.</p>
+                <time class="notification-row-time">Sep 22, 2026, 9:05 PM</time>
+              </li>
+              <li class="notification-row">
+                <p class="notification-row-title">Andrew Huberman: light, sleep, and the morning<span class="notification-row-show"> · Huberman Lab</span></p>
+                <p class="notification-row-area">Show notes · Retry scheduled</p>
+                <p class="notification-row-message">Show-note generation failed.</p>
+                <time class="notification-row-time">Sep 22, 2026, 4:16 PM</time>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full"><span class="mini-cast">Mac · </span>Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab active" type="button" aria-current="page"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="played">
+    <div class="frame-copy">
+      <p class="route">#/played</p>
+      <h2>Played</h2>
+      <p>Archive of episodes marked played, newest mark first. Titles dim. The check is accent and marks the episode unplayed, which returns it to Listen. An empty archive says “Episodes you mark played end up here, so nothing is ever lost.” Load more fetches the next page.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header"><h1>Played</h1></header>
+            <ul class="episode-list">
+              <li class="episode-row is-played">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tyler" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Tyler Cowen: talent and cities</span>
+                    <span class="row-sub">Conversations with Tyler</span>
+                    <span class="row-meta">Sep 9 · 1h 8m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action done" type="button" aria-label="Mark unplayed"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-played">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-acquired" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Ben Gilbert: the luxury brand</span>
+                    <span class="row-sub">Acquired</span>
+                    <span class="row-meta">Aug 28 · 2h 6m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action done" type="button" aria-label="Mark unplayed"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-played">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-sharp" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Ben Thompson: the bundle</span>
+                    <span class="row-sub">Sharp Tech</span>
+                    <span class="row-meta">Aug 14 · 51m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action done" type="button" aria-label="Mark unplayed"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+            <button class="load-more" type="button">Load more</button>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full"><span class="mini-cast">Mac · </span>Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="shows">
+    <div class="frame-copy">
+      <p class="route">#/shows</p>
+      <h2>Shows</h2>
+      <p>Subscriptions, alphabetical. A row opens the show. Counts are unplayed, total episodes, how many are ready, and how many unplayed episodes are still awaiting processing. The last two appear when the library snapshot includes them.</p>
+      <p>An empty list says “No subscriptions yet. Search for podcasts above or import an OPML in Settings.” Search starts after three characters.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header"><h1>Shows</h1></header>
+            <div class="shows-search search-input-wrap">
+              <input type="search" placeholder="Search podcasts and your episodes" aria-label="Search podcasts and your episodes">
+            </div>
+            <p class="shows-intro">You've subscribed to these feeds.</p>
+            <ul class="show-list">
+              <li><button class="show-row" type="button"><div class="art s56 cover-acquired" aria-hidden="true"></div><span class="row-text"><span class="row-title">Acquired</span><span class="row-sub">2 unplayed · 186 episodes · 2 ready</span></span></button></li>
+              <li><button class="show-row" type="button"><div class="art s56 cover-tyler" aria-hidden="true"></div><span class="row-text"><span class="row-title">Conversations with Tyler</span><span class="row-sub">all played · 412 episodes · 0 ready</span></span></button></li>
+              <li><button class="show-row" type="button"><div class="art s56 cover-dwarkesh" aria-hidden="true"></div><span class="row-text"><span class="row-title">Dwarkesh Podcast</span><span class="row-sub">4 unplayed · 96 episodes · 1 ready · 3 awaiting processing</span></span></button></li>
+              <li><button class="show-row" type="button"><div class="art s56 cover-huberman" aria-hidden="true"></div><span class="row-text"><span class="row-title">Huberman Lab</span><span class="row-sub">1 unplayed · 240 episodes · 1 ready</span></span></button></li>
+              <li><button class="show-row" type="button"><div class="art s56 cover-sharp" aria-hidden="true"></div><span class="row-text"><span class="row-title">Sharp Tech</span><span class="row-sub">6 unplayed · 310 episodes · 4 ready · 2 awaiting processing</span></span></button></li>
+              <li><button class="show-row" type="button"><div class="art s56 cover-tetra" aria-hidden="true"></div><span class="row-text"><span class="row-title">Tetragrammaton</span><span class="row-sub">3 unplayed · 128 episodes · 3 ready</span></span></button></li>
+            </ul>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full"><span class="mini-cast">Mac · </span>Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="search">
+    <div class="frame-copy">
+      <p class="route">#/shows</p>
+      <h2>Search</h2>
+      <p>Directory podcasts, then matches in this library. Subscribe becomes Subscribed. Episode rows play, or dim until they are ad-free. If Podcast Index keys are missing, the podcasts section says “Directory search is off — add Podcast Index keys and reinstall the app, or paste an RSS URL in Settings.”</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header"><h1>Shows</h1></header>
+            <div class="shows-search search-input-wrap">
+              <input type="search" value="hard" aria-label="Search podcasts and your episodes">
+              <button class="search-clear" type="button" aria-label="Clear search"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.22"/><path d="M8.6 8.6l6.8 6.8M15.4 8.6l-6.8 6.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg></button>
+            </div>
+            <div class="shows-search-results">
+              <h2 class="section-title">Podcasts</h2>
+              <ul class="podcast-results">
+                <li class="podcast-row">
+                  <div class="art s56 cover-hardfork" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title">Hard Fork</span><span class="row-sub">Kevin Roose and Casey Newton</span></span>
+                  <button class="subscribe-btn" type="button">Subscribe</button>
+                </li>
+                <li class="podcast-row">
+                  <div class="art s56 cover-sharp" aria-hidden="true"></div>
+                  <span class="row-text"><span class="row-title">Sharp Tech</span><span class="row-sub">Ben Thompson</span></span>
+                  <button class="subscribe-btn done" type="button" disabled>Subscribed</button>
+                </li>
+              </ul>
+              <h2 class="section-title">Your episodes</h2>
+              <ul class="episode-list">
+                <li class="episode-row">
+                  <button class="row-main" type="button">
+                    <div class="art s56 cover-hardfork" aria-hidden="true"></div>
+                    <span class="row-text">
+                      <span class="row-title episode-title-full">Kevin Roose: the group chat</span>
+                      <span class="row-sub">Hard Fork</span>
+                      <span class="row-meta">Sep 15 · 48m</span>
+                      <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                    </span>
+                  </button>
+                  <button class="row-action" type="button" aria-label="Mark played"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7.5 12.5l3 3 6-6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+                </li>
+              </ul>
+            </div>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="show">
+    <div class="frame-copy">
+      <p class="route">#/shows/1</p>
+      <h2>Show</h2>
+      <p>Newest episode first, the reverse of Listen. The show name is omitted on each row. Plus adds it to Listen. A confirmation then covers the top of the screen for about three seconds: “{title} added to Listen”. It uses the success text and border. Descriptions clamp at four lines. Search on this page looks through this show only. No matches says “No episodes found.”</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header">
+              <button class="icon-btn" type="button" aria-label="Back to shows"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+              <h1 class="ellipsis">Tetragrammaton</h1>
+            </header>
+            <div class="show-hero">
+              <div class="art s88 cover-tetra" aria-hidden="true"></div>
+              <div class="show-hero-text">
+                <p class="row-sub">128 episodes · 3 unplayed</p>
+                <button class="ghost-btn danger small" type="button">Unsubscribe</button>
+              </div>
+            </div>
+            <p class="show-desc">Long conversations about making things. Records, writing, and the hours between takes.</p>
+            <form class="search-form show-search">
+              <div class="search-input-wrap">
+                <input type="search" aria-label="Search this show" placeholder="Search this show">
+              </div>
+            </form>
+            <ul class="episode-list">
+              <li class="episode-row">
+                <button class="row-main" type="button">
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">Rick Rubin: making records slowly</span>
+                    <span class="row-meta">Sep 22 · 2h 8m</span>
+                    <span class="ad-removal-state is-ad-free" style="color:var(--text-dim)">Ad-free</span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">A guest: the long take</span>
+                    <span class="row-meta">Sep 21 · 2h 4m</span>
+                    <span class="ad-removal-state is-preparing">Finding ads</span>
+                    <span class="ad-classification-progress" role="progressbar" aria-valuenow="62"><span style="width:62%"></span></span>
+                  </span>
+                </button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+              <li class="episode-row is-play-locked">
+                <button class="row-main" type="button" disabled>
+                  <div class="art s56 cover-tetra" aria-hidden="true"></div>
+                  <span class="row-text">
+                    <span class="row-title episode-title-full">The pass that stopped</span>
+                    <span class="row-meta">Sep 12 · 58m</span>
+                    <span class="ad-removal-state is-failed">Failed</span>
+                  </span>
+                </button>
+                <button class="ad-removal-action ad-removal-retry" type="button">Retry</button>
+                <button class="row-action" type="button" aria-label="Add to Listen"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v10M7 12h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <div class="miniplayer">
+          <button class="mini-main" type="button">
+            <div class="art s40 cover-tetra" aria-hidden="true"></div>
+            <span class="mini-title episode-title-full"><span class="mini-cast">Mac · </span>Rick Rubin: making records slowly</span>
+          </button>
+          <button class="mini-toggle" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+        </div>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="unsubscribe">
+    <div class="frame-copy">
+      <p class="route">#/shows/1</p>
+      <h2>Unsubscribe</h2>
+      <p>The confirm sits in the column beside the artwork. Keep show returns to the show. Confirm unsubscribe removes the show and its episodes, then goes back to Shows.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header">
+              <button class="icon-btn" type="button" aria-label="Back to shows"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+              <h1 class="ellipsis">Tetragrammaton</h1>
+            </header>
+            <div class="show-hero">
+              <div class="art s88 cover-tetra" aria-hidden="true"></div>
+              <div class="show-hero-text">
+                <p class="row-sub">128 episodes · 3 unplayed</p>
+                <button class="ghost-btn danger small" type="button">Unsubscribe</button>
+                <div class="unsubscribe-confirmation" role="dialog" aria-label="Unsubscribe from Tetragrammaton">
+                  <p>Remove this show and its episodes from Pods?</p>
+                  <button class="ghost-btn" type="button">Keep show</button>
+                  <button class="ghost-btn danger" type="button">Confirm unsubscribe</button>
+                </div>
+              </div>
+            </div>
+            <p class="show-desc">Long conversations about making things. Records, writing, and the hours between takes.</p>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Shows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <h2 class="group">Player</h2>
+
+  <article class="frame" id="player">
+    <div class="frame-copy">
+      <p class="route">Player sheet</p>
+      <h2>Now playing</h2>
+      <p>Opens over any tab. This one is playing through the Mac at 1×, with autoplay on. The skip notice stays about ten seconds: “Skipped 1:24” and Undo. Next names the following chapter and how far away it is.</p>
+      <p>Play on offers This device and Mac. When the Mac cannot be reached the chip reads “Mac (offline)” and a Retry Mac chip appears. Errors use the danger line. One of them is “Mac is not reachable through Tailscale.” While notes are still being written, the chapters block says “Generating show notes…”. A failure puts the message beside Retry.</p>
+      <p>Back is 15 seconds, forward is 30. Mark played closes the sheet.</p>
+    </div>
+    <div class="phone tall player-phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <div class="player-sheet" role="dialog" aria-label="Player">
+          <div class="top-confirmation ad-skip-toast is-visible" role="status">
+            <span>Skipped 1:24</span>
+            <button type="button">Undo</button>
+          </div>
+          <header class="sheet-header">
+            <button class="icon-btn" type="button" aria-label="Minimize player"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+            <span class="sheet-show">Tetragrammaton</span>
+            <span class="sheet-spacer"></span>
+          </header>
+          <div class="sheet-body">
+            <div class="sheet-art"><div class="art s224 cover-tetra" aria-hidden="true"></div></div>
+            <h2 class="sheet-title">Rick Rubin: making records slowly</h2>
+            <input class="scrubber" type="range" min="0" max="7680" value="2892" aria-label="Seek">
+            <div class="time-row"><span>48:12</span><span>-1:19:48</span></div>
+            <button class="next-chapter-link" type="button"><span class="next-chapter-prefix">Next:</span> Leaving space in the mix <span class="next-chapter-time">(+3 mins)</span></button>
+            <div class="controls-row">
+              <button class="icon-btn skip" type="button" aria-label="Back 15 seconds"><svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M11 8V4l-5 5 5 5v-4c3.3 0 6 2.7 6 6h2a8 8 0 00-8-8z" fill="currentColor"/></svg><span class="skip-label">15</span></button>
+              <button class="play-big" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true"><path d="M7 5h3.4v14H7zM13.6 5H17v14h-3.4z" fill="currentColor"/></svg></button>
+              <button class="icon-btn skip" type="button" aria-label="Forward 30 seconds"><svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M13 8V4l5 5-5 5v-4c-3.3 0-6 2.7-6 6H5a8 8 0 018-8z" fill="currentColor"/></svg><span class="skip-label">30</span></button>
+            </div>
+            <div class="speed-row" role="group" aria-label="Playback speed">
+              <button class="chip speed-chip active" type="button">1×</button>
+              <button class="chip speed-chip" type="button">1.5×</button>
+              <button class="chip speed-chip" type="button">2×</button>
+              <button class="chip speed-chip" type="button">2.5×</button>
+              <button class="chip speed-chip" type="button">3×</button>
+            </div>
+            <div class="player-options">
+              <div class="cast-row" role="group" aria-label="Audio output">
+                <span class="cast-label">Play on</span>
+                <div class="cast-choices">
+                  <button class="chip" type="button">This device</button>
+                  <button class="chip active" type="button">Mac</button>
+                </div>
+                <p class="cast-hint" role="status">Playing through Mac · progress saves on this phone</p>
+              </div>
+              <div class="player-action-row">
+                <button class="chip mark-played-btn" type="button">Mark played</button>
+                <button class="autoplay-toggle" type="button" role="switch" aria-checked="true" aria-label="Autoplay next">
+                  <span>Autoplay next</span>
+                  <span class="autoplay-toggle-track" aria-hidden="true"><span class="autoplay-toggle-thumb"></span></span>
+                </button>
+              </div>
+            </div>
+            <section class="show-notes" aria-labelledby="show-notes-title">
+              <h3 id="show-notes-title">Chapters</h3>
+              <button class="show-note" type="button"><span class="show-note-time">0:00</span><span class="show-note-copy"><strong>Cold open</strong><span>How the session starts.</span></span></button>
+              <button class="show-note" type="button"><span class="show-note-time">12:40</span><span class="show-note-copy"><strong>The record comes first</strong><span>Why the take stays long.</span></span></button>
+              <button class="show-note is-ad" type="button"><span class="show-note-time">48:12</span><span class="show-note-copy"><strong>Ads</strong></span></button>
+              <button class="show-note" type="button"><span class="show-note-time">51:40</span><span class="show-note-copy"><strong>Leaving space in the mix</strong><span>What he cuts, and what he leaves.</span></span></button>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  </article>
+
+  <article class="frame" id="video">
+    <div class="frame-copy">
+      <p class="route">Player sheet</p>
+      <h2>Video</h2>
+      <p>YouTube episodes use the phone’s video element instead of artwork. There is no Play on row. The black area is the picture. The browser draws its own controls on top of it. While the file is opening, a line under the times says “Loading video”.</p>
+    </div>
+    <div class="phone">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <div class="player-sheet" role="dialog" aria-label="Player">
+          <header class="sheet-header">
+            <button class="icon-btn" type="button" aria-label="Minimize player"><svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+            <span class="sheet-show">Theo - t3.gg</span>
+            <span class="sheet-spacer"></span>
+          </header>
+          <div class="sheet-body sheet-scroll-region">
+            <div class="player-video" role="img" aria-label="Video picture"></div>
+            <h2 class="sheet-title">Theo: the browser still matters</h2>
+            <input class="scrubber" type="range" min="0" max="1120" value="12" aria-label="Seek">
+            <div class="time-row"><span>0:12</span><span>-18:28</span></div>
+            <div class="stream-initializing" role="status"><span class="stream-pulse" aria-hidden="true"></span><span>Loading video</span></div>
+            <div class="controls-row">
+              <button class="icon-btn skip" type="button" aria-label="Back 15 seconds"><svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M11 8V4l-5 5 5 5v-4c3.3 0 6 2.7 6 6h2a8 8 0 00-8-8z" fill="currentColor"/></svg><span class="skip-label">15</span></button>
+              <button class="play-big" type="button" aria-label="Play"><svg viewBox="0 0 24 24" width="38" height="38" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></button>
+              <button class="icon-btn skip" type="button" aria-label="Forward 30 seconds"><svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M13 8V4l5 5-5 5v-4c-3.3 0-6 2.7-6 6H5a8 8 0 018-8z" fill="currentColor"/></svg><span class="skip-label">30</span></button>
+            </div>
+            <div class="speed-row">
+              <button class="chip speed-chip active" type="button">1×</button>
+              <button class="chip speed-chip" type="button">1.5×</button>
+              <button class="chip speed-chip" type="button">2×</button>
+              <button class="chip speed-chip" type="button">2.5×</button>
+              <button class="chip speed-chip" type="button">3×</button>
+            </div>
+            <div class="player-options">
+              <div class="player-action-row">
+                <button class="chip mark-played-btn" type="button">Mark played</button>
+                <button class="autoplay-toggle" type="button" role="switch" aria-checked="true">
+                  <span>Autoplay next</span>
+                  <span class="autoplay-toggle-track" aria-hidden="true"><span class="autoplay-toggle-thumb"></span></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </article>
+
+  <h2 class="group">Settings</h2>
+
+  <article class="frame" id="settings">
+    <div class="frame-copy">
+      <p class="route">#/settings</p>
+      <h2>Settings</h2>
+      <p>This is the production phone: Mac sync and downloads, sign out, appearance, car Bluetooth when the Mac reports it, the local ad-removal note, add a feed, YouTube, then the library. The tab bar stays fixed while this page scrolls. It is drawn at the bottom of this full-height frame.</p>
+      <p>Not on this build: “Add one episode”, the DeepSeek API key, enable and disable ad removal, usage totals, learned corrections, and the diagnostic buttons. Those render only when the on-phone library is off. A conflict in the outbox is repeated here under Mac and downloads, with the same Keep and Use buttons as the Listen badge.</p>
+      <p>Appearance is saved as Dark so it matches this preview. The product default, with nothing saved, is System.</p>
+    </div>
+    <div class="phone tall">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <div class="settings-sheet" role="dialog" aria-label="Settings">
+            <header class="sheet-header">
+              <span class="sheet-spacer"></span>
+              <span class="sheet-show">Settings</span>
+              <span class="sheet-spacer"></span>
+            </header>
+            <div class="settings-body">
+              <section class="settings-section" aria-label="Offline library">
+                <h2 class="section-title">Mac and downloads</h2>
+                <p class="settings-detail">Connect this device and your Mac to Tailscale to synchronize. Downloads work while the Mac is unavailable.</p>
+                <label>Device name <input aria-label="Device name" maxlength="80" value="iPhone"></label>
+                <p>Last sync: 9/23/2026, 8:14:02 AM 0 pending changes.</p>
+                <p class="settings-detail">At last sync: 3 episodes pending on Mac, 1 failed and retrying, 0 episodes could not be processed automatically.</p>
+                <div class="settings-action-list">
+                  <button class="settings-btn primary" type="button">Sync now</button>
+                  <button class="settings-btn primary" type="button">Sign in to Mac</button>
+                  <button class="settings-btn" type="button">Export state backup</button>
+                </div>
+                <label>Automatic episodes <input aria-label="Automatic episodes" type="number" min="0" max="1000" value="5"></label>
+                <label>Storage limit (GiB) <input aria-label="Storage limit (GiB)" type="number" min="0.1" step="0.1" value="8"></label>
+                <p>12 downloaded episodes · 3.40 GiB reserved.</p>
+                <p class="settings-detail">Keep Pods open to download automatically. Browser storage can be removed by iOS.</p>
+              </section>
+
+              <section class="settings-section" aria-labelledby="account-title">
+                <h2 class="section-title" id="account-title">Account</h2>
+                <p class="settings-detail">Sign out on this browser. Your passkey stays in 1Password.</p>
+                <button class="ghost-btn" type="button">Sign out</button>
+              </section>
+
+              <section class="settings-section settings-appearance" aria-labelledby="appearance-title">
+                <h2 class="section-title" id="appearance-title">Appearance</h2>
+                <p class="settings-detail">Choose how Pods looks on this iPhone.</p>
+                <div class="theme-picker" role="group" aria-label="Appearance">
+                  <button class="theme-choice" type="button" data-appearance="system" aria-pressed="false">System</button>
+                  <button class="theme-choice" type="button" data-appearance="light" aria-pressed="false">Light</button>
+                  <button class="theme-choice is-selected" type="button" data-appearance="dark" aria-pressed="true">Dark</button>
+                </div>
+              </section>
+
+              <section class="settings-section" aria-labelledby="car-bluetooth-title">
+                <h2 class="section-title" id="car-bluetooth-title">Car Bluetooth</h2>
+                <p class="settings-detail">Remember the Bluetooth output that should auto-resume playback. A Tesla that still uses its factory name works automatically. A renamed car needs to be remembered once. Headphones are never remembered.</p>
+                <p class="settings-detail">Connected: Tesla Model Y</p>
+                <p class="settings-detail" role="status">Tesla Model Y is remembered as your car.</p>
+                <button class="ghost-btn" type="button">Forget remembered car</button>
+              </section>
+
+              <section class="ad-removal-settings settings-section" aria-labelledby="ad-removal-title">
+                <h2 class="section-title" id="ad-removal-title">Ad removal</h2>
+                <p class="settings-detail">Ad classification and show notes run locally on the Mac through oMLX using DeepSeek-V4-Flash-0731-2.4bit-mixed.</p>
+                <p class="settings-detail">Processing pauses while the Mac is unavailable.</p>
+              </section>
+
+              <section class="settings-section" aria-labelledby="add-feed-title">
+                <h2 class="section-title" id="add-feed-title">Add a feed</h2>
+                <p class="settings-detail">Paste a podcast RSS feed URL.</p>
+                <div class="add-url-row">
+                  <input type="url" placeholder="https://example.com/feed.xml" aria-label="Feed URL">
+                  <button type="button" disabled>Add</button>
+                </div>
+              </section>
+
+              <section class="settings-section" aria-labelledby="youtube-title">
+                <h2 class="section-title" id="youtube-title">YouTube</h2>
+                <p class="settings-detail">Paste a channel URL to subscribe. The two newest videos are downloaded at 720p, with spoken ads removed. Paste a video URL to add that video to Listen without subscribing.</p>
+                <div class="add-url-row">
+                  <input type="url" placeholder="https://www.youtube.com/@channel or a video URL" aria-label="YouTube URL">
+                  <button type="button" disabled>Add YouTube</button>
+                </div>
+              </section>
+
+              <section class="settings-section" aria-labelledby="subscriptions-title">
+                <h2 class="section-title" id="subscriptions-title">Library</h2>
+                <p class="settings-detail">Import, export, or refresh your subscriptions.</p>
+                <div class="settings-action-list">
+                  <button class="ghost-btn" type="button">Import OPML</button>
+                  <button class="ghost-btn" type="button">Export OPML</button>
+                  <button class="ghost-btn refresh-action" type="button">Refresh all feeds</button>
+                </div>
+                <p class="muted">Last feed refresh: Sep 23, 2026, 6:02 AM (Automatic)</p>
+              </section>
+            </div>
+          </div>
+        </main>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+
+  <h2 class="group">Not in the tab bar</h2>
+
+  <article class="frame" id="follows">
+    <div class="frame-copy">
+      <p class="route">#/follows</p>
+      <h2>Follows</h2>
+      <p>Built, and turned off. <code>FOLLOW_APPEARANCES_ENABLED</code> is false, so this tab is absent and the route opens Listen. The screen below is what the view renders when the switch is on. The intro is centered because it uses the empty-state text style.</p>
+    </div>
+    <div class="phone tall">
+      <div class="shell">
+        <div class="safe-area-guard statusbar" aria-hidden="true"><span>9:41</span><i class="island"></i><span>5G</span></div>
+        <main class="content">
+          <section class="view">
+            <header class="view-header"><h1>Follows</h1></header>
+            <p class="muted follow-intro">Track likely full-length podcast appearances for people you choose. The first check looks back 30 days; later checks look back 7. Low-confidence matches wait for review.</p>
+            <form class="follow-form">
+              <input aria-label="Person to follow" placeholder="Person, e.g. Balaji Srinivasan">
+              <input aria-label="Aliases" placeholder="Aliases, separated by commas (optional)">
+              <button type="button">Follow</button>
+            </form>
+            <h2 class="section-title">Following</h2>
+            <ul class="follow-list">
+              <li class="follow-row">
+                <span class="row-text"><span class="row-title">Balaji Srinivasan</span><span class="row-sub">2 in Listen · 1 to review</span></span>
+                <button class="text-btn" type="button">Check</button>
+                <button class="text-btn danger" type="button">Remove</button>
+              </li>
+            </ul>
+            <h2 class="section-title">Review appearances</h2>
+            <ul class="follow-list">
+              <li class="candidate-row">
+                <div class="art s48 cover-dwarkesh" aria-hidden="true"></div>
+                <span class="row-text"><span class="row-title">The network state, revisited</span><span class="row-sub">Dwarkesh Podcast · name in title</span></span>
+                <span class="candidate-actions"><button class="text-btn" type="button">Add</button><button class="text-btn danger" type="button">Skip</button></span>
+              </li>
+            </ul>
+          </section>
+        </main>
+        <nav class="tabbar">
+          <button class="tab" type="button"><span>Listen</span></button>
+          <button class="tab" type="button"><span>Played</span></button>
+          <button class="tab" type="button"><span>Shows</span></button>
+          <button class="tab active" type="button" aria-current="page"><span>Follows</span></button>
+          <button class="tab" type="button"><span>Settings</span></button>
+        </nav>
+      </div>
+    </div>
+  </article>
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  function apply(theme) {
+    root.dataset.theme = theme;
+    try { sessionStorage.setItem("pods-screens-theme", theme); } catch (e) {}
+    document.querySelectorAll("[data-set-theme]").forEach(function (btn) {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-set-theme") === theme ? "true" : "false");
+    });
+    document.querySelectorAll("[data-appearance]").forEach(function (btn) {
+      var on = btn.getAttribute("data-appearance") === theme;
+      btn.classList.toggle("is-selected", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+  var stored = null;
+  try { stored = sessionStorage.getItem("pods-screens-theme"); } catch (e) {}
+  apply(stored === "light" ? "light" : "dark");
+  document.querySelectorAll("[data-set-theme]").forEach(function (btn) {
+    btn.addEventListener("click", function () { apply(btn.getAttribute("data-set-theme")); });
+  });
+})();
+</script>
+</body>
+</html>
