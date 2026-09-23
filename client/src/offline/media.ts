@@ -44,8 +44,13 @@ export async function localMedia(request: Request): Promise<Response> {
     }
   }
   const headers: Record<string, string> = { "Content-Type": extension === "mp4" ? "video/mp4" : "audio/mp4", "Content-Length": String(length), "Accept-Ranges": "bytes", "ETag": `"${hash}"` };
+  function copyBytes(bytes: Uint8Array): ArrayBuffer {
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+    return copy;
+  }
   if (request.headers.has("Range")) headers["Content-Range"] = `bytes ${start}-${end}/${manifest.bytes}`;
   // iPhone WebKit plays the audio track of a streamed mp4 and leaves the picture black.
   const ranged = request.headers.has("Range");
-  return new Response(body, { status: ranged ? 206 : 200, statusText: ranged ? "Partial Content" : "OK", headers });
+  return new Response(body ? copyBytes(body) : null, { status: ranged ? 206 : 200, statusText: ranged ? "Partial Content" : "OK", headers });
 }

@@ -4,6 +4,7 @@ import * as client from "./client";
 import * as downloads from "./downloads";
 vi.mock("./client", () => ({ backendBase: () => "https://sync.pods.mcgiv.dev:8443", offlineEnabled: vi.fn(), synchronize: vi.fn() }));
 vi.mock("./downloads", () => ({ prefetch: vi.fn(), sweepStaleDownloads: vi.fn() }));
+vi.mock("../voice", () => ({ flushVoiceDrafts: vi.fn().mockResolvedValue(undefined) }));
 beforeEach(() => {
   vi.useFakeTimers(); vi.mocked(client.offlineEnabled).mockReturnValue(true);
   vi.mocked(client.synchronize).mockResolvedValue(); vi.mocked(downloads.prefetch).mockResolvedValue();

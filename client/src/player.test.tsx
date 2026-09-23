@@ -1180,7 +1180,9 @@ describe("PlayerProvider offline position flush", () => {
   it("starts playback before the Mac sync returns", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", () => new Promise(() => {}));
-    const episode = vi.spyOn(Api, "episode").mockResolvedValue(downloadedEpisode());
+    const episode = vi.spyOn(Api, "episode").mockResolvedValue({
+      ...downloadedEpisode(), notes_html: "", archived_at: null, show_notes: [], ad_markers: [],
+    });
     try {
       renderOffline(downloadedEpisode());
       act(() => { screen.getByText("play-offline").click(); });

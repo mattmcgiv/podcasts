@@ -1670,7 +1670,8 @@ input[type="search"]::-webkit-search-cancel-button {
 @media (prefers-reduced-motion: reduce) {
   .tab-swipe-screen.tab-swipe-forward,
   .tab-swipe-screen.tab-swipe-back,
-  .refresh-progress::before {
+  .refresh-progress::before,
+  .feedback-rec-dot {
     animation: none;
   }
 
@@ -1789,3 +1790,46 @@ input[type="search"]::-webkit-search-cancel-button {
 .feedback-item p { margin: 4px 0; }
 .feedback-item-kind { font-weight: 600; }
 .feedback-item-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-compose { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.feedback-compose .feedback-input { margin-top: 0; flex: 1; min-width: 0; }
+.feedback-mic {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+.feedback-mic:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.feedback-mic:disabled { opacity: 0.55; }
+.feedback-mic:active:not(:disabled) { transform: scale(0.96); }
+.feedback-recording {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-raised);
+}
+.feedback-rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex-shrink: 0;
+  animation: feedback-rec-pulse 1.4s ease-out infinite;
+}
+@keyframes feedback-rec-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent); }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+.feedback-rec-time { font-variant-numeric: tabular-nums; font-weight: 650; min-width: 3.2em; }
+.feedback-rec-stop { margin-left: auto; min-height: 40px; padding: 8px 16px; }
+.feedback-recording .ghost-btn.small { width: auto; margin: 0; min-height: 40px; }
+.feedback-voice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.feedback-voice-actions .ghost-btn.small { width: auto; margin: 0; }

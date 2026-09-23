@@ -117,7 +117,7 @@ pub fn handle(backend: &Backend, request: &HttpRequest) -> HttpResponse {
                 )
                 .with_header(
                     "access-control-allow-headers",
-                    "content-type, range, if-range, if-none-match",
+                    "content-type, range, if-range, if-none-match, x-pods-client-id, x-pods-voice-id",
                 )
                 .with_header("access-control-allow-private-network", "true")
         }
@@ -167,6 +167,10 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
             apply_actions(backend, request.json_object()?)?,
             200,
         ));
+    }
+    // Spoken feedback uploads are binary. They stay off the JSON action channel.
+    if path == "/api/feedback/voice" || path.starts_with("/api/feedback/voice/") {
+        return crate::voice::handle(backend, request);
     }
     if path.starts_with("/api/speaker") {
         return crate::speaker::handle(backend, request);
@@ -434,16 +438,29 @@ fn ingest_library_url(backend: &Backend, raw: &str) -> Result<&'static str, Erro
         return Err(Error::Invalid(LIBRARY_PASTE.into()));
     }
     let (kind, entity, field) = match crate::youtube::classify(trimmed) {
-        Ok(Some(crate::youtube::YoutubeInput::Video { .. })) => ("video", "listen", trimmed.to_string()),
-        Ok(Some(input)) => ("channel", "subscription", channel_subscription_url(&input, trimmed)?),
-        Ok(None) => ("podcast", "subscription", podcast_subscription_url(trimmed)?),
+        Ok(Some(crate::youtube::YoutubeInput::Video { .. })) => {
+            ("video", "listen", trimmed.to_string())
+        }
+        Ok(Some(input)) => (
+            "channel",
+            "subscription",
+            channel_subscription_url(&input, trimmed)?,
+        ),
+        Ok(None) => (
+            "podcast",
+            "subscription",
+            podcast_subscription_url(trimmed)?,
+        ),
         Err(_) => return Err(Error::Invalid(LIBRARY_PASTE.into())),
     };
     queue_library_action(backend, entity, &field)?;
     Ok(kind)
 }
 
-fn channel_subscription_url(input: &crate::youtube::YoutubeInput, raw: &str) -> Result<String, Error> {
+fn channel_subscription_url(
+    input: &crate::youtube::YoutubeInput,
+    raw: &str,
+) -> Result<String, Error> {
     match input {
         crate::youtube::YoutubeInput::ChannelLookup { url } => Ok(url.clone()),
         crate::youtube::YoutubeInput::ChannelPage { channel_id }
@@ -501,7 +518,10 @@ fn queue_library_action(backend: &Backend, entity: &str, field: &str) -> Result<
     Ok(())
 }
 
-fn queue_browser_back_catalog_trim(tx: &rusqlite::Transaction, podcast_id: i64) -> Result<(), Error> {
+fn queue_browser_back_catalog_trim(
+    tx: &rusqlite::Transaction,
+    podcast_id: i64,
+) -> Result<(), Error> {
     let mut ids: Vec<i64> = crate::db::setting(tx, "browser_trim_podcast_ids")?
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -527,11 +547,15 @@ fn action_core(action: &Value) -> Value {
 }
 
 fn same_action(stored: &str, action: &Value) -> bool {
-    serde_json::from_str::<Value>(stored).is_ok_and(|original| action_core(&original) == action_core(action))
+    serde_json::from_str::<Value>(stored)
+        .is_ok_and(|original| action_core(&original) == action_core(action))
 }
 
 pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> {
-    let device = payload["device_name"].as_str().filter(|s| !s.is_empty() && s.len()<=80).unwrap_or("Another device");
+    let device = payload["device_name"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 80)
+        .unwrap_or("Another device");
     let client = payload["client_id"]
         .as_str()
         .filter(|s| !s.is_empty() && s.len() <= 128)
