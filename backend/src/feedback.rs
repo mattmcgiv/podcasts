@@ -18,6 +18,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 1800;
 const FAILURE_BACKOFF_BASE_SECS: i64 = 300;
 const FAILURE_BACKOFF_MAX_SECS: i64 = 7200;
 const PREEMPT_RETRY_SECS: i64 = 60;
+const LAUNCH_RETRY_SECS: i64 = 60;
 
 pub fn model() -> String {
     std::env::var("PODS_FEEDBACK_MODEL")
@@ -128,12 +129,27 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
             )?;
         }
         PiOutcome::Exit(code, elapsed) => {
-            fail_or_retry(
-                backend,
-                &report.id,
-                attempts,
-                &format!("pi exit {} after {}s", code.unwrap_or(-1), elapsed.as_secs()),
-            )?;
+            if code == Some(127) {
+                requeue_without_attempt(
+                    backend,
+                    &report.id,
+                    &format!(
+                        "pi exit 127 after {}s (launch failed; retrying)",
+                        elapsed.as_secs()
+                    ),
+                )?;
+            } else {
+                fail_or_retry(
+                    backend,
+                    &report.id,
+                    attempts,
+                    &format!(
+                        "pi exit {} after {}s",
+                        code.unwrap_or(-1),
+                        elapsed.as_secs()
+                    ),
+                )?;
+            }
         }
         PiOutcome::Timeout(limit) => {
             fail_or_retry(
@@ -144,7 +160,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
             )?;
         }
         PiOutcome::SpawnFailed(detail) => {
-            fail_or_retry(backend, &report.id, attempts, &format!("pi spawn failed: {detail}"))?;
+            requeue_without_attempt(backend, &report.id, &format!("pi spawn failed: {detail}"))?;
         }
         PiOutcome::Preempted => {
             backend.db.execute(
@@ -187,6 +203,17 @@ fn fail_or_retry(backend: &Backend, id: &str, attempts: i64, result: &str) -> Re
             crate::db::now_unix() + backoff,
         )?;
     }
+    Ok(())
+}
+
+/// Requeue a report whose pi launch never ran without consuming an attempt.
+/// A missing binary or interpreter is environmental: the report waits for the
+/// host to be repaired instead of failing after three launch attempts.
+fn requeue_without_attempt(backend: &Backend, id: &str, result: &str) -> Result<(), Error> {
+    backend.db.execute(
+        "UPDATE browser_feedback SET status='queued', result=?, next_at=?, started_at=0, attempts=attempts-1 WHERE id=?",
+        params![result, crate::db::now_unix() + LAUNCH_RETRY_SECS, id],
+    )?;
     Ok(())
 }
 
@@ -620,6 +647,70 @@ mod tests {
                 assert_eq!(attempts, 3);
             })
         });
+    }
+
+    #[test]
+    fn exit_127_requeues_without_consuming_an_attempt() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        let pi = stub_pi(temp.path(), "exit 127");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        open_gates(|| {
+            with_lock(|| {
+                assert!(step(&backend).unwrap());
+                let (status, attempts, next_at, result) = report_status(&backend, "r1");
+                assert_eq!(status, "queued");
+                assert_eq!(attempts, 0);
+                assert!(next_at > crate::db::now_unix());
+                assert!(result.unwrap().contains("pi exit 127"));
+                // A permanently broken launcher must not fail the report:
+                // repeated 127s still leave it queued with zero attempts.
+                for _ in 0..3 {
+                    backend
+                        .db
+                        .execute("UPDATE browser_feedback SET next_at=0 WHERE id='r1'", [])
+                        .unwrap();
+                    assert!(step(&backend).unwrap());
+                }
+                let (status, attempts, _, _) = report_status(&backend, "r1");
+                assert_eq!(status, "queued");
+                assert_eq!(attempts, 0);
+            })
+        });
+    }
+
+    #[test]
+    fn spawn_failure_requeues_without_consuming_an_attempt() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "bug", "crash on launch");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            (
+                "PODS_FEEDBACK_PI",
+                Some(
+                    temp.path()
+                        .join("missing-pi")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, attempts, next_at, result) = report_status(&backend, "r1");
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(next_at > crate::db::now_unix());
+        assert!(result.unwrap().contains("pi spawn failed"));
     }
 
     #[test]
