@@ -154,6 +154,9 @@ pub fn storage_status(backend: &Backend) -> Value {
 }
 
 pub fn step(backend: &Backend) -> Result<bool, Error> {
+    if crate::voice::step(backend)? {
+        return Ok(true);
+    }
     if crate::feedback::step(backend)? {
         return Ok(true);
     }
@@ -747,7 +750,7 @@ static WHISPER_PGID: AtomicI32 = AtomicI32::new(0);
 static WHISPER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 thread_local! {
@@ -885,6 +888,54 @@ fn run_whisper_child_with_progress(
             Err(failure("local transcription failed"))
         }
     }
+}
+
+const WHISPER_REVISION: &str = "49e6aa286ad60c14352c404340ded53710378a11";
+
+/// Transcribe a local audio file with the episode Whisper large-v3 script.
+/// The caller holds no HTTP request open; this can run for minutes.
+pub fn transcribe_audio(source: &Path) -> Result<String, Error> {
+    let dest = source.with_extension("json");
+    let checkpoint = source_hash_checkpoint(source);
+    struct Cleanup<'a>(&'a Path, Option<std::path::PathBuf>);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.0);
+            if let Some(dir) = &self.1 {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+    }
+    let _cleanup = Cleanup(&dest, checkpoint);
+    crate::power_gate::require_external_power()?;
+    let _permit = crate::omlx_lock::prepare_whisper(MODEL)?;
+    crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Whisper)?;
+    let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = std::env::var("PODS_TRANSCRIBE_SCRIPT")
+        .map_err(|_| failure("PODS_TRANSCRIBE_SCRIPT is required"))?;
+    run_whisper_child_with_progress(&python, &script, source, &dest, || Ok(()))?;
+    let segments: Vec<Segment> =
+        serde_json::from_slice(&fs::read(&dest).map_err(failure)?).map_err(failure)?;
+    validate_segments(&segments)?;
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return Err(failure("empty transcript"));
+    }
+    Ok(text)
+}
+
+fn source_hash_checkpoint(source: &Path) -> Option<std::path::PathBuf> {
+    let (hash, _) = ArtifactStore::hash_file(source).ok()?;
+    Some(
+        source
+            .parent()?
+            .join(format!("words-{hash}-{WHISPER_REVISION}")),
+    )
 }
 
 #[cfg(unix)]
@@ -1112,7 +1163,10 @@ pub fn validate_labels(value: &Value, segments: &[Segment]) -> Result<Vec<Label>
 }
 
 fn fixed_window_ranges(segments: &[Segment]) -> Vec<(usize, usize)> {
-    (0..segments.len()).step_by(WINDOW_CORE).map(|start| (start, (start + WINDOW_CORE).min(segments.len()))).collect()
+    (0..segments.len())
+        .step_by(WINDOW_CORE)
+        .map(|start| (start, (start + WINDOW_CORE).min(segments.len())))
+        .collect()
 }
 
 fn classify_windows_with(
@@ -1896,7 +1950,8 @@ fn drain_youtube_listen(backend: &Backend) {
     else {
         return;
     };
-    let mut items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut items: Vec<crate::youtube::PendingListen> =
+        serde_json::from_str(&raw).unwrap_or_default();
     let now = crate::db::now_unix();
     let Some(index) = items.iter().position(|item| item.next_at <= now) else {
         return;
@@ -2417,10 +2472,25 @@ mod download_tests {
         let source = dir.path().join("source.mp4");
         assert!(Command::new("ffmpeg")
             .args([
-                "-nostdin", "-v", "error", "-y",
-                "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=2",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-                "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=1280x720:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
             ])
             .arg(&source)
             .status()

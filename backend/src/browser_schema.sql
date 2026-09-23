@@ -83,6 +83,25 @@ CREATE TABLE IF NOT EXISTS browser_feedback (
 CREATE INDEX IF NOT EXISTS idx_browser_feedback_dispatch
     ON browser_feedback(status, next_at, created_at);
 
+-- Spoken notes waiting on local Whisper. The audio file lives under voice/{id}.audio.
+-- The JSON sync channel never carries these bytes. A finished transcript is not a
+-- report until the browser submits it through the feedback action.
+-- status: queued, running, done (transcript ready to confirm), failed.
+CREATE TABLE IF NOT EXISTS browser_voice_notes (
+    id TEXT PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed')),
+    transcript TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_browser_voice_notes_dispatch
+    ON browser_voice_notes(status, next_at, created_at);
+
 -- Recreate views on every open. CREATE VIEW IF NOT EXISTS keeps a stale definition.
 DROP VIEW IF EXISTS browser_pending_jobs;
 DROP VIEW IF EXISTS browser_episode_catalog;

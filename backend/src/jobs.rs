@@ -135,9 +135,9 @@ impl From<JobStoreError> for Error {
     fn from(value: JobStoreError) -> Self {
         match value {
             JobStoreError::EpisodeNotFound | JobStoreError::JobNotFound => Error::NotFound,
-            JobStoreError::EpisodeArchived | JobStoreError::InvalidTransition | JobStoreError::CorruptState(_) => {
-                Error::Conflict(value.to_string())
-            }
+            JobStoreError::EpisodeArchived
+            | JobStoreError::InvalidTransition
+            | JobStoreError::CorruptState(_) => Error::Conflict(value.to_string()),
         }
     }
 }
@@ -194,9 +194,16 @@ impl<'a> JobStore<'a> {
     }
 
     pub fn enqueue(&self, episode_id: i64) -> Result<Job, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let podcast_id: i64 = conn
-            .query_row("SELECT podcast_id FROM episodes WHERE id = ?", params![episode_id], |row| row.get(0))
+            .query_row(
+                "SELECT podcast_id FROM episodes WHERE id = ?",
+                params![episode_id],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?
             .ok_or(JobStoreError::EpisodeNotFound)?;
@@ -230,7 +237,10 @@ impl<'a> JobStore<'a> {
     }
 
     pub fn job_for_episode(&self, episode_id: i64) -> Result<Option<Job>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, episode_id, podcast_id, stage, blocking_reason, attempt_count, enrolled_at, updated_at, failed_stage, last_error_code, last_error_message, retry_eligible, next_retry_at, audio_relative_path, audio_sha256, audio_byte_count, downloaded_at, download_resume_relative_path, transcriber_version, transcribed_at, classification_run_id, classifier_version, prompt_version, classifier_quantization, classified_at FROM ad_removal_jobs WHERE episode_id = ?")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -239,9 +249,18 @@ impl<'a> JobStore<'a> {
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
     }
 
-    fn query_job(&self, sql: &str, params: impl rusqlite::Params) -> Result<Option<Job>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
-        let mut stmt = conn.prepare(sql).map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+    fn query_job(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Option<Job>, JobStoreError> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let job = stmt
             .query_row(params, map_job)
             .optional()
@@ -271,7 +290,11 @@ impl<'a> JobStore<'a> {
         self.required_job(job_id)
     }
 
-    pub fn set_blocking_reason(&self, job_id: &str, reason: Option<BlockingReason>) -> Result<Job, JobStoreError> {
+    pub fn set_blocking_reason(
+        &self,
+        job_id: &str,
+        reason: Option<BlockingReason>,
+    ) -> Result<Job, JobStoreError> {
         let _ = self.required_job(job_id)?;
         let ts = self.now();
         self.db
@@ -295,8 +318,13 @@ impl<'a> JobStore<'a> {
         let sql = format!(
             "UPDATE ad_removal_jobs SET blocking_reason = NULL, updated_at = ? WHERE blocking_reason IN ({placeholders})"
         );
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
-        let mut stmt = conn.prepare(&sql).map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         stmt.execute(rusqlite::params_from_iter(values.iter()))
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         Ok(())
@@ -304,7 +332,10 @@ impl<'a> JobStore<'a> {
 
     pub fn next_runnable_job(&self) -> Result<Option<Job>, JobStoreError> {
         let now = self.now();
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT j.id, j.episode_id, j.podcast_id, j.stage, j.blocking_reason, j.attempt_count, j.enrolled_at, j.updated_at, j.failed_stage, j.last_error_code, j.last_error_message, j.retry_eligible, j.next_retry_at, j.audio_relative_path, j.audio_sha256, j.audio_byte_count, j.downloaded_at, j.download_resume_relative_path, j.transcriber_version, j.transcribed_at, j.classification_run_id, j.classifier_version, j.prompt_version, j.classifier_quantization, j.classified_at FROM ad_removal_jobs j JOIN episodes e ON e.id = j.episode_id LEFT JOIN episode_state s ON s.episode_id = e.id WHERE j.blocking_reason IS NULL AND j.stage IN ('queued','downloading','downloaded','transcribing','classifying') AND (j.next_retry_at IS NULL OR j.next_retry_at <= ?) AND s.played_at IS NULL AND s.archived_at IS NULL ORDER BY e.published_at ASC, e.id ASC LIMIT 1")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -313,9 +344,17 @@ impl<'a> JobStore<'a> {
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
     }
 
-    pub fn record_failure(&self, job_id: &str, error_code: &str, message: &str) -> Result<Job, JobStoreError> {
+    pub fn record_failure(
+        &self,
+        job_id: &str,
+        error_code: &str,
+        message: &str,
+    ) -> Result<Job, JobStoreError> {
         let current = self.required_job(job_id)?;
-        if matches!(current.stage, JobStage::Failed | JobStage::Cancelled | JobStage::Ready) {
+        if matches!(
+            current.stage,
+            JobStage::Failed | JobStage::Cancelled | JobStage::Ready
+        ) {
             return Err(JobStoreError::InvalidTransition);
         }
         let attempt = current.attempt_count + 1;
@@ -326,8 +365,16 @@ impl<'a> JobStore<'a> {
         } else {
             (self.retry_backoff)(attempt)
         };
-        let next_retry = if exhausted { None } else { Some(timestamp + backoff) };
-        let stage = if exhausted { JobStage::Failed } else { current.stage };
+        let next_retry = if exhausted {
+            None
+        } else {
+            Some(timestamp + backoff)
+        };
+        let stage = if exhausted {
+            JobStage::Failed
+        } else {
+            current.stage
+        };
         self.db
             .execute(
                 "UPDATE ad_removal_jobs SET stage = ?, failed_stage = ?, attempt_count = ?, last_error_code = ?, last_error_message = ?, retry_eligible = ?, next_retry_at = ?, blocking_reason = NULL, updated_at = ? WHERE id = ?",
@@ -349,7 +396,10 @@ impl<'a> JobStore<'a> {
 
     pub fn retry(&self, job_id: &str) -> Result<Job, JobStoreError> {
         let current = self.required_job(job_id)?;
-        let resume = current.failed_stage.filter(|_| current.stage == JobStage::Failed).ok_or(JobStoreError::InvalidTransition)?;
+        let resume = current
+            .failed_stage
+            .filter(|_| current.stage == JobStage::Failed)
+            .ok_or(JobStoreError::InvalidTransition)?;
         let ts = self.now();
         self.db
             .execute(
@@ -360,13 +410,22 @@ impl<'a> JobStore<'a> {
         self.required_job(job_id)
     }
 
-    pub fn record_audio_artifact(&self, job_id: &str, artifact: &AudioArtifact) -> Result<Job, JobStoreError> {
+    pub fn record_audio_artifact(
+        &self,
+        job_id: &str,
+        artifact: &AudioArtifact,
+    ) -> Result<Job, JobStoreError> {
         if !valid_artifact_path(&artifact.relative_path)
             || artifact.byte_count < 0
             || artifact.sha256.len() != 64
-            || !artifact.sha256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+            || !artifact
+                .sha256
+                .chars()
+                .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
         {
-            return Err(JobStoreError::CorruptState("invalid audio artifact metadata".into()));
+            return Err(JobStoreError::CorruptState(
+                "invalid audio artifact metadata".into(),
+            ));
         }
         let job = self.required_job(job_id)?;
         if job.stage == JobStage::Cancelled {
@@ -385,7 +444,11 @@ impl<'a> JobStore<'a> {
         self.required_job(job_id)
     }
 
-    pub fn reserve_daily_classification_slot(&self, episode_id: i64, limit: i64) -> Result<bool, JobStoreError> {
+    pub fn reserve_daily_classification_slot(
+        &self,
+        episode_id: i64,
+        limit: i64,
+    ) -> Result<bool, JobStoreError> {
         if limit <= 0 {
             return Ok(false);
         }
@@ -421,7 +484,10 @@ impl<'a> JobStore<'a> {
     }
 
     pub fn skip_ranges(&self, episode_id: i64) -> Result<Vec<AdSkipRange>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, start_segment_id, end_segment_id, start_time, end_time, confidence, reason, classifier_version, prompt_version, created_at, disabled FROM ad_skip_ranges WHERE episode_id = ? ORDER BY start_time")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -446,7 +512,10 @@ impl<'a> JobStore<'a> {
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
     }
 
-    pub fn cleanup_archived_episode_metadata(conn: &Connection, podcast_id: i64) -> Result<(), rusqlite::Error> {
+    pub fn cleanup_archived_episode_metadata(
+        conn: &Connection,
+        podcast_id: i64,
+    ) -> Result<(), rusqlite::Error> {
         conn.execute(
             "DELETE FROM ad_removal_jobs WHERE episode_id IN (SELECT episode_id FROM episode_state WHERE archived_at IS NOT NULL) AND podcast_id = ?",
             params![podcast_id],
@@ -455,7 +524,10 @@ impl<'a> JobStore<'a> {
     }
 
     /// Keep the two newest episodes visible. Archive the rest of a new subscribe.
-    pub fn archive_except_newest_two(conn: &Connection, podcast_id: i64) -> Result<(), rusqlite::Error> {
+    pub fn archive_except_newest_two(
+        conn: &Connection,
+        podcast_id: i64,
+    ) -> Result<(), rusqlite::Error> {
         let ts = crate::db::now_unix();
         conn.execute(
             "INSERT INTO episode_state (episode_id, archived_at, updated_at) SELECT id, ?, ? FROM episodes WHERE podcast_id = ? ORDER BY published_at DESC, id DESC LIMIT -1 OFFSET 2 ON CONFLICT (episode_id) DO UPDATE SET archived_at = excluded.archived_at, updated_at = excluded.updated_at",
@@ -472,7 +544,11 @@ impl<'a> JobStore<'a> {
         self.transition(job_id, JobStage::Cancelled)
     }
 
-    pub fn record_download_resume_path(&self, job_id: &str, relative_path: &str) -> Result<Job, JobStoreError> {
+    pub fn record_download_resume_path(
+        &self,
+        job_id: &str,
+        relative_path: &str,
+    ) -> Result<Job, JobStoreError> {
         if !valid_artifact_path(relative_path) || !relative_path.starts_with("resume/") {
             return Err(JobStoreError::CorruptState("invalid resume path".into()));
         }
@@ -515,8 +591,14 @@ impl<'a> JobStore<'a> {
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
     }
 
-    pub fn transcript_segments(&self, episode_id: i64) -> Result<Vec<TranscriptSegment>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+    pub fn transcript_segments(
+        &self,
+        episode_id: i64,
+    ) -> Result<Vec<TranscriptSegment>, JobStoreError> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT segment_id, segment_index, language, start_time, end_time, text FROM ad_transcript_segments WHERE episode_id = ? ORDER BY segment_index")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -558,7 +640,11 @@ impl<'a> JobStore<'a> {
         self.required_job(job_id)
     }
 
-    pub fn replace_skip_ranges(&self, episode_id: i64, ranges: &[AdSkipRange]) -> Result<(), JobStoreError> {
+    pub fn replace_skip_ranges(
+        &self,
+        episode_id: i64,
+        ranges: &[AdSkipRange],
+    ) -> Result<(), JobStoreError> {
         self.db
             .with_transaction(|tx| {
                 tx.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", params![episode_id])?;
@@ -644,8 +730,14 @@ impl<'a> JobStore<'a> {
         self.required_job(job_id)
     }
 
-    pub fn classification_evidence(&self, episode_id: i64) -> Result<Vec<ClassificationEvidence>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+    pub fn classification_evidence(
+        &self,
+        episode_id: i64,
+    ) -> Result<Vec<ClassificationEvidence>, JobStoreError> {
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT run_id, window_index, segment_ids_json, correction_ids_json, prompt, raw_output, schema_valid, validation_error, labels_json, model_id, model_revision, quantization, prompt_version, max_context_tokens, max_output_tokens, temperature, top_p, created_at FROM ad_classification_windows WHERE episode_id = ? ORDER BY window_index")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -654,8 +746,10 @@ impl<'a> JobStore<'a> {
                 Ok(ClassificationEvidence {
                     run_id: row.get(0)?,
                     window_index: row.get(1)?,
-                    segment_ids: serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default(),
-                    correction_ids: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                    segment_ids: serde_json::from_str(&row.get::<_, String>(2)?)
+                        .unwrap_or_default(),
+                    correction_ids: serde_json::from_str(&row.get::<_, String>(3)?)
+                        .unwrap_or_default(),
                     prompt: row.get(4)?,
                     raw_output: row.get(5)?,
                     schema_valid: row.get::<_, i64>(6)? != 0,
@@ -717,7 +811,10 @@ impl<'a> JobStore<'a> {
     }
 
     pub fn corrections(&self, podcast_id: i64) -> Result<Vec<AdCorrection>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, podcast_id, source_episode_id, transcript_window, classification_context, classifier_version, prompt_version, created_at, active FROM ad_corrections WHERE podcast_id = ? AND active = 1 ORDER BY created_at DESC")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -740,7 +837,11 @@ impl<'a> JobStore<'a> {
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
     }
 
-    pub fn undo_skip(&self, episode_id: i64, range_id: &str) -> Result<UndoSkipResult, JobStoreError> {
+    pub fn undo_skip(
+        &self,
+        episode_id: i64,
+        range_id: &str,
+    ) -> Result<UndoSkipResult, JobStoreError> {
         let ranges = self.skip_ranges(episode_id)?;
         let range = ranges
             .iter()
@@ -749,7 +850,10 @@ impl<'a> JobStore<'a> {
         let seek = range.start_time;
         let podcast_id: i64 = self
             .db
-            .scalar_i64("SELECT podcast_id FROM episodes WHERE id = ?", params![episode_id])
+            .scalar_i64(
+                "SELECT podcast_id FROM episodes WHERE id = ?",
+                params![episode_id],
+            )
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?
             .ok_or(JobStoreError::EpisodeNotFound)?;
         let segments = self.transcript_segments(episode_id)?;
@@ -775,7 +879,11 @@ impl<'a> JobStore<'a> {
         })
     }
 
-    pub fn replace_show_notes(&self, episode_id: i64, notes: &[ShowNoteRecord]) -> Result<(), JobStoreError> {
+    pub fn replace_show_notes(
+        &self,
+        episode_id: i64,
+        notes: &[ShowNoteRecord],
+    ) -> Result<(), JobStoreError> {
         if notes.len() > crate::classify::SHOW_NOTES_CHAPTER_BASELINE {
             return Err(JobStoreError::CorruptState("too many chapters".into()));
         }
@@ -804,7 +912,10 @@ impl<'a> JobStore<'a> {
     }
 
     pub fn show_notes(&self, episode_id: i64) -> Result<Vec<ShowNoteRecord>, JobStoreError> {
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT segment_id, start_time, title, summary, model_id, prompt_version, created_at FROM episode_show_notes WHERE episode_id = ? ORDER BY chapter_index")
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -828,10 +939,22 @@ impl<'a> JobStore<'a> {
     pub fn delete_episode_ad_data(&self, episode_id: i64) -> Result<(), JobStoreError> {
         self.db
             .with_transaction(|tx| {
-                tx.execute("DELETE FROM ad_skip_ranges WHERE episode_id = ?", params![episode_id])?;
-                tx.execute("DELETE FROM ad_transcript_segments WHERE episode_id = ?", params![episode_id])?;
-                tx.execute("DELETE FROM ad_classification_windows WHERE episode_id = ?", params![episode_id])?;
-                tx.execute("DELETE FROM ad_removal_jobs WHERE episode_id = ?", params![episode_id])?;
+                tx.execute(
+                    "DELETE FROM ad_skip_ranges WHERE episode_id = ?",
+                    params![episode_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM ad_transcript_segments WHERE episode_id = ?",
+                    params![episode_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM ad_classification_windows WHERE episode_id = ?",
+                    params![episode_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM ad_removal_jobs WHERE episode_id = ?",
+                    params![episode_id],
+                )?;
                 Ok(())
             })
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))
@@ -839,14 +962,20 @@ impl<'a> JobStore<'a> {
 
     pub fn delete_podcast_corrections(&self, podcast_id: i64) -> Result<(), JobStoreError> {
         self.db
-            .execute("DELETE FROM ad_corrections WHERE podcast_id = ?", params![podcast_id])
+            .execute(
+                "DELETE FROM ad_corrections WHERE podcast_id = ?",
+                params![podcast_id],
+            )
             .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         Ok(())
     }
 
     pub fn reset_notes_transcript_jobs(&self) -> Result<u32, JobStoreError> {
         let rows: Vec<(String, i64, Option<String>)> = {
-            let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            let conn = self
+                .db
+                .lock()
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
                     "SELECT j.id, j.episode_id, j.audio_relative_path FROM ad_removal_jobs j
@@ -896,7 +1025,10 @@ impl<'a> JobStore<'a> {
 
     pub fn recover_played_cleanup(&self) -> Result<(), JobStoreError> {
         let ids: Vec<i64> = {
-            let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+            let conn = self
+                .db
+                .lock()
+                .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
             let mut stmt = conn
                 .prepare("SELECT j.episode_id FROM ad_removal_jobs j JOIN episode_state s ON s.episode_id = j.episode_id WHERE j.stage = 'cancelled' AND s.played_at IS NOT NULL")
                 .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
@@ -921,7 +1053,10 @@ impl<'a> JobStore<'a> {
 
     pub fn job_retry_wait(&self) -> Result<Option<i64>, JobStoreError> {
         let now = self.now();
-        let conn = self.db.lock().map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
+        let conn = self
+            .db
+            .lock()
+            .map_err(|e| JobStoreError::CorruptState(e.to_string()))?;
         let next: Option<i64> = conn
             .query_row(
                 "SELECT MIN(next_retry_at) FROM ad_removal_jobs WHERE next_retry_at IS NOT NULL AND next_retry_at > ?",
@@ -994,7 +1129,10 @@ pub struct ResourceConditions {
     pub serious_thermal_pressure: bool,
 }
 
-pub fn blocking_reason_for_stage(stage: JobStage, conditions: ResourceConditions) -> Option<BlockingReason> {
+pub fn blocking_reason_for_stage(
+    stage: JobStage,
+    conditions: ResourceConditions,
+) -> Option<BlockingReason> {
     if stage != JobStage::Transcribing {
         return None;
     }
@@ -1031,7 +1169,11 @@ fn surrounding_transcript(segments: &[TranscriptSegment], range: &AdSkipRange) -
         parts.push(text);
     }
     if parts.is_empty() {
-        segments.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join(" ")
+        segments
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         parts.join(" ")
     }
@@ -1084,10 +1226,21 @@ fn map_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
 fn allowed(from: JobStage, to: JobStage) -> bool {
     match from {
         JobStage::Queued => matches!(to, JobStage::Downloading | JobStage::Cancelled),
-        JobStage::Downloading => matches!(to, JobStage::Downloaded | JobStage::Failed | JobStage::Cancelled),
-        JobStage::Downloaded => matches!(to, JobStage::Transcribing | JobStage::Failed | JobStage::Cancelled),
-        JobStage::Transcribing => matches!(to, JobStage::Classifying | JobStage::Failed | JobStage::Cancelled),
-        JobStage::Classifying => matches!(to, JobStage::Ready | JobStage::Failed | JobStage::Cancelled),
+        JobStage::Downloading => matches!(
+            to,
+            JobStage::Downloaded | JobStage::Failed | JobStage::Cancelled
+        ),
+        JobStage::Downloaded => matches!(
+            to,
+            JobStage::Transcribing | JobStage::Failed | JobStage::Cancelled
+        ),
+        JobStage::Transcribing => matches!(
+            to,
+            JobStage::Classifying | JobStage::Failed | JobStage::Cancelled
+        ),
+        JobStage::Classifying => {
+            matches!(to, JobStage::Ready | JobStage::Failed | JobStage::Cancelled)
+        }
         JobStage::Ready => matches!(to, JobStage::Cancelled),
         JobStage::Failed => !matches!(to, JobStage::Ready),
         JobStage::Cancelled => false,
@@ -1098,7 +1251,11 @@ pub fn valid_artifact_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains("..")
-        && (path.starts_with("episodes/") || path.starts_with("resume/") || path.starts_with("local/") || path.starts_with("published/"))
+        && (path.starts_with("episodes/")
+            || path.starts_with("resume/")
+            || path.starts_with("local/")
+            || path.starts_with("published/")
+            || path.starts_with("voice/"))
 }
 
 fn default_backoff(attempt: i32) -> i64 {
@@ -1112,7 +1269,10 @@ fn unbounded_backoff(attempt: i32) -> i64 {
 
 fn local_day_start(now: i64) -> i64 {
     use chrono::{Local, TimeZone};
-    let dt = Local.timestamp_opt(now, 0).single().unwrap_or_else(Local::now);
+    let dt = Local
+        .timestamp_opt(now, 0)
+        .single()
+        .unwrap_or_else(Local::now);
     dt.date_naive()
         .and_hms_opt(0, 0, 0)
         .and_then(|naive| naive.and_local_timezone(Local).single())

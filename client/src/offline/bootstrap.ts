@@ -1,3 +1,4 @@
+import { flushVoiceDrafts } from "../voice";
 import { backendBase, offlineEnabled, synchronize } from "./client";
 import { prefetch, sweepStaleDownloads } from "./downloads";
 
@@ -20,6 +21,7 @@ export async function bootstrapOffline(): Promise<void> {
     }
     void synchronize()
       .then(() => {
+        void flushVoiceDrafts().catch(() => {});
         void prefetch().catch(() => {});
         if (retryTimer) window.clearTimeout(retryTimer);
         retryTimer = null;

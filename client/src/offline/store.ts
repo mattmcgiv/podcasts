@@ -50,11 +50,16 @@ export function visibleNotifications(state: LocalState): ProcessingNotification[
   return snapshotNotifications(state.snapshot).filter(item => item.id > (Math.max(state.notificationsClearedThrough ?? 0, Number(state.snapshot?.settings.notifications_cleared_through ?? 0), ...state.outbox.filter(o => o.entity === "settings" && o.field === "notifications_cleared_through").map(o => Number(o.value)))));
 }
 
+const DATABASE_VERSION = 2;
+
 export function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DATABASE, 1);
+    const request = indexedDB.open(DATABASE, DATABASE_VERSION);
     request.onupgradeneeded = () => {
-      for (const name of ["meta", "chunks", "downloads"]) request.result.createObjectStore(name);
+      const db = request.result;
+      for (const name of ["meta", "chunks", "downloads", "voice"]) {
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+      }
     };
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
