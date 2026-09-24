@@ -613,7 +613,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             };
             require_capacity(backend, reserve)?;
             if video {
-                render_video(source, &rendered, &timeline)?;
+                render_video(source, &rendered, &timeline, duration)?;
             } else {
                 render(source, &rendered, &timeline)?;
             }
@@ -624,6 +624,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             .map(|s| s.original_end - s.original_start)
             .sum();
         if (actual_duration - expected).abs() > PROCESSED_DURATION_TOLERANCE_SECS {
+            let _ = fs::remove_file(&rendered);
             return Err(failure("processed duration mismatch"));
         }
         let (hash, bytes) = ArtifactStore::hash_file(&rendered).map_err(failure)?;
@@ -1829,7 +1830,40 @@ pub fn video_filter_graph(spans: &[Interval]) -> String {
     filters
 }
 
-fn render_video(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
+fn timeline_is_identity(spans: &[Interval], duration: f64) -> bool {
+    match spans {
+        [span] => {
+            span.original_start <= PROCESSED_DURATION_TOLERANCE_SECS
+                && (span.original_end - duration).abs() <= PROCESSED_DURATION_TOLERANCE_SECS
+        }
+        _ => false,
+    }
+}
+
+fn remux_video(source: &Path, dest: &Path) -> Result<(), Error> {
+    let temp = dest.with_extension("partial.mp4");
+    let status = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-y", "-i"])
+        .arg(source)
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(&temp)
+        .status()
+        .map_err(failure)?;
+    if !status.success() {
+        return Err(failure("video rendering failed"));
+    }
+    fs::rename(temp, dest).map_err(failure)
+}
+
+fn render_video(
+    source: &Path,
+    dest: &Path,
+    spans: &[Interval],
+    duration: f64,
+) -> Result<(), Error> {
+    if timeline_is_identity(spans, duration) {
+        return remux_video(source, dest);
+    }
     let filters = video_filter_graph(spans);
     let script = dest.with_extension("filters");
     fs::write(&script, &filters).map_err(failure)?;
@@ -2954,12 +2988,81 @@ mod download_tests {
                 original_end: 1.25,
                 processed_start: 0.0,
             }],
+            2.0,
         )
         .unwrap();
         let (width, height) = video_dimensions(&dest).unwrap();
         assert_eq!((width, height), (1280, 720));
         let duration = audio_duration(&dest).unwrap();
         assert!((duration - 1.0).abs() < 0.25, "{duration}");
+    }
+
+    #[test]
+    fn timeline_is_identity_only_for_a_single_full_span() {
+        let full = Interval {
+            original_start: 0.0,
+            original_end: 10.0,
+            processed_start: 0.0,
+        };
+        assert!(timeline_is_identity(&[full.clone()], 10.0));
+        assert!(!timeline_is_identity(
+            &[Interval {
+                original_start: 0.0,
+                original_end: 8.0,
+                processed_start: 0.0,
+            }],
+            10.0
+        ));
+        assert!(!timeline_is_identity(&[full.clone(), full], 10.0));
+    }
+
+    #[test]
+    fn render_video_remuxes_when_the_timeline_keeps_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=1280x720:d=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let dest = dir.path().join("copy.mp4");
+        render_video(
+            &source,
+            &dest,
+            &[Interval {
+                original_start: 0.0,
+                original_end: 2.0,
+                processed_start: 0.0,
+            }],
+            2.0,
+        )
+        .unwrap();
+        assert!(!dest.with_extension("filters").is_file());
+        let (width, height) = video_dimensions(&dest).unwrap();
+        assert_eq!((width, height), (1280, 720));
+        let duration = audio_duration(&dest).unwrap();
+        assert!((duration - 2.0).abs() < 0.25, "{duration}");
     }
 
     #[test]
