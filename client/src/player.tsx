@@ -10,6 +10,7 @@ import {
 } from "react";
 import { Api } from "./api";
 import { offlineEnabled, beginPlaybackSession, endPlaybackSession, enqueue, syncBeforePlayback } from "./offline/client";
+import { logDiagnostic } from "./offline/diagnostics";
 import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
@@ -24,6 +25,11 @@ import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeAdMarker, EpisodeItem, EpisodeShowNote, PlayContext } from "./types";
 import { isVideoMedia } from "./youtube";
+
+function rejectionDetail(id: number, error: unknown): string {
+  const cause = error instanceof Error || error instanceof DOMException ? `${error.name}: ${error.message}` : String(error);
+  return `episode_id=${id} error=${cause}`;
+}
 
 export type PlayerEpisode = EpisodeItem & {
   notes_html?: string;
@@ -396,6 +402,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void a.play().catch((error: unknown) => {
         if (request !== playRequestRef.current) return;
         if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
+        else logDiagnostic("playback-rejected", rejectionDetail(item.id, error));
         setPlaying(false);
         setInitializing(false);
       });
@@ -485,7 +492,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.playbackRate = speedRef.current;
     });
     a.addEventListener("ended", () => void endedRef.current());
-    a.addEventListener("error", () => setInitializing(false));
+    a.addEventListener("error", () => {
+      setInitializing(false);
+      logDiagnostic("playback-error", `episode_id=${currentRef.current?.id ?? "none"} video=${videoActiveRef.current}`);
+    });
     a.addEventListener("cast", ((e: Event) => {
       const detail = (e as CustomEvent<CastInfo>).detail;
       if (detail) setCast(detail);
@@ -520,6 +530,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (engine.src !== item.audio_url) engine.src = item.audio_url;
     void engine.play().catch((error: unknown) => {
       if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
+      else logDiagnostic("playback-rejected", rejectionDetail(item.id, error));
       setPlaying(false);
       setInitializing(false);
     });
@@ -632,8 +643,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const cur = currentRef.current;
     const request = ++playRequestRef.current;
     const play = () => a.play().catch((error: unknown) => {
-      if (request === playRequestRef.current && (error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") {
+      if (request !== playRequestRef.current) return;
+      if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") {
         gestureRetryRef.current = cur.id;
+      } else {
+        logDiagnostic("playback-rejected", rejectionDetail(cur.id, error));
       }
     });
     if (a.paused && gestureRetryRef.current === cur.id) {

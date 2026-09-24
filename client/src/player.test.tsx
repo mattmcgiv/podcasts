@@ -15,6 +15,7 @@ import {
 import { FakeAudio } from "./test/fakeAudio";
 import type { ArtifactManifest, Snapshot } from "./offline/store";
 import { allDownloads, readRecord, updateState, writeRecord } from "./offline/store";
+import { readDiagnostics } from "./offline/diagnostics";
 import * as store from "./offline/store";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import type { EpisodeItem } from "./types";
@@ -968,6 +969,40 @@ describe("PlayerProvider", () => {
     const { user } = await setup();
     await user.click(screen.getByText("play1"));
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+  });
+
+  it("logs engine errors to diagnostics", async () => {
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+    act(() => {
+      FakeAudio.last().dispatchEvent(new Event("error"));
+    });
+    expect(readDiagnostics()).toContainEqual(
+      expect.objectContaining({ kind: "playback-error", detail: "episode_id=1 video=false" }),
+    );
+  });
+
+  it("logs rejected play() calls to diagnostics", async () => {
+    FakeAudio.failNextPlay = true;
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+    expect(readDiagnostics()).toContainEqual(
+      expect.objectContaining({ kind: "playback-rejected", detail: "episode_id=1 error=Error: play failed" }),
+    );
+  });
+
+  it("logs non-error play() rejections to diagnostics", async () => {
+    const rejection = Promise.reject("interrupted");
+    rejection.catch(() => {});
+    FakeAudio.pendingPlay = rejection;
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+    expect(readDiagnostics()).toContainEqual(
+      expect.objectContaining({ kind: "playback-rejected", detail: "episode_id=1 error=interrupted" }),
+    );
   });
 
   it("shows a show-notes error that retry can clear", async () => {

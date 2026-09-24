@@ -1,5 +1,6 @@
 import { emitEpisodesChanged } from "../events";
 import { applyThemePreference, currentThemePreference, THEME_PREFERENCE_KEY } from "../theme";
+import { logDiagnostic, readDiagnostics } from "./diagnostics";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import type { EpisodeDetail, FeedbackStatus, ProcessingNotification, RefreshStatus, Settings } from "../types";
 import { cleanupPlayedDownload, prefetch, sweepStaleDownloads } from "./downloads";
@@ -284,6 +285,9 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
     try { await sweepStaleDownloads(); } catch { /* Next sync retries cleanup. */ }
   } catch (error) {
     lastError = error instanceof Error ? friendlySyncError(error.message) : MAC_OFFLINE_MESSAGE;
+    // Sync retries while the Mac stays down; keep one entry per distinct failure.
+    const logged = readDiagnostics().filter(entry => entry.kind === "sync-error").at(-1);
+    if (logged?.detail !== lastError) logDiagnostic("sync-error", lastError);
     throw error;
   }
 }

@@ -1,5 +1,6 @@
 import { emitEpisodesChanged } from "../events";
 import { applyOverlay, backendBase, state } from "./client";
+import { logDiagnostic } from "./diagnostics";
 import { currentDownloadProgress, setDownloadProgress } from "./progress";
 import * as store from "./store";
 import type { ArtifactManifest, Download, LocalState, Preferences } from "./store";
@@ -68,7 +69,11 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
 
 export function downloadEpisode(id: number): Promise<void> {
   if (running) return running.then(() => downloadEpisode(id));
-  running = download(id).catch(caught => { error = caught instanceof Error ? caught.message : "Download interrupted."; throw caught; })
+  running = download(id).catch(caught => {
+    error = caught instanceof Error ? caught.message : "Download interrupted.";
+    logDiagnostic("download-error", `episode_id=${id} error=${error}`);
+    throw caught;
+  })
     .finally(() => { running = null; setDownloadProgress(null); changed(); });
   return running;
 }

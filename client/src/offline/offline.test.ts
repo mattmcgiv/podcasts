@@ -8,6 +8,7 @@ import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOver
 import { cleanupPlayedDownload, downloadEpisode, downloadError, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
+import { readDiagnostics, readMediaDiagnostics } from "./diagnostics";
 import type { EpisodeDetail } from "../types";
 
 const hash = "a".repeat(64);
@@ -444,6 +445,57 @@ describe("verified downloads and local Range playback", () => {
     expect(response.headers.get("content-length")).toBe("5");
     expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([3, 4, 5, 6, 7]);
   });
+  it("caps an open-ended video range to one bounded response", async () => {
+    const videoHash = "d".repeat(64);
+    const chunkSize = 1024 ** 2;
+    const chunkCount = 10;
+    const chunks = Array.from({ length: chunkCount }, (_, index) => index.toString(16).padStart(64, "0"));
+    await writeRecord("meta", `manifest:${videoHash}`, { ...manifest, episode_id: 9, hash: videoHash, bytes: chunkSize * chunkCount, chunk_size: chunkSize, chunks, media: "video" });
+    await writeRecord("downloads", videoHash, { hash: videoHash, episode: 9, bytes: chunkSize * chunkCount, complete: true, touched: 0 });
+    for (let index = 0; index < chunkCount; index++) {
+      const chunk = new Uint8Array(chunkSize);
+      chunk.fill(index);
+      await writeRecord("chunks", `${videoHash}:${index}`, chunk.buffer);
+    }
+    const first = await localMedia(new Request(`https://pods.mcgiv.dev/_media/${videoHash}.mp4`, { headers: { Range: "bytes=0-" } }));
+    expect(first.status).toBe(206);
+    expect(first.headers.get("content-range")).toBe(`bytes 0-8388607/${chunkSize * chunkCount}`);
+    expect(first.headers.get("content-length")).toBe(String(8 * 1024 ** 2));
+    const firstBytes = new Uint8Array(await first.arrayBuffer());
+    expect(firstBytes).toHaveLength(8 * 1024 ** 2);
+    expect(firstBytes[0]).toBe(0);
+    expect(firstBytes[chunkSize]).toBe(1);
+    expect(firstBytes[firstBytes.length - 1]).toBe(7);
+    const second = await localMedia(new Request(`https://pods.mcgiv.dev/_media/${videoHash}.mp4`, { headers: { Range: "bytes=8388608-" } }));
+    expect(second.headers.get("content-range")).toBe(`bytes 8388608-${chunkSize * chunkCount - 1}/${chunkSize * chunkCount}`);
+    expect(new Uint8Array(await second.arrayBuffer())[0]).toBe(8);
+    const capped = (await readMediaDiagnostics()).filter(entry => entry.kind === "media-capped");
+    expect(capped).toHaveLength(1);
+    expect(capped[0].detail).toContain(`bytes 0-8388607/${chunkSize * chunkCount}`);
+  });
+  it("answers a range-less large file with a capped partial response", async () => {
+    const videoHash = "e".repeat(64);
+    const chunkSize = 1024 ** 2;
+    await writeRecord("meta", `manifest:${videoHash}`, { ...manifest, episode_id: 9, hash: videoHash, bytes: chunkSize * 9, chunk_size: chunkSize, chunks: Array.from({ length: 9 }, (_, i) => i.toString()), media: "video" });
+    await writeRecord("downloads", videoHash, { hash: videoHash, episode: 9, bytes: chunkSize * 9, complete: true, touched: 0 });
+    for (let index = 0; index < 9; index++) await writeRecord("chunks", `${videoHash}:${index}`, new ArrayBuffer(chunkSize));
+    const response = await localMedia(new Request(`https://pods.mcgiv.dev/_media/${videoHash}.mp4`));
+    expect(response.status).toBe(206);
+    expect(response.headers.get("content-range")).toBe(`bytes 0-8388607/${chunkSize * 9}`);
+    expect(response.headers.get("content-length")).toBe(String(8 * 1024 ** 2));
+  });
+  it("logs one entry per distinct sync failure", async () => {
+    await seed();
+    await expect(synchronize()).rejects.toThrow();
+    await expect(synchronize()).rejects.toThrow();
+    expect(readDiagnostics().filter(entry => entry.kind === "sync-error")).toHaveLength(1);
+    vi.mocked(fetch).mockImplementation(async url => {
+      if (String(url).endsWith("/auth/status")) return new Response("{}", { status: 200 });
+      return new Response("{}", { status: 200 });
+    });
+    await expect(synchronize()).rejects.toThrow("Unsupported Mac library format");
+    expect(readDiagnostics().filter(entry => entry.kind === "sync-error")).toHaveLength(2);
+  });
   it("detects eviction, prevents false ready state, and protects the playing file", async () => {
     await prepareAudio(); await downloadEpisode(1);
     expect(await readRecord("meta", `manifest:${hash}`)).toBeTruthy();
@@ -467,6 +519,7 @@ describe("verified downloads and local Range playback", () => {
     await expect(downloadEpisode(1)).rejects.toThrow("verification");
     expect((await allDownloads())[0].complete).toBe(false);
     expect(downloadError()).toContain("verification");
+    expect(readDiagnostics().filter(entry => entry.kind === "download-error")).toHaveLength(1);
     vi.mocked(fetch).mockResolvedValue(new Response("", { status: 401 }));
     await expect(downloadEpisode(1)).rejects.toThrow("Mac unavailable");
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });

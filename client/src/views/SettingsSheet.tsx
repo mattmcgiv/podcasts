@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { OfflineSettings } from "../offline/Controls";
 import { offlineEnabled, enqueue } from "../offline/client";
+import { clearDiagnostics, clearMediaDiagnostics, formatDiagnostics, readDiagnostics, readMediaDiagnostics } from "../offline/diagnostics";
 import { Api } from "../api";
 import { emitEpisodesChanged } from "../events";
 import { refreshFeeds } from "../refreshFeeds";
@@ -55,6 +56,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("pods-theme-changed", update);
   }, []);
   const [refreshing, setRefreshing] = useState(false);
+  const [diagnosticCount, setDiagnosticCount] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -80,6 +82,9 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
       .catch(() => {
         // Older/native-less runtimes may not expose car Bluetooth enrollment.
       });
+    void readMediaDiagnostics().then((media) => {
+      if (active) setDiagnosticCount(readDiagnostics().length + media.length);
+    });
     return () => {
       active = false;
     };
@@ -269,6 +274,36 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
     await run("Forgetting car Bluetooth", async () => {
       setCarBluetooth(await Api.unenrollCarBluetooth());
       return "Forgot remembered car Bluetooth";
+    });
+  }
+
+  async function copyDiagnostics() {
+    await run("Copying diagnostics", async () => {
+      const page = readDiagnostics();
+      const media = await readMediaDiagnostics();
+      const text = formatDiagnostics(page, media);
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand("copy");
+        area.remove();
+        if (!copied) throw new Error("Copy was blocked. Take a screenshot of Settings instead.");
+      }
+      const count = page.length + media.length;
+      return `Copied ${count} diagnostic ${count === 1 ? "entry" : "entries"}`;
+    });
+  }
+
+  async function clearDiagnosticsLog() {
+    await run("Clearing diagnostics", async () => {
+      clearDiagnostics();
+      await clearMediaDiagnostics();
+      setDiagnosticCount(0);
+      return "Cleared diagnostics on this device";
     });
   }
 
@@ -604,6 +639,24 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           </div>
 
           {refreshStatus && <p className="muted">{formatRefreshStatus(refreshStatus)}</p>}
+        </section>
+
+        <section className="settings-section" aria-labelledby="troubleshooting-title">
+          <h2 className="section-title" id="troubleshooting-title">Troubleshooting</h2>
+          <p className="settings-detail">Playback and download events on this device are kept for troubleshooting.</p>
+          <div className="settings-action-list">
+            <button className="ghost-btn" onClick={() => void copyDiagnostics()}>
+              Copy diagnostics
+            </button>
+            <button className="ghost-btn" onClick={() => void clearDiagnosticsLog()}>
+              Clear diagnostics
+            </button>
+          </div>
+          {diagnosticCount != null && (
+            <p className="settings-detail" role="status">
+              {diagnosticCount} diagnostic {diagnosticCount === 1 ? "entry" : "entries"} kept on this device.
+            </p>
+          )}
         </section>
 
         {status && <p className="status">{status}</p>}

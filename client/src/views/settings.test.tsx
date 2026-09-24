@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EPISODES_CHANGED_EVENT } from "../events";
 import { LOCAL_OMLX_MODEL } from "../lib";
+import { logDiagnostic, readDiagnostics } from "../offline/diagnostics";
 import { episode, HttpError, installApi } from "../test/mockApi";
 import { SettingsSheet } from "./SettingsSheet";
 
@@ -61,6 +62,70 @@ describe("SettingsSheet", () => {
 
     await user.click(screen.getByRole("button", { name: "Send feedback" }));
     expect(window.location.hash).toBe("#/feedback");
+  });
+
+  it("copies diagnostics to the clipboard", async () => {
+    installApi({});
+    logDiagnostic("sync-error", "Mac unavailable. Downloaded episodes still play.");
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    await screen.findByText("1 diagnostic entry kept on this device.");
+    await user.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+    await screen.findByText("Copied 1 diagnostic entry");
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(String(writeText.mock.calls[0][0])).toContain("[sync-error] Mac unavailable. Downloaded episodes still play.");
+  });
+
+  it("falls back to execCommand when the clipboard is denied", async () => {
+    installApi({});
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    document.execCommand = vi.fn().mockReturnValue(true);
+    try {
+      await user.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+      await screen.findByText("Copied 0 diagnostic entries");
+    } finally {
+      delete (document as { execCommand?: unknown }).execCommand;
+    }
+  });
+
+  it("reports when copying is blocked entirely", async () => {
+    installApi({});
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    document.execCommand = vi.fn().mockReturnValue(false);
+    try {
+      await user.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+      await screen.findByText("Copy was blocked. Take a screenshot of Settings instead.");
+    } finally {
+      delete (document as { execCommand?: unknown }).execCommand;
+    }
+  });
+
+  it("clears diagnostics on this device", async () => {
+    installApi({});
+    logDiagnostic("sync-error", "Mac unavailable. Downloaded episodes still play.");
+    const user = userEvent.setup();
+    render(<SettingsSheet onClose={() => {}} />);
+
+    await screen.findByText("1 diagnostic entry kept on this device.");
+    await user.click(screen.getByRole("button", { name: "Clear diagnostics" }));
+    await screen.findByText("Cleared diagnostics on this device");
+    expect(readDiagnostics()).toEqual([]);
+    expect(await screen.findByText("0 diagnostic entries kept on this device.")).toBeInTheDocument();
   });
 
   it("persists the selected appearance preference", async () => {
