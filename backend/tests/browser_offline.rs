@@ -1704,9 +1704,62 @@ fn pipeline_menu_queues_article_html_and_still_subscribes_feeds() {
     assert_eq!(unreachable_body["kind"], "podcast");
 }
 
+/// Shared extract stub: identical content and path in every test so parallel
+/// cases set the same PODS_EXTRACT_SCRIPT value. Behavior keys off the URL.
+fn extract_stub() {
+    let path = std::env::temp_dir().join("pods-extract-stub.py");
+    std::fs::write(
+        &path,
+        r#"import json, sys
+argv = sys.argv
+out = argv[argv.index("--out") + 1]
+url = argv[argv.index("--url") + 1]
+if "extract-fail" in url:
+    sys.stderr.write("article had no readable text\n")
+    sys.exit(2)
+if "extract-huge" in url:
+    payload = {"title": "Huge", "author": "", "published": "", "site": "",
+               "image_url": "", "url": url,
+               "sections": [{"heading": "", "paragraphs": ["word " * 12001]}]}
+else:
+    payload = {"title": "Real Title", "author": "Jane Doe", "published": "2026-09-24",
+               "site": "Example", "image_url": "https://example.com/lead.jpg", "url": url,
+               "sections": [{"heading": "Intro", "paragraphs": ["Hello world."]},
+                            {"heading": "More", "paragraphs": ["Second section."]}]}
+open(out, "w").write(json.dumps(payload))
+"#,
+    )
+    .unwrap();
+    std::env::set_var("PODS_EXTRACT_SCRIPT", &path);
+}
+
+fn job_string(backend: &Backend, column: &str, episode: i64) -> String {
+    backend
+        .db
+        .scalar_string(
+            &format!("SELECT {column} FROM browser_jobs WHERE episode_id=?"),
+            [episode],
+        )
+        .unwrap()
+        .unwrap()
+}
+
+fn job_int(backend: &Backend, column: &str, episode: i64) -> i64 {
+    backend
+        .db
+        .scalar_i64(
+            &format!("SELECT {column} FROM browser_jobs WHERE episode_id=?"),
+            [episode],
+        )
+        .unwrap()
+        .unwrap()
+}
+
 #[test]
-fn article_drain_creates_episode_and_parks_job_without_burning_attempts() {
-    let (backend, _temp, _) = article_fixture();
+fn article_fetch_resolves_metadata_and_waits_at_synthesizing() {
+    extract_stub();
+    let (backend, _temp, fetcher) = article_fixture();
+    fetcher.set("https://example.com/story", "<!DOCTYPE html><html><body><p>Hi</p></body></html>");
     pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
     assert!(pods_backend::local_worker::step(&backend).unwrap());
 
@@ -1727,36 +1780,28 @@ fn article_drain_creates_episode_and_parks_job_without_burning_attempts() {
         .unwrap()
         .unwrap();
     assert_eq!(audio_url, "article:https://example.com/story");
+    let title: String = backend
+        .db
+        .scalar_string("SELECT title FROM episodes WHERE id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(title, "Real Title");
+    let image: String = backend
+        .db
+        .scalar_string("SELECT image_url FROM episodes WHERE id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(image, "https://example.com/lead.jpg");
     let queued: Option<i64> = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_pending_jobs WHERE episode_id=?", [episode])
         .unwrap();
     assert_eq!(queued, Some(1));
 
-    let stage: String = backend
-        .db
-        .scalar_string("SELECT stage FROM browser_jobs WHERE episode_id=?", [episode])
-        .unwrap()
-        .unwrap();
-    assert_eq!(stage, "fetching");
-    let attempts: i64 = backend
-        .db
-        .scalar_i64("SELECT attempts FROM browser_jobs WHERE episode_id=?", [episode])
-        .unwrap()
-        .unwrap();
-    assert_eq!(attempts, 0);
-    let error: String = backend
-        .db
-        .scalar_string("SELECT error FROM browser_jobs WHERE episode_id=?", [episode])
-        .unwrap()
-        .unwrap();
-    assert_eq!(error, "article_pending");
-    let deferred: i64 = backend
-        .db
-        .scalar_i64("SELECT next_retry_at > 0 FROM browser_jobs WHERE episode_id=?", [episode])
-        .unwrap()
-        .unwrap();
-    assert_eq!(deferred, 1);
+    assert_eq!(job_string(&backend, "stage", episode), "synthesizing");
+    assert_eq!(job_int(&backend, "attempts", episode), 0);
+    assert_eq!(job_string(&backend, "error", episode), "article_pending");
+    assert!(job_int(&backend, "next_retry_at", episode) > 0);
     let notices: i64 = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_processing_notifications", [])
@@ -1764,25 +1809,48 @@ fn article_drain_creates_episode_and_parks_job_without_burning_attempts() {
         .unwrap();
     assert_eq!(notices, 0);
 
-    // Re-adding the same URL re-queues without touching resolved metadata.
-    backend
-        .db
-        .execute("UPDATE episodes SET title='Real Title' WHERE id=?", [episode])
-        .unwrap();
+    // Re-adding the same URL re-queues without duplicating the episode.
     pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
     pods_backend::local_worker::step(&backend).unwrap();
-    let title: String = backend
-        .db
-        .scalar_string("SELECT title FROM episodes WHERE id=?", [episode])
-        .unwrap()
-        .unwrap();
-    assert_eq!(title, "Real Title");
     let count: i64 = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM episodes WHERE guid='https://example.com/story'", [])
         .unwrap()
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn article_extraction_failure_consumes_an_attempt() {
+    extract_stub();
+    let (backend, _temp, fetcher) = article_fixture();
+    fetcher.set("https://example.com/extract-fail", "<!DOCTYPE html><html><body></body></html>");
+    pods_backend::articles::enqueue(&backend.db, "https://example.com/extract-fail").unwrap();
+    pods_backend::local_worker::step(&backend).unwrap();
+    let episode: i64 = backend
+        .db
+        .scalar_i64("SELECT id FROM episodes WHERE guid='https://example.com/extract-fail'", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(job_string(&backend, "stage", episode), "retry");
+    assert_eq!(job_int(&backend, "attempts", episode), 1);
+    assert!(job_string(&backend, "error", episode).contains("no readable text"));
+}
+
+#[test]
+fn article_over_word_cap_fails_fast() {
+    extract_stub();
+    let (backend, _temp, fetcher) = article_fixture();
+    fetcher.set("https://example.com/extract-huge", "<!DOCTYPE html><html><body><p>Hi</p></body></html>");
+    pods_backend::articles::enqueue(&backend.db, "https://example.com/extract-huge").unwrap();
+    pods_backend::local_worker::step(&backend).unwrap();
+    let episode: i64 = backend
+        .db
+        .scalar_i64("SELECT id FROM episodes WHERE guid='https://example.com/extract-huge'", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(job_int(&backend, "attempts", episode), 1);
+    assert!(job_string(&backend, "error", episode).contains("exceeds 12000 words"));
 }
 
 fn feedback_payload(id: &str, sequence: i64, report: &str, value: Value) -> Value {

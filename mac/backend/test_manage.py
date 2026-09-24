@@ -336,6 +336,13 @@ class ManageTests(unittest.TestCase):
             memory_env = {key: env[key] for key in env if key.startswith("PODS_MEMORY")}
             self.assertNotIn("placeholder-token", str(memory_env))
 
+    def test_backend_env_points_at_extract_script_and_word_cap(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            env = manage.backend_env({"whisper_model": "/models/w", "article_max_words": 5000})
+            self.assertEqual(env["PODS_EXTRACT_SCRIPT"], str(Path(directory) / "current/runtime/extract_article.py"))
+            self.assertEqual(env["PODS_ARTICLE_MAX_WORDS"], "5000")
+            self.assertNotIn("PODS_ARTICLE_MAX_WORDS", manage.backend_env({"whisper_model": "/models/w"}))
+
     def test_backend_env_forwards_typesafe_key_and_classifier(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
             env = manage.backend_env({

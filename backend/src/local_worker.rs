@@ -209,8 +209,12 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let Some((episode, url, _)) = candidate else {
         return retitle_one_published(backend);
     };
-    if crate::articles::url_from_source(&url).is_some() {
-        return park_article(backend, episode);
+    if let Some(article_url) = crate::articles::url_from_source(&url) {
+        match process_article(backend, episode, article_url) {
+            Ok(()) => {}
+            Err(error) => finish_failed_attempt(backend, episode, error)?,
+        }
+        return Ok(true);
     }
     if storage_status(backend)["blocked"] == true {
         backend.db.execute(
@@ -221,65 +225,70 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     }
     match process(backend, episode, &url) {
         Ok(()) => mark_ready(backend, episode)?,
-        Err(error) => {
-            if crate::omlx_lock::is_busy_error(&error) {
-                persist_busy(
-                    backend,
-                    episode,
-                    crate::omlx_lock::OMLX_BUSY,
-                    crate::omlx_lock::busy_retry_delay_secs(episode),
-                )?;
-            } else if crate::power_gate::is_power_error(&error) {
-                persist_busy(
-                    backend,
-                    episode,
-                    &error.to_string(),
-                    crate::memory_gate::busy_retry_delay_secs(episode),
-                )?;
-            } else if crate::pipeline_pause::is_paused_error(&error) {
-                persist_busy(
-                    backend,
-                    episode,
-                    crate::pipeline_pause::PIPELINE_PAUSED,
-                    crate::pipeline_pause::RETRY_SECS,
-                )?;
-            } else if crate::memory_gate::is_busy_error(&error) {
-                persist_busy(
-                    backend,
-                    episode,
-                    crate::memory_gate::MEMORY_BUSY,
-                    crate::memory_gate::busy_retry_delay_secs(episode),
-                )?;
-            } else {
-                let failed_stage = job_stage(backend, episode)?;
-                let attempts = backend
-                    .db
-                    .scalar_i64(
-                        "SELECT attempts FROM browser_jobs WHERE episode_id=?",
-                        [episode],
-                    )?
-                    .unwrap_or(0);
-                let next = attempts.saturating_add(1);
-                let outcome = if next >= MAX_FAILED_ATTEMPTS {
-                    "blocked"
-                } else {
-                    "retry"
-                };
-                let delay = 300_i64
-                    .saturating_mul(1_i64 << attempts.clamp(0, 7))
-                    .min(21600);
-                persist_failed_attempt(
-                    backend,
-                    episode,
-                    &failed_stage,
-                    &error.to_string(),
-                    outcome,
-                    delay,
-                )?;
-            }
-        }
+        Err(error) => finish_failed_attempt(backend, episode, error)?,
     }
     Ok(true)
+}
+
+/// Shared by the podcast and article pipelines: busy errors defer without an
+/// attempt, everything else persists a failed attempt with backoff.
+fn finish_failed_attempt(backend: &Backend, episode: i64, error: Error) -> Result<(), Error> {
+    if crate::omlx_lock::is_busy_error(&error) {
+        persist_busy(
+            backend,
+            episode,
+            crate::omlx_lock::OMLX_BUSY,
+            crate::omlx_lock::busy_retry_delay_secs(episode),
+        )?;
+    } else if crate::power_gate::is_power_error(&error) {
+        persist_busy(
+            backend,
+            episode,
+            &error.to_string(),
+            crate::memory_gate::busy_retry_delay_secs(episode),
+        )?;
+    } else if crate::pipeline_pause::is_paused_error(&error) {
+        persist_busy(
+            backend,
+            episode,
+            crate::pipeline_pause::PIPELINE_PAUSED,
+            crate::pipeline_pause::RETRY_SECS,
+        )?;
+    } else if crate::memory_gate::is_busy_error(&error) {
+        persist_busy(
+            backend,
+            episode,
+            crate::memory_gate::MEMORY_BUSY,
+            crate::memory_gate::busy_retry_delay_secs(episode),
+        )?;
+    } else {
+        let failed_stage = job_stage(backend, episode)?;
+        let attempts = backend
+            .db
+            .scalar_i64(
+                "SELECT attempts FROM browser_jobs WHERE episode_id=?",
+                [episode],
+            )?
+            .unwrap_or(0);
+        let next = attempts.saturating_add(1);
+        let outcome = if next >= MAX_FAILED_ATTEMPTS {
+            "blocked"
+        } else {
+            "retry"
+        };
+        let delay = 300_i64
+            .saturating_mul(1_i64 << attempts.clamp(0, 7))
+            .min(21600);
+        persist_failed_attempt(
+            backend,
+            episode,
+            &failed_stage,
+            &error.to_string(),
+            outcome,
+            delay,
+        )?;
+    }
+    Ok(())
 }
 
 fn persist_busy(backend: &Backend, episode: i64, error: &str, delay: i64) -> Result<(), Error> {
@@ -1942,12 +1951,82 @@ fn canonicalize_youtube_subscriptions(backend: &Backend) {
     }
 }
 
-/// Article jobs wait visibly at `fetching` without consuming attempts until
-/// the extraction unit owns the stage. Replaced, not extended, by unit 2.
-fn park_article(backend: &Backend, episode: i64) -> Result<bool, Error> {
-    stage(backend, episode, "fetching")?;
-    persist_busy(backend, episode, crate::articles::PENDING, 3600)?;
-    Ok(true)
+/// Article pipeline: fetch the page, extract text and structure, resolve the
+/// episode title and artwork, then wait at `synthesizing` without consuming
+/// attempts until the TTS unit owns the stage.
+fn process_article(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
+    require_capacity(backend, 8 * 1024 * 1024)?;
+    stage(backend, id, "fetching")?;
+    progress(backend, id, 0, 2)?;
+    crate::pipeline_pause::require_not_paused()?;
+    let document = backend
+        .artifacts
+        .prepare_dest(&format!("local/{id}/article.json"))
+        .map_err(failure)?;
+    let read_article = || {
+        let article: crate::articles::ArticleJson =
+            serde_json::from_slice(&fs::read(&document).map_err(failure)?).map_err(failure)?;
+        article.validate().map_err(failure)?;
+        Ok(article)
+    };
+    let article = if document.is_file() {
+        with_validation_stage(backend, id, "fetching", read_article)?
+    } else {
+        let page = backend.fetch_url(url).map_err(failure)?;
+        if page.len() > crate::articles::MAX_PAGE_BYTES {
+            return Err(failure("article page too large"));
+        }
+        let html_path = document.with_file_name("article.html");
+        fs::write(&html_path, &page).map_err(failure)?;
+        progress(backend, id, 1, 2)?;
+        run_extract_child(url, &html_path, &document)?;
+        read_article()?
+    };
+    let max = crate::articles::max_words();
+    if article.word_count() > max {
+        return Err(failure(format!("article exceeds {max} words")));
+    }
+    backend.db.execute(
+        "UPDATE episodes SET title=COALESCE(NULLIF(?,''),title),image_url=COALESCE(NULLIF(?,''),image_url) WHERE id=?",
+        params![article.title, article.image_url, id],
+    )?;
+    progress(backend, id, 2, 2)?;
+    stage(backend, id, "synthesizing")?;
+    persist_busy(backend, id, crate::articles::PENDING, 3600)?;
+    Ok(())
+}
+
+fn run_extract_child(url: &str, html: &std::path::Path, dest: &std::path::Path) -> Result<(), Error> {
+    let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script =
+        std::env::var("PODS_EXTRACT_SCRIPT").map_err(|_| failure("PODS_EXTRACT_SCRIPT is required"))?;
+    let max = crate::articles::max_words();
+    let output = std::process::Command::new(&python)
+        .args([
+            script.as_str(),
+            "--html",
+            &html.to_string_lossy(),
+            "--out",
+            &dest.to_string_lossy(),
+            "--url",
+            url,
+            "--max-words",
+            &max.to_string(),
+        ])
+        .output()
+        .map_err(failure)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .last()
+            .unwrap_or("article extraction failed")
+            .chars()
+            .take(160)
+            .collect::<String>();
+        return Err(failure(detail));
+    }
+    Ok(())
 }
 
 fn drain_article_listen(backend: &Backend) {

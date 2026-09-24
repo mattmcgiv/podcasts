@@ -12,6 +12,8 @@ pub const MAX_QUEUE_ATTEMPTS: u32 = 4;
 /// Deferral marker while a later pipeline unit owns the stage. Never consumes
 /// an attempt and never notifies; replaced by real errors once implemented.
 pub const PENDING: &str = "article_pending";
+pub const DEFAULT_MAX_WORDS: usize = 12_000;
+pub const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingArticle {
@@ -61,6 +63,64 @@ pub fn placeholder_title(url: &str) -> String {
     } else {
         title.chars().take(120).collect()
     }
+}
+
+/// Document written by extract_article.py. Sections drive per-section synthesis;
+/// each section start becomes a chapter start.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ArticleSection {
+    #[serde(default)]
+    pub heading: String,
+    #[serde(default)]
+    pub paragraphs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ArticleJson {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub published: String,
+    #[serde(default)]
+    pub site: String,
+    #[serde(default)]
+    pub image_url: String,
+    #[serde(default)]
+    pub sections: Vec<ArticleSection>,
+}
+
+impl ArticleJson {
+    pub fn word_count(&self) -> usize {
+        self.sections
+            .iter()
+            .flat_map(|section| section.paragraphs.iter())
+            .map(|paragraph| paragraph.split_whitespace().count())
+            .sum()
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.sections.is_empty() || self.word_count() == 0 {
+            return Err(Error::Invalid("article had no readable text".into()));
+        }
+        if self
+            .sections
+            .iter()
+            .any(|section| section.paragraphs.iter().all(|p| p.trim().is_empty()))
+        {
+            return Err(Error::Invalid("article section had no readable text".into()));
+        }
+        Ok(())
+    }
+}
+
+pub fn max_words() -> usize {
+    std::env::var("PODS_ARTICLE_MAX_WORDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_WORDS)
 }
 
 pub fn enqueue(db: &crate::db::Database, url: &str) -> Result<(), Error> {
@@ -131,6 +191,43 @@ mod tests {
         );
         assert_eq!(placeholder_title("https://example.com/"), "example.com");
         assert_eq!(placeholder_title("not a url"), "not a url");
+    }
+
+    #[test]
+    fn validates_article_documents() {
+        let blank = ArticleJson::default();
+        assert!(blank.validate().is_err());
+        let empty_section = ArticleJson {
+            sections: vec![ArticleSection {
+                heading: "H".into(),
+                paragraphs: vec!["  ".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(empty_section.validate().is_err());
+        let good = ArticleJson {
+            title: "T".into(),
+            sections: vec![ArticleSection {
+                heading: "H".into(),
+                paragraphs: vec!["Hello world.".into()],
+            }],
+            ..Default::default()
+        };
+        assert!(good.validate().is_ok());
+        assert_eq!(good.word_count(), 2);
+    }
+
+    #[test]
+    fn word_cap_defaults_when_unset_or_invalid() {
+        std::env::remove_var("PODS_ARTICLE_MAX_WORDS");
+        assert_eq!(max_words(), DEFAULT_MAX_WORDS);
+        std::env::set_var("PODS_ARTICLE_MAX_WORDS", "5000");
+        assert_eq!(max_words(), 5000);
+        std::env::set_var("PODS_ARTICLE_MAX_WORDS", "many");
+        assert_eq!(max_words(), DEFAULT_MAX_WORDS);
+        std::env::set_var("PODS_ARTICLE_MAX_WORDS", "0");
+        assert_eq!(max_words(), DEFAULT_MAX_WORDS);
+        std::env::remove_var("PODS_ARTICLE_MAX_WORDS");
     }
 
     #[test]
