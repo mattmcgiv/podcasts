@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Api } from "../api";
+import { isArticle } from "../articles";
 import { adStageLabel, fmtDate, fmtRemaining, progressFraction } from "../lib";
 import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
@@ -148,9 +149,12 @@ export function EpisodeRow({
           onPlay(item);
         }}
       >
-        <Artwork src={item.image_url || item.podcast_image} size={56} />
+        <Artwork src={item.image_url || item.podcast_image} size={56} article={isArticle(item)} />
         <span className="row-text">
-          <span className="row-title episode-title-full">{item.title}</span>
+          <span className="row-title episode-title-full">
+            {item.title}
+            {isArticle(item) && <span className="article-badge">Article</span>}
+          </span>
           {showPodcast && <span className="row-sub">{item.podcast_title}</span>}
           <span className="row-meta">
             {fmtDate(item.published_at)}

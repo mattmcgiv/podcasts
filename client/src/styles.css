@@ -439,6 +439,30 @@ input {
   background: linear-gradient(135deg, #1a2027, #232c36);
 }
 
+/* Article placeholder: faint text lines over the fallback gradient. */
+.art-article {
+  background:
+    repeating-linear-gradient(to bottom, transparent 0 9px, rgba(255, 255, 255, 0.07) 9px 11px),
+    linear-gradient(135deg, #1d242e, #28313d);
+  background-position: 25% 25%, 0 0;
+  background-size: 50% 50%, 100% 100%;
+  background-repeat: no-repeat;
+}
+
+.article-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .row-text {
   display: flex;
   flex-direction: column;

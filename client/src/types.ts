@@ -29,6 +29,8 @@ export interface EpisodeItem {
   podcast_image: string;
   title: string;
   audio_url: string;
+  /** Source page for article episodes. Absent on podcast episodes. */
+  article_url?: string | null;
   duration_secs: number | null;
   published_at: number;
   image_url: string;

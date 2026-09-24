@@ -139,3 +139,49 @@ describe("EpisodeRow ad-removal status copy", () => {
     expect(screen.getByText("Paused · Mac unavailable")).toBeInTheDocument();
   });
 });
+
+describe("EpisodeRow article badge", () => {
+  function renderArticle(overrides = {}) {
+    return render(
+      <EpisodeRow
+        item={episode({
+          title: "A Long Read",
+          podcast_title: "Articles",
+          article_url: "https://example.com/story",
+          audio_url: "/_media/abc123.m4a",
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: null,
+          ...overrides,
+        })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+  }
+
+  it("badges article episodes and uses the article placeholder without an image", () => {
+    const { container } = renderArticle({ image_url: "", podcast_image: "" });
+    expect(screen.getByText("Article")).toHaveClass("article-badge");
+    expect(container.querySelector(".art-fallback.art-article")).toBeTruthy();
+  });
+
+  it("still badges articles that carry a lead image", () => {
+    const { container } = renderArticle({ image_url: "https://example.com/lead.jpg" });
+    expect(screen.getByText("Article")).toHaveClass("article-badge");
+    expect(container.querySelector(".art-fallback")).toBeNull();
+  });
+
+  it("shows no badge on podcast episodes", () => {
+    render(
+      <EpisodeRow
+        item={episode({ title: "Regular Show" })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(screen.queryByText("Article")).not.toBeInTheDocument();
+  });
+});

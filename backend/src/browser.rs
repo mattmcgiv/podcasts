@@ -346,6 +346,12 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
         };
         let mut detail = serde_json::to_value(Backend::episode_detail_row(conn, id)?)
             .map_err(|e| Error::Invalid(e.to_string()))?;
+        if let Some(url) = detail["audio_url"]
+            .as_str()
+            .and_then(crate::articles::url_from_source)
+        {
+            detail["article_url"] = json!(url);
+        }
         detail["audio_url"] = json!(media_url(&manifest));
         detail["duration_secs"] = json!(manifest.duration);
         detail["position_secs"] = json!(processed_time(

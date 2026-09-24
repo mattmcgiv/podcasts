@@ -2008,6 +2008,18 @@ fn article_pipeline_publishes_notes_and_marks_ready() {
     assert_eq!(revision_after, revision_before + 1);
     let (_, published) = pods_backend::browser::publication(&backend, episode).unwrap();
     assert_eq!(published, notes);
+    let snap = pods_backend::browser::snapshot(&backend).unwrap();
+    let synced = snap["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == episode)
+        .unwrap();
+    assert_eq!(synced["article_url"], "https://example.com/story");
+    assert!(synced["audio_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("/_media/"));
     let notices: i64 = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_processing_notifications", [])

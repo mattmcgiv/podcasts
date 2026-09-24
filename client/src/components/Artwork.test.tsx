@@ -19,4 +19,13 @@ describe("Artwork", () => {
     rerender(<Artwork src="" size={32} />);
     expect(document.querySelector(".art-fallback")).toBeTruthy();
   });
+
+  it("marks the article fallback without changing image rendering", () => {
+    const { rerender } = render(<Artwork src="" size={48} article />);
+    expect(document.querySelector(".art-fallback.art-article")).toBeTruthy();
+
+    rerender(<Artwork src="https://art.example/lead.jpg" size={48} article alt="Lead" />);
+    expect(screen.getByRole("img", { name: "Lead" })).toHaveAttribute("src", "https://art.example/lead.jpg");
+    expect(document.querySelector(".art-fallback")).toBeNull();
+  });
 });

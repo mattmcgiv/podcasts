@@ -563,6 +563,45 @@ describe("PlayerSheet + MiniPlayer", () => {
     await user.click(screen.getByRole("button", { name: "This device" }));
     expect(await screen.findByRole("status", { name: "Mac speaker message" })).toHaveTextContent(/may still be playing/);
   });
+
+  it("badges an article episode and uses the article placeholder without an image", async () => {
+    const article = {
+      id: 7,
+      title: "A Long Read",
+      podcast_title: "Articles",
+      article_url: "https://example.com/story",
+      audio_url: "/_media/abc.m4a",
+      image_url: "",
+      podcast_image: "",
+    };
+    installApi({
+      "GET /api/settings": { speed: 1, autoplay: true },
+      "PUT /api/settings": null,
+      "GET /api/episodes/7": {
+        ...episode(article),
+        notes_html: "",
+        show_notes: [],
+        ad_markers: [],
+        archived_at: null,
+      },
+      "PUT /api/episodes/7/position": null,
+    });
+    function StartArticle() {
+      const p = usePlayer();
+      return <button onClick={() => p.playEpisode(episode(article), "recent")}>play article</button>;
+    }
+    const user = userEvent.setup();
+    const { container } = render(
+      <PlayerProvider>
+        <StartArticle />
+        <PlayerSheet />
+      </PlayerProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "play article" }));
+    expect(await screen.findByText(/A Long Read/)).toBeInTheDocument();
+    expect(screen.getByText("Article")).toHaveClass("article-badge");
+    expect(container.querySelector(".art-fallback.art-article")).toBeTruthy();
+  });
 });
 
 afterEach(() => {

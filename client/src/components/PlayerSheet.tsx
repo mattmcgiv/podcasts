@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { SPEEDS } from "../config";
+import { isArticle } from "../articles";
 import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
@@ -108,10 +109,13 @@ export function PlayerSheet() {
           />
         ) : (
           <div className="sheet-art">
-            <Artwork src={ep.image_url || ep.podcast_image} size={224} />
+            <Artwork src={ep.image_url || ep.podcast_image} size={224} article={isArticle(ep)} />
           </div>
         )}
-        <h2 className="sheet-title">{ep.title}</h2>
+        <h2 className="sheet-title">
+          {ep.title}
+          {isArticle(ep) && <span className="article-badge">Article</span>}
+        </h2>
 
         <input
           className="scrubber"
