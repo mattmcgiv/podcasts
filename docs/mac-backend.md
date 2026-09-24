@@ -526,6 +526,32 @@ A window uses 24 core segments and 12 context segments. Bounded repair allows at
 Every label requires an exact transcript quote. The output schema constrains IDs and labels before validation.
 Transcript text is data, never instructions. Show notes use the same model and source-constrained chapter IDs.
 
+## Articles: menu-bar link to spoken episode
+
+Paste an article URL into the menu-bar **Podcast feed, YouTube, or article link** field and press Add.
+The backend fetches the link: feeds subscribe, YouTube resolves, HTML pages queue as articles.
+One article URL becomes one episode under the shared **Articles** show.
+Re-adding a URL re-queues it without duplicating the episode.
+
+The article pipeline runs entirely on the Mac with no cloud TTS:
+
+1. `fetching` — download the page (10 MiB cap) and extract title, author, sections, and lead image with trafilatura. Articles over `PODS_ARTICLE_MAX_WORDS` (default 12000) fail fast.
+2. `synthesizing` — Kokoro-82M (`PODS_TTS_MODEL`, pinned `PODS_TTS_REVISION`) renders one WAV per section with voice `PODS_TTS_VOICE` (default `af_heart`).
+3. `rendering` — sections concatenate to one AAC file; the measured duration must match the synthesis manifest.
+4. `show_notes` — the local chat model writes one chapter per section starting at measured synthesis times.
+5. Publish — the episode, chapters, and `article_url` source link sync to the browser like any publication.
+
+The spaCy `en_core_web_sm` model ships in the release venv (`uv.lock` pins explosion's wheel).
+Without it, synthesis shells out to `uv pip install` at runtime and fails.
+
+The client marks article episodes with an **Article** badge in the row and player sheet.
+Artwork shows the extracted lead image, or an article placeholder when the page has none.
+The snapshot carries `article_url` (the source page) alongside the rewritten `/_media/...` audio URL.
+
+2026-09-24 rollout: first article (episode 26581, 29.55 s, 2 chapters at 0.0 s and 15.4 s) processed intake to ready.
+The menu-bar app in `~/Applications/Pods Pipeline Preview.app` was rebuilt with the article intake UI; the previous build is kept as `Pods Pipeline Preview previous.app`.
+Client badge/placeholder ships with the next approved client deploy.
+
 ## VPS retirement
 
 The Mac release `20260912-085138` is installed and active. The live model is `Qwen3.8-27B-4bit`.
