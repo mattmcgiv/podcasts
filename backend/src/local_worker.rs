@@ -211,7 +211,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     };
     if let Some(article_url) = crate::articles::url_from_source(&url) {
         match process_article(backend, episode, article_url) {
-            Ok(()) => {}
+            Ok(()) => mark_ready(backend, episode)?,
             Err(error) => finish_failed_attempt(backend, episode, error)?,
         }
         return Ok(true);
@@ -696,6 +696,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         &labels,
         &manifest.timeline,
         &notes_permit,
+        NotesKind::Podcast,
         |done, total| progress(backend, id, done, total),
     )?;
     if let Ok(title) = generate_listen_title(backend, id, &notes, &notes_permit) {
@@ -2088,9 +2089,71 @@ fn process_article(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         )?;
         Ok(())
     })?;
+    if stored_notes_ready(backend, id)? {
+        return Ok(());
+    }
     stage(backend, id, "show_notes")?;
-    persist_busy(backend, id, crate::articles::PENDING, 3600)?;
+    crate::power_gate::require_external_power()?;
+    crate::pipeline_pause::require_not_paused()?;
+    crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)?;
+    let notes_permit =
+        crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_SHOW_NOTES, MODEL)?;
+    let (segments, labels) = article_note_segments(&article, &synth);
+    let notes = generate_notes_with_progress(
+        &segments,
+        &labels,
+        &manifest.timeline,
+        &notes_permit,
+        NotesKind::Article,
+        |done, total| progress(backend, id, done, total),
+    )?;
+    drop(notes_permit);
+    backend.db.with_transaction(|tx| {
+        tx.execute(
+            "INSERT INTO browser_publications VALUES(?,?,?,?) ON CONFLICT(episode_id) DO UPDATE SET manifest_json=excluded.manifest_json,notes_json=excluded.notes_json,published_at=excluded.published_at",
+            params![id, serde_json::to_string(&manifest).map_err(failure)?, notes.to_string(), crate::db::now_unix()],
+        )?;
+        tx.execute("UPDATE browser_clock SET revision=revision+1", [])?;
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// One note segment per article section. Starts are cumulative measured
+/// synthesis durations, so chapter starts match the rendered audio.
+fn article_note_segments(
+    article: &crate::articles::ArticleJson,
+    synth: &crate::articles::SynthesizeManifest,
+) -> (Vec<Segment>, Vec<Label>) {
+    let mut start = 0.0;
+    let mut segments = Vec::with_capacity(article.sections.len());
+    let mut labels = Vec::with_capacity(article.sections.len());
+    for (index, (section, entry)) in article
+        .sections
+        .iter()
+        .zip(synth.sections.iter())
+        .enumerate()
+    {
+        let id = format!("s{index}");
+        let mut text = section.heading.clone();
+        for paragraph in &section.paragraphs {
+            text.push('\n');
+            text.push_str(paragraph);
+        }
+        segments.push(Segment {
+            id: id.clone(),
+            start,
+            end: start + entry.duration,
+            text,
+        });
+        labels.push(Label {
+            segment_id: id,
+            label: "content".into(),
+            evidence: String::new(),
+        });
+        start += entry.duration;
+    }
+    (segments, labels)
 }
 
 fn render_article_concat(
@@ -2573,8 +2636,31 @@ fn generate_notes(
     labels: &[Label],
     timeline: &[Interval],
     permit: &crate::omlx_lock::InferencePermit,
+    kind: NotesKind,
 ) -> Result<Value, Error> {
-    generate_notes_with_progress(segments, labels, timeline, permit, |_, _| Ok(()))
+    generate_notes_with_progress(segments, labels, timeline, permit, kind, |_, _| Ok(()))
+}
+
+#[derive(Clone, Copy)]
+enum NotesKind {
+    Podcast,
+    Article,
+}
+
+impl NotesKind {
+    fn prompt_noun(&self) -> &'static str {
+        match self {
+            NotesKind::Podcast => "podcast",
+            NotesKind::Article => "article",
+        }
+    }
+
+    fn data_noun(&self) -> &'static str {
+        match self {
+            NotesKind::Podcast => "transcript data",
+            NotesKind::Article => "article text",
+        }
+    }
 }
 
 fn generate_notes_with_progress(
@@ -2582,6 +2668,7 @@ fn generate_notes_with_progress(
     labels: &[Label],
     timeline: &[Interval],
     permit: &crate::omlx_lock::InferencePermit,
+    kind: NotesKind,
     mut report: impl FnMut(u64, u64) -> Result<(), Error>,
 ) -> Result<Value, Error> {
     let content: Vec<_> = segments
@@ -2595,7 +2682,7 @@ fn generate_notes_with_progress(
     let mut completed = 0;
     report(0, total)?;
     for batch in content.chunks(64) {
-        let prompt=format!("Create 1-3 factual podcast chapters from this transcript data. Use only supplied facts. No links or invented names. Return JSON {{\"chapters\":[{{\"segment_id\":\"known ID\",\"title\":\"short title\",\"summary\":\"one or two sentences\"}}]}}. Start each chapter at a supplied segment. TRANSCRIPT_DATA={}",json!(batch));
+        let prompt=format!("Create 1-3 factual {} chapters from this {}. Use only supplied facts. No links or invented names. Return JSON {{\"chapters\":[{{\"segment_id\":\"known ID\",\"title\":\"short title\",\"summary\":\"one or two sentences\"}}]}}. Start each chapter at a supplied segment. TRANSCRIPT_DATA={}",kind.prompt_noun(),kind.data_noun(),json!(batch));
         let result = chat_json_schema(
             permit,
             &prompt,
@@ -3422,6 +3509,10 @@ mod download_tests {
         }
         if unescaped.contains("Create 1-3 factual podcast chapters") {
             return json!({"chapters":[{"segment_id":"s0","title":"Hello","summary":"A short summary."}]})
+                .to_string();
+        }
+        if unescaped.contains("Create 1-3 factual article chapters") {
+            return json!({"chapters":[{"segment_id":"s0","title":"Opening","summary":"The article opens with background and states its main claim clearly."},{"segment_id":"s1","title":"Details","summary":"The next section adds evidence and examples supporting the opening claim."}]})
                 .to_string();
         }
         if unescaped.contains("Write a Listen title") {
@@ -4864,6 +4955,7 @@ mod download_tests {
                     &vec![labels[0].clone(); 65],
                     &timeline,
                     &permit,
+                    NotesKind::Podcast,
                     |done, total| {
                         progress(&backend, 1, done, total)?;
                         reports.push((done, total));
@@ -4892,6 +4984,7 @@ mod download_tests {
                     &vec![labels[0].clone(); 65],
                     &timeline,
                     &permit,
+                    NotesKind::Podcast,
                     |done, total| {
                         reports.push((done, total));
                         Ok(())
@@ -4904,7 +4997,7 @@ mod download_tests {
                     label: "ad".into(),
                     evidence: "Hello there.".into(),
                 }];
-                assert!(generate_notes(&segments, &ads, &timeline, &permit).is_err());
+                assert!(generate_notes(&segments, &ads, &timeline, &permit, NotesKind::Podcast).is_err());
                 let _ = chat_json(&permit, "hello");
             },
         );

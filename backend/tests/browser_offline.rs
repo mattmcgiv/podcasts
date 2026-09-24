@@ -7,7 +7,8 @@ use pods_backend::local_worker::{
 use pods_backend::{Backend, Database, DisabledDirectory, HttpRequest, MockFeedFetcher};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1788,12 +1789,143 @@ fn job_int(backend: &Backend, column: &str, episode: i64) -> i64 {
         .unwrap()
 }
 
+struct MockOmlx {
+    url: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for MockOmlx {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct EnvRestore {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvRestore {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Minimal oMLX stand-in: idle status with the chat model loaded, chapters for
+/// article prompts, one generic chapter for anything else a parallel test asks.
+fn start_mock_omlx() -> MockOmlx {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let model = pods_backend::local_worker::MODEL;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    let handle = std::thread::spawn(move || {
+        while !stop_clone.load(Ordering::SeqCst) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            let mut buffer = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buffer.extend_from_slice(&chunk[..n]);
+                        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let header = String::from_utf8_lossy(&buffer).into_owned();
+            let content_len = header
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let header_end = buffer
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4)
+                .unwrap_or(buffer.len());
+            while buffer.len() < header_end + content_len {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            let body =
+                String::from_utf8_lossy(&buffer[header_end.min(buffer.len())..]).into_owned();
+            let payload = if header.starts_with("GET /api/status") {
+                json!({"active_requests":0,"waiting_requests":0,"models_loading":0,"loaded_models":[model]}).to_string()
+            } else if header.starts_with("POST /v1/models/") {
+                json!({"status":"ok","model_id":model}).to_string()
+            } else if header.starts_with("POST") {
+                let content = if body.contains("factual article chapters") {
+                    json!({"chapters":[{"segment_id":"s0","title":"Opening","summary":"The article opens with background and states its main claim clearly."},{"segment_id":"s1","title":"Details","summary":"The next section adds evidence and examples supporting the opening claim."}]}).to_string()
+                } else {
+                    json!({"chapters":[{"segment_id":"s0","title":"Hello","summary":"A short summary."}]}).to_string()
+                };
+                json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]}).to_string()
+            } else {
+                json!({"active_requests":0,"waiting_requests":0}).to_string()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+        }
+    });
+    MockOmlx {
+        url: format!("http://127.0.0.1:{}/v1/chat/completions", address.port()),
+        stop,
+        handle: Some(handle),
+    }
+}
+
 #[test]
-fn article_pipeline_renders_audio_and_waits_at_show_notes() {
+fn article_pipeline_publishes_notes_and_marks_ready() {
     extract_stub();
     synthesize_stub();
+    let mock = start_mock_omlx();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let _url = EnvRestore::set("PODS_OMLX_URL", &mock.url);
+    let _key = EnvRestore::set("PODS_OMLX_KEY", "test-key");
+    let _lock = EnvRestore::set(
+        "PODS_OMLX_LOCK_DIR",
+        lock_dir.path().to_str().unwrap(),
+    );
     let (backend, _temp, fetcher) = article_fixture();
     fetcher.set("https://example.com/story", "<!DOCTYPE html><html><body><p>Hi</p></body></html>");
+    let revision_before: i64 = backend
+        .db
+        .scalar_i64("SELECT revision FROM browser_clock", [])
+        .unwrap()
+        .unwrap();
     pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
     assert!(pods_backend::local_worker::step(&backend).unwrap());
 
@@ -1830,12 +1962,21 @@ fn article_pipeline_renders_audio_and_waits_at_show_notes() {
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_pending_jobs WHERE episode_id=?", [episode])
         .unwrap();
-    assert_eq!(queued, Some(1));
+    assert_eq!(queued, Some(0));
 
-    assert_eq!(job_string(&backend, "stage", episode), "show_notes");
+    assert_eq!(job_string(&backend, "stage", episode), "ready");
     assert_eq!(job_int(&backend, "attempts", episode), 0);
-    assert_eq!(job_string(&backend, "error", episode), "article_pending");
-    assert!(job_int(&backend, "next_retry_at", episode) > 0);
+    let error: Option<String> = backend
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT error FROM browser_jobs WHERE episode_id=?",
+            [episode],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(error, None);
     let manifest: String = backend
         .db
         .scalar_string("SELECT manifest_json FROM browser_artifacts WHERE episode_id=?", [episode])
@@ -1845,6 +1986,28 @@ fn article_pipeline_renders_audio_and_waits_at_show_notes() {
     assert!((manifest["duration"].as_f64().unwrap() - 2.0).abs() < 0.3);
     assert!(!manifest["chunks"].as_array().unwrap().is_empty());
     assert_eq!(manifest["timeline"].as_array().unwrap().len(), 1);
+    let notes: String = backend
+        .db
+        .scalar_string("SELECT notes_json FROM browser_publications WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    let notes: Value = serde_json::from_str(&notes).unwrap();
+    let chapters = notes.as_array().unwrap();
+    assert_eq!(chapters.len(), 2);
+    assert_eq!(chapters[0]["id"], "s0");
+    assert_eq!(chapters[0]["start_time"].as_f64().unwrap(), 0.0);
+    assert_eq!(chapters[0]["title"], "Opening");
+    assert_eq!(chapters[1]["id"], "s1");
+    assert_eq!(chapters[1]["start_time"].as_f64().unwrap(), 1.0);
+    assert_eq!(chapters[1]["title"], "Details");
+    let revision_after: i64 = backend
+        .db
+        .scalar_i64("SELECT revision FROM browser_clock", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision_after, revision_before + 1);
+    let (_, published) = pods_backend::browser::publication(&backend, episode).unwrap();
+    assert_eq!(published, notes);
     let notices: i64 = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_processing_notifications", [])

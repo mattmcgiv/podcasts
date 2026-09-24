@@ -9,9 +9,6 @@ pub const LISTEN_SETTING: &str = "browser_article_listen";
 pub const SHOW_FEED_URL: &str = "article:articles";
 pub const SHOW_TITLE: &str = "Articles";
 pub const MAX_QUEUE_ATTEMPTS: u32 = 4;
-/// Deferral marker while a later pipeline unit owns the stage. Never consumes
-/// an attempt and never notifies; replaced by real errors once implemented.
-pub const PENDING: &str = "article_pending";
 pub const DEFAULT_MAX_WORDS: usize = 12_000;
 pub const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_VOICE: &str = "af_heart";
