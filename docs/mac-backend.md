@@ -294,6 +294,7 @@ Snapshot status reads persisted history directly. It does not send a nested unau
 It does not keep a stale live `is_refreshing` flag.
 
 The `jobs` command reads the eligible pending view. Retry rejects nonexistent or ineligible jobs.
+The `devices` command lists each syncing browser's last sync moment, newest first.
 The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
 It does not accept corrected labels.
 

@@ -115,11 +115,12 @@ Enroll a passkey on the Mac. The command prints a single-use URL that expires af
 python3 mac/backend/manage.py enroll
 ```
 
-List eligible processing jobs, or ask for a fresh automatic run of one episode. Retry starts that automatic run again.
+List eligible processing jobs, or ask for a fresh automatic run of one episode. Retry starts that automatic run again. Devices shows each browser's last sync moment.
 
 ```sh
 python3 mac/backend/manage.py jobs
 python3 mac/backend/manage.py retry EPISODE_ID
+python3 mac/backend/manage.py devices
 ```
 
 The cooperative GPU lock, oMLX autostart, and memory deferral are in [docs/local-inference.md](docs/local-inference.md). Play-on-Mac behavior is in [docs/mac-speaker.md](docs/mac-speaker.md).

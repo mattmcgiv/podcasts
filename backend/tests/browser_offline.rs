@@ -1006,6 +1006,78 @@ fn cors_and_authenticated_artifact_range_contract() {
     );
 }
 
+fn device_row(backend: &Backend, client: &str) -> Option<(String, i64, i64, i64)> {
+    backend
+        .db
+        .lock()
+        .ok()?
+        .query_row(
+            "SELECT device,last_sync_at,sync_count,last_actions_at FROM browser_sync_devices WHERE client_id=?",
+            [client],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok()
+}
+
+fn device_count(backend: &Backend) -> i64 {
+    backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM browser_sync_devices", [])
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn sync_requests_record_per_device_last_sync() {
+    let (backend, _temp, _) = fixture();
+    let pull = backend.handle(
+        HttpRequest::new("GET", "/api/sync")
+            .with_header("x-pods-client-id", "phone")
+            .with_header("x-pods-device", "iPhone"),
+    );
+    assert_eq!(pull.status_code, 200);
+    let row = device_row(&backend, "phone").expect("pull records the device");
+    assert_eq!(row.0, "iPhone");
+    assert!(row.1 > 0);
+    assert_eq!(row.2, 1);
+    assert_eq!(row.3, 0);
+
+    // Anonymous pulls keep working and record nothing.
+    let anonymous = backend.handle(HttpRequest::new("GET", "/api/sync"));
+    assert_eq!(anonymous.status_code, 200);
+    assert_eq!(device_count(&backend), 1);
+
+    // Overlong identity is ignored, not stored.
+    let spoofed = backend.handle(
+        HttpRequest::new("GET", "/api/sync")
+            .with_header("x-pods-client-id", "x".repeat(129))
+            .with_header("x-pods-device", "iPhone"),
+    );
+    assert_eq!(spoofed.status_code, 200);
+    assert_eq!(device_count(&backend), 1);
+
+    // Action posts record the device and the applied moment.
+    let posted = backend.handle(
+        HttpRequest::new("POST", "/api/sync/actions").with_json(&json!({
+            "client_id": "phone",
+            "device_name": "iPhone",
+            "actions": [],
+        })),
+    );
+    assert_eq!(posted.status_code, 200);
+    let row = device_row(&backend, "phone").expect("actions record the device");
+    assert_eq!(row.2, 2);
+    assert!(row.3 > 0);
+
+    // Direct internal calls never touch the device log.
+    apply_actions(
+        &backend,
+        json!({"client_id": "pipeline-menu", "device_name": "Pipeline", "actions": []}),
+    )
+    .unwrap();
+    assert_eq!(device_count(&backend), 1);
+}
+
 fn tcp_get(addr: &str, path: &str, extra_headers: &str) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect");
     let request = format!(

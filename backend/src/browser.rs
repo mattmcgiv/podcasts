@@ -117,7 +117,7 @@ pub fn handle(backend: &Backend, request: &HttpRequest) -> HttpResponse {
                 )
                 .with_header(
                     "access-control-allow-headers",
-                    "content-type, range, if-range, if-none-match, x-pods-client-id, x-pods-voice-id",
+                    "content-type, range, if-range, if-none-match, x-pods-client-id, x-pods-device, x-pods-voice-id",
                 )
                 .with_header("access-control-allow-private-network", "true")
         }
@@ -160,13 +160,15 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
         return Ok(backend.handle_legacy(request));
     }
     if request.method == "GET" && path == "/api/sync" {
-        return Ok(HttpResponse::json(snapshot(backend)?, 200));
+        let body = snapshot(backend)?;
+        record_pull_device(backend, request)?;
+        return Ok(HttpResponse::json(body, 200));
     }
     if path == "/api/sync/actions" && request.method == "POST" {
-        return Ok(HttpResponse::json(
-            apply_actions(backend, request.json_object()?)?,
-            200,
-        ));
+        let payload = request.json_object()?;
+        let result = apply_actions(backend, payload.clone())?;
+        record_action_device(backend, &payload)?;
+        return Ok(HttpResponse::json(result, 200));
     }
     // Spoken feedback uploads are binary. They stay off the JSON action channel.
     if path == "/api/feedback/voice" || path.starts_with("/api/feedback/voice/") {
@@ -549,6 +551,56 @@ fn action_core(action: &Value) -> Value {
 fn same_action(stored: &str, action: &Value) -> bool {
     serde_json::from_str::<Value>(stored)
         .is_ok_and(|original| action_core(&original) == action_core(action))
+}
+
+/// Last-sync moments per device. Recording lives in the HTTP routes so direct
+/// internal `apply_actions` calls (pipeline menu) never appear as devices.
+fn record_sync_device(
+    backend: &Backend,
+    client: &str,
+    device: &str,
+    with_actions: bool,
+) -> Result<(), Error> {
+    let now = crate::db::now_unix();
+    let applied = if with_actions { now } else { 0 };
+    backend.db.execute(
+        "INSERT INTO browser_sync_devices(client_id,device,last_sync_at,sync_count,last_actions_at)
+         VALUES(?,?,?,1,?) ON CONFLICT(client_id) DO UPDATE SET device=excluded.device,
+         last_sync_at=excluded.last_sync_at,sync_count=sync_count+1,
+         last_actions_at=MAX(last_actions_at,excluded.last_actions_at)",
+        params![client, device, now, applied],
+    )?;
+    Ok(())
+}
+
+/// Snapshot pulls identify with headers. Absent or overlong identity keeps
+/// working and records nothing, so old clients are unaffected.
+fn record_pull_device(backend: &Backend, request: &HttpRequest) -> Result<(), Error> {
+    let Some(client) = request
+        .header("x-pods-client-id")
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+    else {
+        return Ok(());
+    };
+    let device = request
+        .header("x-pods-device")
+        .filter(|value| !value.is_empty() && value.len() <= 80)
+        .unwrap_or("Another device");
+    record_sync_device(backend, client, device, false)
+}
+
+fn record_action_device(backend: &Backend, payload: &Value) -> Result<(), Error> {
+    let Some(client) = payload["client_id"]
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+    else {
+        return Ok(());
+    };
+    let device = payload["device_name"]
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 80)
+        .unwrap_or("Another device");
+    record_sync_device(backend, client, device, true)
 }
 
 pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> {

@@ -375,6 +375,23 @@ describe("synchronization", () => {
     expect((await state()).outbox[0]).toMatchObject({base_revision:9,value:{seconds:2}});
     endPlaybackSession(1);
   });
+  it("identifies the device on snapshot pulls", async () => {
+    await seed();
+    await updateState(s => { s.device_name = "iPhone"; });
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(snapshot())));
+    await synchronize();
+    const pulls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/api/sync"));
+    expect(pulls.length).toBeGreaterThan(0);
+    for (const [, init] of pulls) {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-pods-client-id")).toBe((await state()).client_id);
+      expect(headers.get("x-pods-device")).toBe("iPhone");
+    }
+    await updateState(s => { s.device_name = undefined; });
+    await synchronize();
+    const fallback = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/api/sync")).at(-1);
+    expect(new Headers(fallback?.[1]?.headers).get("x-pods-device")).toBe("Browser");
+  });
   it("migrates existing appearance and dismissals once without changing downloads or queued progress", async () => {
     await seed();
     window.localStorage.setItem("pods-theme-preference", "dark");

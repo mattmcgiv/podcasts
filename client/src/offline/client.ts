@@ -210,7 +210,11 @@ export async function syncBeforePlayback(): Promise<void> {
 }
 
 async function receiveSnapshot(): Promise<void> {
-  const snapshot = await network<Snapshot>("/sync");
+  const identity = await state();
+  const snapshot = await network<Snapshot>("/sync", { headers: {
+    "x-pods-client-id": identity.client_id,
+    "x-pods-device": identity.device_name ?? defaultDeviceName(),
+  }});
   validateSnapshot(snapshot);
   const local = await updateState(s => { s.snapshot = adoptSnapshot(s.snapshot, snapshot); });
   const theme = applyOverlay(snapshot, local.outbox).settings.theme;

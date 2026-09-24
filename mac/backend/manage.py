@@ -478,6 +478,13 @@ def list_jobs(db):
             for row in db.execute("SELECT episode_id,stage,attempts,error FROM browser_pending_jobs ORDER BY priority DESC,episode_id LIMIT 100")]
 
 
+def list_devices(db):
+    # One row per syncing browser, newest first. Pulls refresh last_sync_at;
+    # only action posts move last_actions_at.
+    return [dict(zip(("client_id", "device", "last_sync_at", "sync_count", "last_actions_at"), row))
+            for row in db.execute("SELECT client_id,device,last_sync_at,sync_count,last_actions_at FROM browser_sync_devices ORDER BY last_sync_at DESC")]
+
+
 def retry_job(db, episode):
     episode = int(episode)
     if episode <= 0:
@@ -522,7 +529,7 @@ def main():
     os.environ["PATH"] = PATH
     os.umask(0o077)
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["install", "agent", "run", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll"])
+    parser.add_argument("command", choices=["install", "agent", "run", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll", "devices"])
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     if args.command == "install": install()
@@ -538,6 +545,9 @@ def main():
         with sqlite3.connect(STATE / "data/pods.sqlite") as db:
             if args.command == "jobs":
                 for row in list_jobs(db):
+                    print(json.dumps(row))
+            elif args.command == "devices":
+                for row in list_devices(db):
                     print(json.dumps(row))
             else:
                 if not args.arguments:

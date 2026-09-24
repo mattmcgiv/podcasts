@@ -184,6 +184,22 @@ class ManageTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM browser_jobs").fetchone()[0], 10)
                 self.assertEqual(db.execute("SELECT stage FROM browser_jobs WHERE episode_id=2").fetchone()[0], "queued")
 
+    def test_devices_lists_sync_moments_newest_first(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
+            path = Path(directory) / "data/pods.sqlite"
+            with processing_db(path) as db:
+                db.execute("INSERT INTO browser_sync_devices(client_id,device,last_sync_at,sync_count,last_actions_at)"
+                           " VALUES('phone','iPhone',200,9,190),('tablet','iPad',100,4,0)")
+                expected = [
+                    {"client_id": "phone", "device": "iPhone", "last_sync_at": 200, "sync_count": 9, "last_actions_at": 190},
+                    {"client_id": "tablet", "device": "iPad", "last_sync_at": 100, "sync_count": 4, "last_actions_at": 0},
+                ]
+                self.assertEqual(manage.list_devices(db), expected)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), patch.object(sys, "argv", ["manage.py", "devices"]):
+                manage.main()
+            self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()], expected)
+
     def test_retry_rejects_unknown_ids_and_requeues_existing(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
             path = Path(directory) / "data/pods.sqlite"

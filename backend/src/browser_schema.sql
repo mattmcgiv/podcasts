@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS browser_field_writers (
     entity TEXT NOT NULL, field TEXT NOT NULL, device TEXT NOT NULL,
     updated_at INTEGER NOT NULL, PRIMARY KEY(entity, field)
 );
+-- Last sync moment per device. Pulls and action posts both refresh last_sync_at;
+-- only action posts move last_actions_at. One row per client_id, no retention concern.
+CREATE TABLE IF NOT EXISTS browser_sync_devices (
+    client_id TEXT PRIMARY KEY,
+    device TEXT NOT NULL,
+    last_sync_at INTEGER NOT NULL,
+    sync_count INTEGER NOT NULL DEFAULT 0,
+    last_actions_at INTEGER NOT NULL DEFAULT 0
+);
 INSERT OR IGNORE INTO browser_clock VALUES(1,0);
 CREATE TABLE IF NOT EXISTS browser_artifacts (
     hash TEXT PRIMARY KEY,
