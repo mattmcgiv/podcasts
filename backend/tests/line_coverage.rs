@@ -1482,6 +1482,8 @@ fn memory_gate_auth_login_feeds_directory_and_show_notes() {
         Some("50"),
         Some("not-a-number"),
         Some(""),
+        Some("60"),
+        Some("70"),
     );
     assert!(cfg.enabled);
     let _ = memory_gate::evaluate();
@@ -1489,6 +1491,7 @@ fn memory_gate_auth_login_feeds_directory_and_show_notes() {
     assert!(status.get("available_bytes").is_some());
     let _ = memory_gate::require_inference(memory_gate::InferenceKind::Whisper);
     let _ = memory_gate::require_inference(memory_gate::InferenceKind::Omlx);
+    let _ = memory_gate::require_inference(memory_gate::InferenceKind::Tts);
     let _ = memory_gate::should_preempt_whisper();
     assert!(memory_gate::is_busy_error(&Error::Upstream(
         memory_gate::MEMORY_BUSY.into()

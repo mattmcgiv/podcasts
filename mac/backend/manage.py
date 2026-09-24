@@ -163,7 +163,7 @@ def install():
     shutil.copytree(ROOT / "client/dist", release / "web")
     runtime = release / "runtime"
     runtime.mkdir()
-    for filename in ("transcribe.py", "extract_article.py", "manage.py", "pyproject.toml", "uv.lock"):
+    for filename in ("transcribe.py", "extract_article.py", "synthesize.py", "manage.py", "pyproject.toml", "uv.lock"):
         shutil.copy2(ROOT / "mac/backend" / filename, runtime / filename)
     subprocess.run(["uv", "sync", "--project", str(runtime), "--frozen"], check=True)
     (STATE / "data").mkdir(exist_ok=True)
@@ -209,6 +209,7 @@ def backend_env(config):
                PODS_RESET_KEY_FILE=str(STATE / "reset.key"), PODS_PYTHON=str(release / "runtime/.venv/bin/python"),
                PODS_TRANSCRIBE_SCRIPT=str(release / "runtime/transcribe.py"),
                PODS_EXTRACT_SCRIPT=str(release / "runtime/extract_article.py"),
+               PODS_SYNTHESIZE_SCRIPT=str(release / "runtime/synthesize.py"),
                PODS_STATE_DIR=str(STATE),
                PODS_MEMORY_GATE_NOTIFY="1",
                PODS_WHISPER_MODEL=config.get("whisper_model", str(Path.home() / "models/whisper-large-v3-mlx")))
@@ -234,8 +235,14 @@ def backend_env(config):
         env["PODS_MEMORY_OMLX_DEFER_BELOW_BYTES"] = str(int(config["memory_omlx_defer_below_bytes"]))
     if "memory_omlx_resume_above_bytes" in config:
         env["PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES"] = str(int(config["memory_omlx_resume_above_bytes"]))
+    if "memory_tts_defer_below_bytes" in config:
+        env["PODS_MEMORY_TTS_DEFER_BELOW_BYTES"] = str(int(config["memory_tts_defer_below_bytes"]))
+    if "memory_tts_resume_above_bytes" in config:
+        env["PODS_MEMORY_TTS_RESUME_ABOVE_BYTES"] = str(int(config["memory_tts_resume_above_bytes"]))
     if "article_max_words" in config:
         env["PODS_ARTICLE_MAX_WORDS"] = str(int(config["article_max_words"]))
+    if config.get("tts_voice"):
+        env["PODS_TTS_VOICE"] = str(config["tts_voice"])
     return env
 
 

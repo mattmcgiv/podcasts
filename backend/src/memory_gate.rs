@@ -1,8 +1,8 @@
 //! System memory gate for Mac inference.
 //!
-//! Defers Whisper spawn and oMLX lock acquire when available unified memory is
-//! low or macOS memory pressure is warn/critical. Does not pause HTTP, sync,
-//! speaker, RSS, download, refine, or ffmpeg.
+//! Defers Whisper spawn, TTS synthesis, and oMLX lock acquire when available
+//! unified memory is low or macOS memory pressure is warn/critical. Does not
+//! pause HTTP, sync, speaker, RSS, download, refine, or ffmpeg.
 //!
 //! Notification Center posts one pause banner and one resume banner per kind.
 //! Repeats while that kind stays paused or resumed are suppressed, including
@@ -25,6 +25,9 @@ const DEFAULT_WHISPER_DEFER: u64 = 8 * 1024 * 1024 * 1024;
 const DEFAULT_WHISPER_RESUME: u64 = 10 * 1024 * 1024 * 1024;
 const DEFAULT_OMLX_DEFER: u64 = 24 * 1024 * 1024 * 1024;
 const DEFAULT_OMLX_RESUME: u64 = 32 * 1024 * 1024 * 1024;
+// Kokoro-82M is far smaller than Whisper-large; thresholds scale with footprint.
+const DEFAULT_TTS_DEFER: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_TTS_RESUME: u64 = 6 * 1024 * 1024 * 1024;
 
 #[cfg(all(target_os = "macos", not(test)))]
 const PRESSURE_NORMAL: i32 = 0x01;
@@ -39,6 +42,7 @@ const MIG_ARRAY_TOO_LARGE: i32 = -307;
 pub enum InferenceKind {
     Whisper,
     Omlx,
+    Tts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +114,7 @@ pub struct MemoryReport {
     pub snapshot: MemorySnapshot,
     pub whisper: KindDecision,
     pub omlx: KindDecision,
+    pub tts: KindDecision,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +124,8 @@ pub struct GateConfig {
     pub whisper_resume_above_bytes: u64,
     pub omlx_defer_below_bytes: u64,
     pub omlx_resume_above_bytes: u64,
+    pub tts_defer_below_bytes: u64,
+    pub tts_resume_above_bytes: u64,
 }
 
 impl GateConfig {
@@ -129,6 +136,8 @@ impl GateConfig {
             whisper_resume_above_bytes: DEFAULT_WHISPER_RESUME,
             omlx_defer_below_bytes: DEFAULT_OMLX_DEFER,
             omlx_resume_above_bytes: DEFAULT_OMLX_RESUME,
+            tts_defer_below_bytes: DEFAULT_TTS_DEFER,
+            tts_resume_above_bytes: DEFAULT_TTS_RESUME,
         }
     }
 
@@ -139,6 +148,7 @@ impl GateConfig {
                 self.whisper_resume_above_bytes,
             ),
             InferenceKind::Omlx => (self.omlx_defer_below_bytes, self.omlx_resume_above_bytes),
+            InferenceKind::Tts => (self.tts_defer_below_bytes, self.tts_resume_above_bytes),
         }
     }
 }
@@ -147,6 +157,7 @@ impl GateConfig {
 struct KindStates {
     whisper: GateState,
     omlx: GateState,
+    tts: GateState,
 }
 
 impl KindStates {
@@ -154,6 +165,7 @@ impl KindStates {
         Self {
             whisper: GateState::Open,
             omlx: GateState::Open,
+            tts: GateState::Open,
         }
     }
 
@@ -161,6 +173,7 @@ impl KindStates {
         match kind {
             InferenceKind::Whisper => self.whisper,
             InferenceKind::Omlx => self.omlx,
+            InferenceKind::Tts => self.tts,
         }
     }
 }
@@ -169,6 +182,7 @@ impl KindStates {
 struct PostedStates {
     whisper: Option<GateState>,
     omlx: Option<GateState>,
+    tts: Option<GateState>,
 }
 
 impl PostedStates {
@@ -176,6 +190,7 @@ impl PostedStates {
         Self {
             whisper: None,
             omlx: None,
+            tts: None,
         }
     }
 
@@ -183,6 +198,7 @@ impl PostedStates {
         match kind {
             InferenceKind::Whisper => self.whisper,
             InferenceKind::Omlx => self.omlx,
+            InferenceKind::Tts => self.tts,
         }
     }
 
@@ -190,6 +206,7 @@ impl PostedStates {
         match kind {
             InferenceKind::Whisper => self.whisper = Some(state),
             InferenceKind::Omlx => self.omlx = Some(state),
+            InferenceKind::Tts => self.tts = Some(state),
         }
     }
 }
@@ -203,6 +220,11 @@ fn apply_posted_to_states(states: &mut KindStates, posted: PostedStates) {
     if let Some(state) = posted.omlx {
         if state != GateState::Disabled {
             states.omlx = state;
+        }
+    }
+    if let Some(state) = posted.tts {
+        if state != GateState::Disabled {
+            states.tts = state;
         }
     }
 }
@@ -227,6 +249,8 @@ pub fn parse_gate_config(
     whisper_resume: Option<&str>,
     omlx_defer: Option<&str>,
     omlx_resume: Option<&str>,
+    tts_defer: Option<&str>,
+    tts_resume: Option<&str>,
 ) -> GateConfig {
     let mut config = GateConfig::defaults();
     if let Some(value) = gate {
@@ -236,11 +260,16 @@ pub fn parse_gate_config(
     parse_bytes(whisper_resume, &mut config.whisper_resume_above_bytes);
     parse_bytes(omlx_defer, &mut config.omlx_defer_below_bytes);
     parse_bytes(omlx_resume, &mut config.omlx_resume_above_bytes);
+    parse_bytes(tts_defer, &mut config.tts_defer_below_bytes);
+    parse_bytes(tts_resume, &mut config.tts_resume_above_bytes);
     if config.whisper_resume_above_bytes < config.whisper_defer_below_bytes {
         config.whisper_resume_above_bytes = config.whisper_defer_below_bytes;
     }
     if config.omlx_resume_above_bytes < config.omlx_defer_below_bytes {
         config.omlx_resume_above_bytes = config.omlx_defer_below_bytes;
+    }
+    if config.tts_resume_above_bytes < config.tts_defer_below_bytes {
+        config.tts_resume_above_bytes = config.tts_defer_below_bytes;
     }
     config
 }
@@ -274,6 +303,12 @@ fn config_from_env() -> GateConfig {
         std::env::var("PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES")
             .ok()
             .as_deref(),
+        std::env::var("PODS_MEMORY_TTS_DEFER_BELOW_BYTES")
+            .ok()
+            .as_deref(),
+        std::env::var("PODS_MEMORY_TTS_RESUME_ABOVE_BYTES")
+            .ok()
+            .as_deref(),
     )
 }
 
@@ -300,6 +335,7 @@ pub fn require_inference(kind: InferenceKind) -> Result<(), Error> {
     let decision = match kind {
         InferenceKind::Whisper => &report.whisper,
         InferenceKind::Omlx => &report.omlx,
+        InferenceKind::Tts => &report.tts,
     };
     if decision.state == GateState::Deferred {
         return Err(Error::Upstream(MEMORY_BUSY.into()));
@@ -326,6 +362,7 @@ pub fn status_json() -> Value {
         "sampled_at": report.snapshot.sampled_at,
         "whisper": kind_json(&report.whisper),
         "omlx": kind_json(&report.omlx),
+        "tts": kind_json(&report.tts),
     })
 }
 
@@ -396,6 +433,12 @@ fn disabled_report(config: GateConfig, snapshot: MemorySnapshot) -> MemoryReport
             defer_below_bytes: config.omlx_defer_below_bytes,
             resume_above_bytes: config.omlx_resume_above_bytes,
         },
+        tts: KindDecision {
+            state: GateState::Disabled,
+            last_reason: None,
+            defer_below_bytes: config.tts_defer_below_bytes,
+            resume_above_bytes: config.tts_resume_above_bytes,
+        },
     }
 }
 
@@ -409,6 +452,7 @@ fn apply_with_states(
         *states = KindStates {
             whisper: GateState::Disabled,
             omlx: GateState::Disabled,
+            tts: GateState::Disabled,
         };
         return disabled_report(config, snapshot);
     }
@@ -424,6 +468,12 @@ fn apply_with_states(
         &snapshot,
         states.get(InferenceKind::Omlx),
     );
+    let tts = decide_kind(
+        InferenceKind::Tts,
+        config,
+        &snapshot,
+        states.get(InferenceKind::Tts),
+    );
     announce_transition(
         InferenceKind::Whisper,
         whisper.state,
@@ -438,13 +488,22 @@ fn apply_with_states(
         omlx.last_reason,
         posted,
     );
+    announce_transition(
+        InferenceKind::Tts,
+        tts.state,
+        &snapshot,
+        tts.last_reason,
+        posted,
+    );
     states.whisper = whisper.state;
     states.omlx = omlx.state;
+    states.tts = tts.state;
     MemoryReport {
         enabled: true,
         snapshot,
         whisper,
         omlx,
+        tts,
     }
 }
 
@@ -506,6 +565,7 @@ fn announce_transition(
     let label = match kind {
         InferenceKind::Whisper => "whisper",
         InferenceKind::Omlx => "omlx",
+        InferenceKind::Tts => "tts",
     };
     let from = posted.get(kind).unwrap_or(GateState::Open);
     if next == GateState::Deferred {
@@ -533,6 +593,7 @@ fn work_name(kind: InferenceKind) -> &'static str {
     match kind {
         InferenceKind::Whisper => "Transcription",
         InferenceKind::Omlx => "Classification",
+        InferenceKind::Tts => "Speech synthesis",
     }
 }
 
@@ -602,7 +663,7 @@ fn post_notification(body: &str) {
 
 fn format_posted(posted: PostedStates) -> String {
     let mut lines = String::new();
-    for kind in [InferenceKind::Whisper, InferenceKind::Omlx] {
+    for kind in [InferenceKind::Whisper, InferenceKind::Omlx, InferenceKind::Tts] {
         let Some(state) = posted.get(kind) else {
             continue;
         };
@@ -612,6 +673,7 @@ fn format_posted(posted: PostedStates) -> String {
         let label = match kind {
             InferenceKind::Whisper => "whisper",
             InferenceKind::Omlx => "omlx",
+            InferenceKind::Tts => "tts",
         };
         lines.push_str(label);
         lines.push('=');
@@ -635,6 +697,7 @@ fn parse_posted(text: &str) -> PostedStates {
         match key.trim() {
             "whisper" => posted.whisper = Some(state),
             "omlx" => posted.omlx = Some(state),
+            "tts" => posted.tts = Some(state),
             _ => {}
         }
     }
@@ -865,6 +928,8 @@ pub struct TestMemory {
     pub whisper_resume_above_bytes: u64,
     pub omlx_defer_below_bytes: u64,
     pub omlx_resume_above_bytes: u64,
+    pub tts_defer_below_bytes: u64,
+    pub tts_resume_above_bytes: u64,
 }
 
 #[cfg(test)]
@@ -884,6 +949,8 @@ impl Default for TestMemory {
             whisper_resume_above_bytes: config.whisper_resume_above_bytes,
             omlx_defer_below_bytes: config.omlx_defer_below_bytes,
             omlx_resume_above_bytes: config.omlx_resume_above_bytes,
+            tts_defer_below_bytes: config.tts_defer_below_bytes,
+            tts_resume_above_bytes: config.tts_resume_above_bytes,
         }
     }
 }
@@ -907,6 +974,8 @@ pub fn with_test_memory<R>(cfg: TestMemory, f: impl FnOnce() -> R) -> R {
                 whisper_resume_above_bytes: cfg.whisper_resume_above_bytes,
                 omlx_defer_below_bytes: cfg.omlx_defer_below_bytes,
                 omlx_resume_above_bytes: cfg.omlx_resume_above_bytes,
+                tts_defer_below_bytes: cfg.tts_defer_below_bytes,
+                tts_resume_above_bytes: cfg.tts_resume_above_bytes,
             },
             states: KindStates::open(),
             posted: PostedStates::empty(),
@@ -985,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_warn_defers_both_kinds_at_32_gib() {
+    fn pressure_warn_defers_all_kinds_at_32_gib() {
         with_test_memory(
             TestMemory {
                 snapshot: snap(gib(32), PressureLevel::Warn, false),
@@ -994,9 +1063,11 @@ mod tests {
             || {
                 assert!(require_inference(InferenceKind::Whisper).is_err());
                 assert!(require_inference(InferenceKind::Omlx).is_err());
+                assert!(require_inference(InferenceKind::Tts).is_err());
                 let report = evaluate();
                 assert_eq!(report.whisper.state, GateState::Deferred);
                 assert_eq!(report.omlx.state, GateState::Deferred);
+                assert_eq!(report.tts.state, GateState::Deferred);
                 assert_eq!(report.whisper.last_reason, Some("pressure_warn"));
                 assert!(should_preempt_whisper());
             },
@@ -1081,14 +1152,17 @@ mod tests {
 
     #[test]
     fn parse_gate_config_defaults_and_clamps_resume() {
-        let parsed = parse_gate_config(None, None, None, None, None);
+        let parsed = parse_gate_config(None, None, None, None, None, None, None);
         assert!(parsed.enabled);
         assert_eq!(parsed.whisper_defer_below_bytes, DEFAULT_WHISPER_DEFER);
-        let invalid = parse_gate_config(Some("0"), Some("nope"), Some(""), Some("3"), Some("1"));
+        assert_eq!(parsed.tts_defer_below_bytes, DEFAULT_TTS_DEFER);
+        let invalid = parse_gate_config(Some("0"), Some("nope"), Some(""), Some("3"), Some("1"), Some("5"), Some("2"));
         assert!(!invalid.enabled);
         assert_eq!(invalid.whisper_defer_below_bytes, DEFAULT_WHISPER_DEFER);
         assert_eq!(invalid.omlx_defer_below_bytes, 3);
         assert_eq!(invalid.omlx_resume_above_bytes, 3);
+        assert_eq!(invalid.tts_defer_below_bytes, 5);
+        assert_eq!(invalid.tts_resume_above_bytes, 5);
     }
 
     #[test]
@@ -1199,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_transition_posts_both_pause_notifications() {
+    fn pressure_transition_posts_all_pause_notifications() {
         with_test_memory(
             TestMemory {
                 snapshot: snap(gib(32), PressureLevel::Normal, false),
@@ -1215,6 +1289,7 @@ mod tests {
                     [
                         "Transcription paused due to warning-level memory pressure",
                         "Classification paused due to warning-level memory pressure",
+                        "Speech synthesis paused due to warning-level memory pressure",
                     ]
                 );
             },
@@ -1313,16 +1388,18 @@ mod tests {
 
     #[test]
     fn parse_posted_reads_open_and_deferred_and_ignores_junk() {
-        let parsed = parse_posted("whisper=deferred\nomlx=open\ngarbage\nwhisper=nope\n");
+        let parsed = parse_posted("whisper=deferred\nomlx=open\ntts=deferred\ngarbage\nwhisper=nope\n");
         assert_eq!(parsed.whisper, Some(GateState::Deferred));
         assert_eq!(parsed.omlx, Some(GateState::Open));
+        assert_eq!(parsed.tts, Some(GateState::Deferred));
         let empty = parse_posted("");
         assert_eq!(empty, PostedStates::empty());
         let formatted = format_posted(PostedStates {
             whisper: Some(GateState::Deferred),
             omlx: Some(GateState::Open),
+            tts: Some(GateState::Deferred),
         });
-        assert_eq!(formatted, "whisper=deferred\nomlx=open\n");
+        assert_eq!(formatted, "whisper=deferred\nomlx=open\ntts=deferred\n");
         assert_eq!(parse_posted(&formatted).omlx, Some(GateState::Open));
     }
 

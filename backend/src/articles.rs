@@ -14,6 +14,10 @@ pub const MAX_QUEUE_ATTEMPTS: u32 = 4;
 pub const PENDING: &str = "article_pending";
 pub const DEFAULT_MAX_WORDS: usize = 12_000;
 pub const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_VOICE: &str = "af_heart";
+pub const DEFAULT_TTS_MODEL: &str = "mlx-community/Kokoro-82M-bf16";
+pub const DEFAULT_TTS_REVISION: &str = "a71e4d38b236d968966a2002c4c895dbd12b1c3c";
+pub const TTS_PIPELINE_VERSION: &str = "pods-article-v1-kokoro-82m-bf16-aac128";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingArticle {
@@ -123,6 +127,80 @@ pub fn max_words() -> usize {
         .unwrap_or(DEFAULT_MAX_WORDS)
 }
 
+/// Kokoro voice preset. Validated fail-fast so a bad override never burns a
+/// synthesis run; the worker reads PODS_TTS_VOICE once per job.
+pub fn tts_voice() -> Result<String, Error> {
+    let voice = std::env::var("PODS_TTS_VOICE").unwrap_or_else(|_| DEFAULT_VOICE.into());
+    if voice.is_empty()
+        || voice.len() > 64
+        || !voice
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(Error::Invalid("invalid TTS voice".into()));
+    }
+    Ok(voice)
+}
+
+pub fn tts_model() -> String {
+    std::env::var("PODS_TTS_MODEL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_TTS_MODEL.into())
+}
+
+pub fn tts_revision() -> String {
+    std::env::var("PODS_TTS_REVISION")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_TTS_REVISION.into())
+}
+
+/// Manifest written by synthesize.py. Durations are measured, not estimated.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SynthesizedSection {
+    #[allow(dead_code)]
+    pub heading: String,
+    pub file: String,
+    pub samples: u64,
+    pub duration: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SynthesizeManifest {
+    #[allow(dead_code)]
+    pub voice: String,
+    #[allow(dead_code)]
+    pub model: String,
+    pub sample_rate: u32,
+    pub sections: Vec<SynthesizedSection>,
+}
+
+impl SynthesizeManifest {
+    pub fn validate(&self, expected_sections: usize) -> Result<(), Error> {
+        if self.sample_rate != 24000 {
+            return Err(Error::Invalid("synthesis manifest has wrong sample rate".into()));
+        }
+        if self.sections.len() != expected_sections || expected_sections == 0 {
+            return Err(Error::Invalid("synthesis manifest section mismatch".into()));
+        }
+        if self.sections.iter().any(|section| {
+            section.samples == 0
+                || !section.duration.is_finite()
+                || section.duration <= 0.0
+                || section.file.is_empty()
+                || section.file.contains(['/', '\\'])
+        }) {
+            return Err(Error::Invalid("synthesis manifest has bad section".into()));
+        }
+        Ok(())
+    }
+
+    pub fn total_duration(&self) -> f64 {
+        self.sections.iter().map(|section| section.duration).sum()
+    }
+}
+
 pub fn enqueue(db: &crate::db::Database, url: &str) -> Result<(), Error> {
     let queued = db
         .scalar_string("SELECT value FROM settings WHERE key=?", [LISTEN_SETTING])?
@@ -228,6 +306,50 @@ mod tests {
         std::env::set_var("PODS_ARTICLE_MAX_WORDS", "0");
         assert_eq!(max_words(), DEFAULT_MAX_WORDS);
         std::env::remove_var("PODS_ARTICLE_MAX_WORDS");
+    }
+
+    #[test]
+    fn voice_config_defaults_and_rejects_garbage() {
+        std::env::remove_var("PODS_TTS_VOICE");
+        assert_eq!(tts_voice().unwrap(), DEFAULT_VOICE);
+        std::env::set_var("PODS_TTS_VOICE", "am_michael");
+        assert_eq!(tts_voice().unwrap(), "am_michael");
+        for bad in ["", "af heart", "af-heart", "../af_heart", &"a".repeat(65)] {
+            std::env::set_var("PODS_TTS_VOICE", bad);
+            assert!(tts_voice().is_err(), "{bad}");
+        }
+        std::env::remove_var("PODS_TTS_VOICE");
+    }
+
+    #[test]
+    fn validates_synthesis_manifests() {
+        let section = SynthesizedSection {
+            heading: "H".into(),
+            file: "section-000.wav".into(),
+            samples: 24000,
+            duration: 1.0,
+        };
+        let good = SynthesizeManifest {
+            voice: "af_heart".into(),
+            model: "m".into(),
+            sample_rate: 24000,
+            sections: vec![section.clone()],
+        };
+        assert!(good.validate(1).is_ok());
+        assert_eq!(good.total_duration(), 1.0);
+        assert!(good.validate(2).is_err());
+        let wrong_rate = SynthesizeManifest { sample_rate: 44100, ..good.clone() };
+        assert!(wrong_rate.validate(1).is_err());
+        let bad_file = SynthesizeManifest {
+            sections: vec![SynthesizedSection { file: "../evil.wav".into(), ..section.clone() }],
+            ..good.clone()
+        };
+        assert!(bad_file.validate(1).is_err());
+        let silent = SynthesizeManifest {
+            sections: vec![SynthesizedSection { samples: 0, duration: 0.0, ..section }],
+            ..good
+        };
+        assert!(silent.validate(1).is_err());
     }
 
     #[test]

@@ -3,6 +3,8 @@ name = "pods-local-transcription"
 version = "0.1.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "misaki[en]>=0.9.4",
+    "mlx-audio>=0.5.5",
     "mlx-whisper==0.4.3",
     "trafilatura>=2.2.0",
 ]

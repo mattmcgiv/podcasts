@@ -1733,6 +1733,39 @@ open(out, "w").write(json.dumps(payload))
     std::env::set_var("PODS_EXTRACT_SCRIPT", &path);
 }
 
+/// Shared synthesize stub: identical content and path in every test so parallel
+/// cases set the same PODS_SYNTHESIZE_SCRIPT value. Writes one silent second
+/// per article section; URLs containing synthesize-fail exit nonzero.
+fn synthesize_stub() {
+    let path = std::env::temp_dir().join("pods-synthesize-stub.py");
+    std::fs::write(
+        &path,
+        r#"import json, sys, wave
+from pathlib import Path
+argv = sys.argv
+article = json.loads(Path(argv[argv.index("--article") + 1]).read_text())
+out = Path(argv[argv.index("--out-dir") + 1])
+if "synthesize-fail" in article.get("url", ""):
+    sys.exit(2)
+out.mkdir(parents=True, exist_ok=True)
+sections = []
+for index, section in enumerate(article["sections"]):
+    name = f"section-{index:03d}.wav"
+    with wave.open(str(out / name), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24000)
+        handle.writeframes(b"\0" * 24000 * 2)
+    sections.append({"heading": section.get("heading", ""), "file": name,
+                     "samples": 24000, "duration": 1.0})
+(out / "manifest.json").write_text(json.dumps(
+    {"voice": "af_heart", "model": "stub", "sample_rate": 24000, "sections": sections}))
+"#,
+    )
+    .unwrap();
+    std::env::set_var("PODS_SYNTHESIZE_SCRIPT", &path);
+}
+
 fn job_string(backend: &Backend, column: &str, episode: i64) -> String {
     backend
         .db
@@ -1756,8 +1789,9 @@ fn job_int(backend: &Backend, column: &str, episode: i64) -> i64 {
 }
 
 #[test]
-fn article_fetch_resolves_metadata_and_waits_at_synthesizing() {
+fn article_pipeline_renders_audio_and_waits_at_show_notes() {
     extract_stub();
+    synthesize_stub();
     let (backend, _temp, fetcher) = article_fixture();
     fetcher.set("https://example.com/story", "<!DOCTYPE html><html><body><p>Hi</p></body></html>");
     pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
@@ -1798,10 +1832,19 @@ fn article_fetch_resolves_metadata_and_waits_at_synthesizing() {
         .unwrap();
     assert_eq!(queued, Some(1));
 
-    assert_eq!(job_string(&backend, "stage", episode), "synthesizing");
+    assert_eq!(job_string(&backend, "stage", episode), "show_notes");
     assert_eq!(job_int(&backend, "attempts", episode), 0);
     assert_eq!(job_string(&backend, "error", episode), "article_pending");
     assert!(job_int(&backend, "next_retry_at", episode) > 0);
+    let manifest: String = backend
+        .db
+        .scalar_string("SELECT manifest_json FROM browser_artifacts WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    let manifest: Value = serde_json::from_str(&manifest).unwrap();
+    assert!((manifest["duration"].as_f64().unwrap() - 2.0).abs() < 0.3);
+    assert!(!manifest["chunks"].as_array().unwrap().is_empty());
+    assert_eq!(manifest["timeline"].as_array().unwrap().len(), 1);
     let notices: i64 = backend
         .db
         .scalar_i64("SELECT COUNT(*) FROM browser_processing_notifications", [])
@@ -1835,6 +1878,24 @@ fn article_extraction_failure_consumes_an_attempt() {
     assert_eq!(job_string(&backend, "stage", episode), "retry");
     assert_eq!(job_int(&backend, "attempts", episode), 1);
     assert!(job_string(&backend, "error", episode).contains("no readable text"));
+}
+
+#[test]
+fn article_synthesis_failure_consumes_an_attempt() {
+    extract_stub();
+    synthesize_stub();
+    let (backend, _temp, fetcher) = article_fixture();
+    fetcher.set("https://example.com/synthesize-fail", "<!DOCTYPE html><html><body><p>Hi</p></body></html>");
+    pods_backend::articles::enqueue(&backend.db, "https://example.com/synthesize-fail").unwrap();
+    pods_backend::local_worker::step(&backend).unwrap();
+    let episode: i64 = backend
+        .db
+        .scalar_i64("SELECT id FROM episodes WHERE guid='https://example.com/synthesize-fail'", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(job_string(&backend, "stage", episode), "retry");
+    assert_eq!(job_int(&backend, "attempts", episode), 1);
+    assert!(job_string(&backend, "error", episode).contains("speech synthesis failed"));
 }
 
 #[test]

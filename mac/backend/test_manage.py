@@ -321,6 +321,8 @@ class ManageTests(unittest.TestCase):
                 "memory_whisper_resume_above_bytes": 2,
                 "memory_omlx_defer_below_bytes": 3,
                 "memory_omlx_resume_above_bytes": 4,
+                "memory_tts_defer_below_bytes": 5,
+                "memory_tts_resume_above_bytes": 6,
             }
             env = manage.backend_env(config)
             self.assertEqual(config["desec_token"], "placeholder-token")
@@ -333,15 +335,21 @@ class ManageTests(unittest.TestCase):
             self.assertEqual(env["PODS_MEMORY_WHISPER_RESUME_ABOVE_BYTES"], "2")
             self.assertEqual(env["PODS_MEMORY_OMLX_DEFER_BELOW_BYTES"], "3")
             self.assertEqual(env["PODS_MEMORY_OMLX_RESUME_ABOVE_BYTES"], "4")
+            self.assertEqual(env["PODS_MEMORY_TTS_DEFER_BELOW_BYTES"], "5")
+            self.assertEqual(env["PODS_MEMORY_TTS_RESUME_ABOVE_BYTES"], "6")
             memory_env = {key: env[key] for key in env if key.startswith("PODS_MEMORY")}
             self.assertNotIn("placeholder-token", str(memory_env))
 
     def test_backend_env_points_at_extract_script_and_word_cap(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):
-            env = manage.backend_env({"whisper_model": "/models/w", "article_max_words": 5000})
+            env = manage.backend_env({"whisper_model": "/models/w", "article_max_words": 5000, "tts_voice": "am_michael"})
             self.assertEqual(env["PODS_EXTRACT_SCRIPT"], str(Path(directory) / "current/runtime/extract_article.py"))
+            self.assertEqual(env["PODS_SYNTHESIZE_SCRIPT"], str(Path(directory) / "current/runtime/synthesize.py"))
             self.assertEqual(env["PODS_ARTICLE_MAX_WORDS"], "5000")
-            self.assertNotIn("PODS_ARTICLE_MAX_WORDS", manage.backend_env({"whisper_model": "/models/w"}))
+            self.assertEqual(env["PODS_TTS_VOICE"], "am_michael")
+            sparse = manage.backend_env({"whisper_model": "/models/w"})
+            self.assertNotIn("PODS_ARTICLE_MAX_WORDS", sparse)
+            self.assertNotIn("PODS_TTS_VOICE", sparse)
 
     def test_backend_env_forwards_typesafe_key_and_classifier(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(manage, "STATE", Path(directory)):

@@ -1991,9 +1991,235 @@ fn process_article(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         params![article.title, article.image_url, id],
     )?;
     progress(backend, id, 2, 2)?;
+    let work = document.parent().unwrap_or_else(|| Path::new("."));
+    let voice = crate::articles::tts_voice().map_err(failure)?;
     stage(backend, id, "synthesizing")?;
+    progress(backend, id, 0, article.sections.len() as u64)?;
+    crate::power_gate::require_external_power()?;
+    crate::pipeline_pause::require_not_paused()?;
+    crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Tts)?;
+    let tts_dir = work.join("tts");
+    run_synthesize_child(
+        backend,
+        id,
+        &document,
+        &tts_dir,
+        &voice,
+        article.sections.len(),
+    )?;
+    let synth: crate::articles::SynthesizeManifest = serde_json::from_slice(
+        &fs::read(tts_dir.join("manifest.json")).map_err(failure)?,
+    )
+    .map_err(failure)?;
+    synth.validate(article.sections.len()).map_err(failure)?;
+    for section in &synth.sections {
+        if !tts_dir.join(&section.file).is_file() {
+            return Err(failure("synthesis manifest references missing audio"));
+        }
+    }
+    stage(backend, id, "rendering")?;
+    let source_hash = ArtifactStore::hash_file(&document).map_err(failure)?.0;
+    let revision = crate::articles::tts_revision();
+    let run = hex::encode(Sha256::digest(format!(
+        "{}:{source_hash}:{voice}:{revision}",
+        crate::articles::TTS_PIPELINE_VERSION
+    )));
+    let rendered = work.join(format!("processed-{run}.m4a"));
+    if !rendered.is_file() {
+        let reserve =
+            (synth.total_duration() * 32_000.0).ceil() as u64 + 16 * 1024 * 1024;
+        require_capacity(backend, reserve)?;
+        render_article_concat(&tts_dir, &synth, &rendered)?;
+    }
+    let actual_duration = audio_duration(&rendered)?;
+    if (actual_duration - synth.total_duration()).abs() > PROCESSED_DURATION_TOLERANCE_SECS {
+        return Err(failure("processed duration mismatch"));
+    }
+    let (hash, bytes) = ArtifactStore::hash_file(&rendered).map_err(failure)?;
+    let mut file = fs::File::open(&rendered).map_err(failure)?;
+    let mut chunks = Vec::new();
+    loop {
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(CHUNK_SIZE as u64)
+            .read_to_end(&mut bytes)
+            .map_err(failure)?;
+        if bytes.is_empty() {
+            break;
+        }
+        chunks.push(hex::encode(Sha256::digest(&bytes)));
+    }
+    let dest = backend
+        .artifacts
+        .prepare_dest(&format!("published/{hash}.m4a"))
+        .map_err(failure)?;
+    if !dest.exists() {
+        fs::rename(&rendered, &dest).map_err(failure)?;
+    }
+    let manifest = Manifest {
+        version: 1,
+        episode_id: id,
+        hash,
+        source_hash,
+        bytes: bytes as u64,
+        duration: actual_duration,
+        chunk_size: CHUNK_SIZE,
+        chunks,
+        timeline: vec![Interval {
+            original_start: 0.0,
+            original_end: actual_duration,
+            processed_start: 0.0,
+        }],
+        model: format!("{}#{}", crate::articles::tts_model(), revision),
+        pipeline_version: run,
+        media: String::new(),
+        width: 0,
+        height: 0,
+        listen_title: String::new(),
+    };
+    backend.db.with_transaction(|tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO browser_artifacts VALUES(?,?,?)",
+            params![
+                manifest.hash,
+                id,
+                serde_json::to_string(&manifest).map_err(failure)?
+            ],
+        )?;
+        Ok(())
+    })?;
+    stage(backend, id, "show_notes")?;
     persist_busy(backend, id, crate::articles::PENDING, 3600)?;
     Ok(())
+}
+
+fn render_article_concat(
+    tts_dir: &Path,
+    synth: &crate::articles::SynthesizeManifest,
+    dest: &Path,
+) -> Result<(), Error> {
+    let list = dest.with_extension("concat");
+    let mut entries = String::new();
+    for section in &synth.sections {
+        let path = tts_dir.join(&section.file);
+        entries.push_str(&format!(
+            "file '{}'\n",
+            path.to_string_lossy().replace('\'', "'\\''")
+        ));
+    }
+    fs::write(&list, entries).map_err(failure)?;
+    let temp = dest.with_extension("partial.m4a");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i",
+        ])
+        .arg(&list)
+        .args([
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-movflags", "+faststart",
+        ])
+        .arg(&temp)
+        .status()
+        .map_err(failure)?;
+    if !status.success() {
+        return Err(failure("audio rendering failed"));
+    }
+    fs::rename(temp, dest).map_err(failure)
+}
+
+/// Long synthesis runs poll section progress and preempt on pause, power, or
+/// memory pressure. Section WAVs are checkpoints, so the next run resumes.
+fn run_synthesize_child(
+    backend: &Backend,
+    id: i64,
+    article: &Path,
+    tts_dir: &Path,
+    voice: &str,
+    total: usize,
+) -> Result<(), Error> {
+    let python = std::env::var("PODS_PYTHON").unwrap_or_else(|_| "python3".into());
+    let script = std::env::var("PODS_SYNTHESIZE_SCRIPT")
+        .map_err(|_| failure("PODS_SYNTHESIZE_SCRIPT is required"))?;
+    let model = crate::articles::tts_model();
+    let revision = crate::articles::tts_revision();
+    fs::create_dir_all(tts_dir).map_err(failure)?;
+    #[cfg(unix)]
+    {
+        let mut child = Command::new(&python)
+            .arg(&script)
+            .args([
+                "--article",
+                &article.to_string_lossy(),
+                "--out-dir",
+                &tts_dir.to_string_lossy(),
+                "--voice",
+                voice,
+                "--model",
+                &model,
+                "--revision",
+                &revision,
+            ])
+            .process_group(0)
+            .spawn()
+            .map_err(failure)?;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if child.try_wait().map_err(failure)?.is_some() {
+                break;
+            }
+            let done = fs::read_dir(tts_dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|entry| {
+                            entry.file_name().to_string_lossy().starts_with("section-")
+                                && entry.path().extension().is_some_and(|ext| ext == "wav")
+                        })
+                        .count() as u64
+                })
+                .unwrap_or(0);
+            progress(backend, id, done.min(total as u64), total as u64)?;
+            let gates = (|| {
+                crate::pipeline_pause::require_not_paused()?;
+                crate::power_gate::require_external_power()?;
+                crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Tts)?;
+                Ok(())
+            })();
+            if let Err(error) = gates {
+                preempt_process_group(&mut child);
+                return Err(error);
+            }
+        }
+        let status = child.wait().map_err(failure)?;
+        if !status.success() {
+            return Err(failure("speech synthesis failed"));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (backend, id, total);
+        let status = Command::new(&python)
+            .arg(&script)
+            .args([
+                "--article",
+                &article.to_string_lossy(),
+                "--out-dir",
+                &tts_dir.to_string_lossy(),
+                "--voice",
+                voice,
+                "--model",
+                &model,
+                "--revision",
+                &revision,
+            ])
+            .status()
+            .map_err(failure)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(failure("speech synthesis failed"))
+        }
+    }
 }
 
 fn run_extract_child(url: &str, html: &std::path::Path, dest: &std::path::Path) -> Result<(), Error> {
