@@ -350,6 +350,33 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertEqual(PipelineLibraryLink.confirmation(.podcast), "Subscribed.")
     }
 
+    func testLibraryLinkArticleCopyAndStages() {
+        // The menu cannot tell feeds from articles; the backend sniffs the fetch.
+        XCTAssertEqual(PipelineLibraryLink.classify("https://example.com/story"), .podcast)
+        XCTAssertEqual(
+            PipelineLibraryLink.preview(.podcast),
+            "Subscribe to this podcast, or queue it as an article."
+        )
+        XCTAssertEqual(PipelineLibraryKind(rawValue: "article"), .article)
+        XCTAssertEqual(
+            PipelineLibraryLink.confirmation(.article),
+            "Added that article to Listen. It will be read aloud after processing."
+        )
+        let fetching = PipelineEpisode(
+            id: "1", episodeId: 1, title: "Story", podcastTitle: "Articles", stage: "fetching",
+            blockingReason: nil, lastErrorMessage: "article_pending", completedUnits: nil, totalUnits: nil
+        )
+        XCTAssertEqual(fetching.stageLabel, "Fetching article")
+        XCTAssertFalse(fetching.needsAttention)
+        XCTAssertFalse(fetching.isWaiting)
+        let synthesizing = PipelineEpisode(
+            id: "2", episodeId: 2, title: "Story", podcastTitle: "Articles", stage: "synthesizing",
+            blockingReason: nil, lastErrorMessage: nil, completedUnits: 2, totalUnits: 4
+        )
+        XCTAssertEqual(synthesizing.stageLabel, "Synthesizing audio")
+        XCTAssertEqual(synthesizing.progress, 0.5)
+    }
+
     func testPendingYouTubeListenAppearsInTheQueueBeforeAJobExists() throws {
         let episodes = PipelineListenQueue.episodes(
             from: #"[{"url":"https://www.youtube.com/watch?v=O4G5neJScvU","attempts":0,"next_at":0}]"#,

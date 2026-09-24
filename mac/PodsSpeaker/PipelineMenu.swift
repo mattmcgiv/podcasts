@@ -27,6 +27,8 @@ struct PipelineEpisode: Decodable, Identifiable {
         case "downloaded": return "Waiting to transcribe"
         case "transcribing": return "Transcribing"
         case "classifying": return "Finding ad breaks"
+        case "fetching": return "Fetching article"
+        case "synthesizing": return "Synthesizing audio"
         case "failed": return "Processing failed"
         case "blocked", "review": return "Needs attention"
         case "retry": return "Waiting to retry"
@@ -546,17 +548,20 @@ enum PipelineLibraryKind: String {
     case channel
     case video
     case podcast
+    case article
     case invalid
 }
 
 enum PipelineLibraryLink {
-    static let refusal = "Paste a podcast feed, a channel, or a video."
+    static let refusal = "Paste a podcast feed, a channel, a video, or an article."
 
     static func preview(_ kind: PipelineLibraryKind) -> String {
         switch kind {
         case .channel: return "Subscribe to this channel. The two newest videos will be prepared."
         case .video: return "Add this video to Listen. The channel is not subscribed."
-        case .podcast: return "Subscribe to this podcast."
+        // Feed-vs-article is undecidable locally; the backend sniffs the fetch.
+        case .podcast: return "Subscribe to this podcast, or queue it as an article."
+        case .article: return "Add this article to Listen. The Mac will read it aloud."
         case .invalid: return refusal
         }
     }
@@ -566,6 +571,7 @@ enum PipelineLibraryLink {
         case .channel: return "Subscribed. The two newest videos will be prepared."
         case .video: return "Added that video to Listen."
         case .podcast: return "Subscribed."
+        case .article: return "Added that article to Listen. It will be read aloud after processing."
         case .invalid: return refusal
         }
     }
@@ -691,7 +697,7 @@ private struct PipelineAddLink: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Podcast feed or YouTube link")
+            Text("Podcast feed, YouTube, or article link")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(PipelineTheme.muted)
             HStack(spacing: 8) {
@@ -702,7 +708,7 @@ private struct PipelineAddLink: View {
                     .frame(height: 34)
                     .background(PipelineTheme.surface, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.18), lineWidth: 1))
-                    .accessibilityLabel("Podcast feed or YouTube link")
+                    .accessibilityLabel("Podcast feed, YouTube, or article link")
                     .onSubmit(submit)
                 Button(action: submit) {
                     Text(adding ? "Adding…" : "Add")

@@ -161,6 +161,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         return Ok(true);
     }
     prepare_youtube(backend);
+    drain_article_listen(backend);
     if backend
         .db
         .scalar_string(
@@ -208,6 +209,9 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let Some((episode, url, _)) = candidate else {
         return retitle_one_published(backend);
     };
+    if crate::articles::url_from_source(&url).is_some() {
+        return park_article(backend, episode);
+    }
     if storage_status(backend)["blocked"] == true {
         backend.db.execute(
             "UPDATE browser_jobs SET error='storage_limit',next_retry_at=? WHERE episode_id=?",
@@ -1934,6 +1938,59 @@ fn canonicalize_youtube_subscriptions(backend: &Backend) {
                 crate::youtube::RESOLVE_AFTER_SETTING,
                 (now + 60).to_string()
             ],
+        );
+    }
+}
+
+/// Article jobs wait visibly at `fetching` without consuming attempts until
+/// the extraction unit owns the stage. Replaced, not extended, by unit 2.
+fn park_article(backend: &Backend, episode: i64) -> Result<bool, Error> {
+    stage(backend, episode, "fetching")?;
+    persist_busy(backend, episode, crate::articles::PENDING, 3600)?;
+    Ok(true)
+}
+
+fn drain_article_listen(backend: &Backend) {
+    let Some(raw) = backend
+        .db
+        .scalar_string(
+            "SELECT value FROM settings WHERE key=?",
+            [crate::articles::LISTEN_SETTING],
+        )
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let mut items: Vec<crate::articles::PendingArticle> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    let now = crate::db::now_unix();
+    let Some(index) = items.iter().position(|item| item.next_at <= now) else {
+        return;
+    };
+    let url = items[index].url.clone();
+    match backend.add_article(&url) {
+        Ok(_) => {
+            items.remove(index);
+        }
+        Err(_) => {
+            items[index].attempts += 1;
+            if items[index].attempts >= crate::articles::MAX_QUEUE_ATTEMPTS {
+                items.remove(index);
+            } else {
+                items[index].next_at = now + 60 * (1_i64 << items[index].attempts.min(6));
+            }
+        }
+    }
+    if items.is_empty() {
+        let _ = backend.db.execute(
+            "DELETE FROM settings WHERE key=?",
+            [crate::articles::LISTEN_SETTING],
+        );
+    } else if let Ok(value) = serde_json::to_string(&items) {
+        let _ = backend.db.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![crate::articles::LISTEN_SETTING, value],
         );
     }
 }

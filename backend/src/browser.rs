@@ -138,7 +138,7 @@ pub fn handle(backend: &Backend, request: &HttpRequest) -> HttpResponse {
         .with_header("cache-control", "no-store")
 }
 
-const LIBRARY_PASTE: &str = "Paste a podcast feed, a channel, or a video.";
+const LIBRARY_PASTE: &str = "Paste a podcast feed, a channel, a video, or an article.";
 
 fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error> {
     if request.method == "POST" && request.path() == "/api/internal/library" {
@@ -439,24 +439,43 @@ fn ingest_library_url(backend: &Backend, raw: &str) -> Result<&'static str, Erro
     if trimmed.is_empty() {
         return Err(Error::Invalid(LIBRARY_PASTE.into()));
     }
-    let (kind, entity, field) = match crate::youtube::classify(trimmed) {
+    match crate::youtube::classify(trimmed) {
         Ok(Some(crate::youtube::YoutubeInput::Video { .. })) => {
-            ("video", "listen", trimmed.to_string())
+            queue_library_action(backend, "listen", trimmed)?;
+            Ok("video")
         }
-        Ok(Some(input)) => (
-            "channel",
-            "subscription",
-            channel_subscription_url(&input, trimmed)?,
-        ),
-        Ok(None) => (
-            "podcast",
-            "subscription",
-            podcast_subscription_url(trimmed)?,
-        ),
-        Err(_) => return Err(Error::Invalid(LIBRARY_PASTE.into())),
-    };
-    queue_library_action(backend, entity, &field)?;
-    Ok(kind)
+        Ok(Some(input)) => {
+            let field = channel_subscription_url(&input, trimmed)?;
+            queue_library_action(backend, "subscription", &field)?;
+            Ok("channel")
+        }
+        Ok(None) => ingest_non_youtube_url(backend, trimmed),
+        Err(_) => Err(Error::Invalid(LIBRARY_PASTE.into())),
+    }
+}
+
+/// Feeds stay subscriptions; HTML the feed parser rejects becomes an article.
+/// Anything unexpected keeps the legacy behavior: subscribe and let refresh
+/// report errors later, so a failed sniff never loses a subscription.
+fn ingest_non_youtube_url(backend: &Backend, trimmed: &str) -> Result<&'static str, Error> {
+    let url = podcast_subscription_url(trimmed)?;
+    let fetched = backend.fetch_url(&url).ok();
+    if fetched
+        .as_deref()
+        .is_some_and(|data| crate::feeds::parse_feed(data).is_ok())
+    {
+        queue_library_action(backend, "subscription", &url)?;
+        return Ok("podcast");
+    }
+    if fetched
+        .as_deref()
+        .is_some_and(crate::articles::looks_like_html)
+    {
+        crate::articles::enqueue(&backend.db, &url)?;
+        return Ok("article");
+    }
+    queue_library_action(backend, "subscription", &url)?;
+    Ok("podcast")
 }
 
 fn channel_subscription_url(

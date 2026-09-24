@@ -1,3 +1,4 @@
+pub mod articles;
 pub mod auth;
 pub mod backend;
 pub mod bootstrap;

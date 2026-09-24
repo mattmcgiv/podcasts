@@ -1642,7 +1642,7 @@ fn pipeline_menu_ingests_a_channel_a_video_and_a_podcast_without_a_session() {
     let playlist = backend.handle(library_request("https://www.youtube.com/playlist?list=PL123"));
     assert_eq!(playlist.status_code, 422);
     let playlist_body: Value = serde_json::from_slice(&playlist.body).unwrap();
-    assert_eq!(playlist_body["error"], "Paste a podcast feed, a channel, or a video.");
+    assert_eq!(playlist_body["error"], "Paste a podcast feed, a channel, a video, or an article.");
 
     let browser = backend.handle(
         library_request("https://feeds.example/other.xml").with_header("origin", "https://pods.mcgiv.dev"),
@@ -1653,6 +1653,136 @@ fn pipeline_menu_ingests_a_channel_a_video_and_a_podcast_without_a_session() {
         Some(value) => std::env::set_var("PODS_YT_DLP", value),
         None => std::env::remove_var("PODS_YT_DLP"),
     }
+}
+
+fn article_fixture() -> (Backend, tempfile::TempDir, Arc<MockFeedFetcher>) {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let fetcher = Arc::new(MockFeedFetcher::default());
+    let mut backend = Backend::with_data_root(
+        db,
+        fetcher.clone(),
+        Arc::new(DisabledDirectory),
+        Some(temp.path().to_owned()),
+    );
+    backend.local = true;
+    (backend, temp, fetcher)
+}
+
+#[test]
+fn pipeline_menu_queues_article_html_and_still_subscribes_feeds() {
+    let (backend, _temp, fetcher) = article_fixture();
+    fetcher.set(
+        "https://example.com/story",
+        "<!DOCTYPE html><html><head><title>Story</title></head><body><p>Hi</p></body></html>",
+    );
+    fetcher.set(
+        "https://feeds.example/show.xml",
+        r#"<rss><channel><title>Show</title><item><title>Episode</title><enclosure url="https://example.org/a"/></item></channel></rss>"#,
+    );
+
+    let article = backend.handle(library_request("https://example.com/story"));
+    assert_eq!(article.status_code, 201, "{}", String::from_utf8_lossy(&article.body));
+    let article_body: Value = serde_json::from_slice(&article.body).unwrap();
+    assert_eq!(article_body["kind"], "article");
+    let queued: String = backend
+        .db
+        .scalar_string("SELECT value FROM settings WHERE key='browser_article_listen'", [])
+        .unwrap()
+        .unwrap();
+    assert!(queued.contains("https://example.com/story"));
+
+    let feed = backend.handle(library_request("https://feeds.example/show.xml"));
+    assert_eq!(feed.status_code, 201, "{}", String::from_utf8_lossy(&feed.body));
+    let feed_body: Value = serde_json::from_slice(&feed.body).unwrap();
+    assert_eq!(feed_body["kind"], "podcast");
+
+    // An unreachable URL keeps the legacy behavior: subscribe and let refresh report.
+    let unreachable = backend.handle(library_request("https://down.example/feed"));
+    assert_eq!(unreachable.status_code, 201);
+    let unreachable_body: Value = serde_json::from_slice(&unreachable.body).unwrap();
+    assert_eq!(unreachable_body["kind"], "podcast");
+}
+
+#[test]
+fn article_drain_creates_episode_and_parks_job_without_burning_attempts() {
+    let (backend, _temp, _) = article_fixture();
+    pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
+    assert!(pods_backend::local_worker::step(&backend).unwrap());
+
+    let episode: i64 = backend
+        .db
+        .scalar_i64("SELECT id FROM episodes WHERE guid='https://example.com/story'", [])
+        .unwrap()
+        .unwrap();
+    let show: String = backend
+        .db
+        .scalar_string("SELECT p.title FROM podcasts p JOIN episodes e ON e.podcast_id=p.id WHERE e.id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(show, "Articles");
+    let audio_url: String = backend
+        .db
+        .scalar_string("SELECT audio_url FROM episodes WHERE id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(audio_url, "article:https://example.com/story");
+    let queued: Option<i64> = backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM browser_pending_jobs WHERE episode_id=?", [episode])
+        .unwrap();
+    assert_eq!(queued, Some(1));
+
+    let stage: String = backend
+        .db
+        .scalar_string("SELECT stage FROM browser_jobs WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stage, "fetching");
+    let attempts: i64 = backend
+        .db
+        .scalar_i64("SELECT attempts FROM browser_jobs WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempts, 0);
+    let error: String = backend
+        .db
+        .scalar_string("SELECT error FROM browser_jobs WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(error, "article_pending");
+    let deferred: i64 = backend
+        .db
+        .scalar_i64("SELECT next_retry_at > 0 FROM browser_jobs WHERE episode_id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(deferred, 1);
+    let notices: i64 = backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM browser_processing_notifications", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(notices, 0);
+
+    // Re-adding the same URL re-queues without touching resolved metadata.
+    backend
+        .db
+        .execute("UPDATE episodes SET title='Real Title' WHERE id=?", [episode])
+        .unwrap();
+    pods_backend::articles::enqueue(&backend.db, "https://example.com/story").unwrap();
+    pods_backend::local_worker::step(&backend).unwrap();
+    let title: String = backend
+        .db
+        .scalar_string("SELECT title FROM episodes WHERE id=?", [episode])
+        .unwrap()
+        .unwrap();
+    assert_eq!(title, "Real Title");
+    let count: i64 = backend
+        .db
+        .scalar_i64("SELECT COUNT(*) FROM episodes WHERE guid='https://example.com/story'", [])
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 fn feedback_payload(id: &str, sequence: i64, report: &str, value: Value) -> Value {

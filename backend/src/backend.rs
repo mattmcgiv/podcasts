@@ -828,6 +828,79 @@ impl Backend {
             .ok_or_else(|| Error::Database("could not load added video".into()))
     }
 
+    pub(crate) fn fetch_url(&self, url: &str) -> Result<Vec<u8>, Error> {
+        match self.fetcher.fetch(url, &FeedValidators::default())? {
+            FeedFetchResponse::Data(data, _) => Ok(data),
+            FeedFetchResponse::NotModified(_) => Err(Error::Upstream("feed returned HTTP 304".into())),
+        }
+    }
+
+    /// One article URL becomes one episode under the shared Articles show.
+    /// Re-adding an existing URL re-queues it without touching its metadata.
+    pub fn add_article(&self, raw: &str) -> Result<i64, Error> {
+        let url = crate::articles::validate_url(raw)?;
+        self.db.with_transaction(|tx| {
+            let podcast_id = if let Some(id) = tx
+                .query_row(
+                    "SELECT id FROM podcasts WHERE feed_url = ?",
+                    params![crate::articles::SHOW_FEED_URL],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                id
+            } else {
+                tx.execute(
+                    "INSERT INTO podcasts (feed_url, title, is_subscribed, created_at) VALUES (?, ?, 0, ?)",
+                    params![
+                        crate::articles::SHOW_FEED_URL,
+                        crate::articles::SHOW_TITLE,
+                        db::now_unix()
+                    ],
+                )?;
+                tx.last_insert_rowid()
+            };
+            if let Some(id) = tx
+                .query_row(
+                    "SELECT id FROM episodes WHERE podcast_id = ? AND guid = ?",
+                    params![podcast_id, url],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                let episode_id: i64 = id;
+                tx.execute(
+                    "INSERT INTO episode_state (episode_id, played_at, archived_at, updated_at) VALUES (?, NULL, NULL, ?) ON CONFLICT(episode_id) DO UPDATE SET played_at = NULL, archived_at = NULL, updated_at = excluded.updated_at",
+                    params![episode_id, db::now_unix()],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO listen_episodes (episode_id) VALUES (?)",
+                    params![episode_id],
+                )?;
+                return Ok(episode_id);
+            }
+            let episode = crate::feeds::ParsedEpisode {
+                guid: url.clone(),
+                title: crate::articles::placeholder_title(&url),
+                notes_html: String::new(),
+                audio_url: crate::articles::source_url(&url),
+                duration_secs: None,
+                published_at: db::now_unix(),
+                image_url: String::new(),
+            };
+            let episode_id = upsert_episode(tx, podcast_id, &episode)?.0;
+            tx.execute(
+                "INSERT INTO episode_state (episode_id, played_at, archived_at, updated_at) VALUES (?, NULL, NULL, ?)",
+                params![episode_id, db::now_unix()],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO listen_episodes (episode_id) VALUES (?)",
+                params![episode_id],
+            )?;
+            Ok(episode_id)
+        })
+    }
+
     fn subscribe(&self, raw: &str) -> Result<Show, Error> {
         let requested = self.canonical_subscribe_url(raw)?;
         let (feed_url, url) = Self::normalized_feed_url(&requested)?;
