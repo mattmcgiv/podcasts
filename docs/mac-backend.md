@@ -245,6 +245,17 @@ cargo test --manifest-path backend/Cargo.toml --features passkey
 python3 -m unittest discover -s mac/backend -p 'test_*.py'
 ```
 
+Backend line coverage uses cargo-llvm-cov over the same passkey-feature suite.
+Install it once with `cargo install cargo-llvm-cov` plus `rustup component add llvm-tools-preview`.
+
+```sh
+dev/backend-coverage.sh
+```
+
+Reports land in `backend/target/llvm-cov/`: `html/index.html` for browsing and `lcov.info` for editors.
+Extra args pass through to the test run, e.g. `dev/backend-coverage.sh --fail-under-lines 85`.
+There is no enforced backend threshold yet; the September 2026 baseline is 86.8% lines and 81.9% functions.
+
 The frontend build emits `sw.js` and `offline-assets.json`.
 The service worker caches versioned app assets. See **Activate a client update**.
 A local static server does not apply Cloudflare `_headers`.
