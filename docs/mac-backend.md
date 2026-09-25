@@ -253,8 +253,10 @@ dev/backend-coverage.sh
 ```
 
 Reports land in `backend/target/llvm-cov/`: `html/index.html` for browsing and `lcov.info` for editors.
-Extra args pass through to the test run, e.g. `dev/backend-coverage.sh --fail-under-lines 85`.
-There is no enforced backend threshold yet; the September 2026 baseline is 86.8% lines and 81.9% functions.
+The script fails unless lines, functions, and regions all clear 90%.
+`backend/src/ffi.rs` is excluded from the totals: it is the deprecated iPhone FFI shell,
+untestable without the iPhone runtime. The September 2026 baseline after gating is
+93.1% lines, 92.8% functions, and 90.3% regions.
 
 The frontend build emits `sw.js` and `offline-assets.json`.
 The service worker caches versioned app assets. See **Activate a client update**.

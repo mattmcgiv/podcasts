@@ -396,6 +396,17 @@ mod tests {
     }
 
     #[test]
+    fn script_guard_survives_poisoned_lock() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = crate::local_worker::ENV_TEST_LOCK.lock().unwrap();
+            panic!("poison the env lock for coverage");
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let path = script(dir.path(), "ok");
+        with_script(&path, || {});
+    }
+
+    #[test]
     fn clips_transcripts_on_a_char_boundary() {
         assert_eq!(clip_report_text("  hello  "), "hello");
         assert_eq!(clip_report_text(&"a".repeat(4000)).len(), 4000);

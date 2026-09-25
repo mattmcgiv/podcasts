@@ -431,7 +431,7 @@ fn path_segments(path: &str) -> Vec<&str> {
 
 fn single_path(path: &str) -> Option<&str> {
     let segments = path_segments(path);
-    (segments.len() == 1).then_some(segments[0])
+    (segments.len() == 1).then(|| segments[0])
 }
 
 fn query_value(url: &url::Url, key: &str) -> Option<String> {

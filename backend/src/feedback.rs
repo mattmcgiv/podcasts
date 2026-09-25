@@ -531,6 +531,38 @@ mod tests {
     }
 
     #[test]
+    fn env_guard_survives_poisoned_serial() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ENV_SERIAL.lock().unwrap();
+            panic!("poison the env serial for coverage");
+        }));
+        let _env = EnvGuard::apply(vec![]);
+    }
+
+    #[test]
+    fn mock_omlx_consumes_request_body() {
+        use std::io::{Read, Write};
+        let mock = start_mock_omlx("test-model");
+        let port: u16 = mock
+            .url
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+    }
+
+    #[test]
     fn step_without_reports_is_noop() {
         let (backend, temp) = fixture();
         let _env = EnvGuard::apply(vec![(

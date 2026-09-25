@@ -192,12 +192,18 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::Duration;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn exchange(payload: &[u8]) -> (u16, String) {
+        exchange_fallible(payload).unwrap()
+    }
+
+    fn exchange_fallible(payload: &[u8]) -> Result<(u16, String), String> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle(stream).unwrap();
+            handle(stream)
         });
         let mut client = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
         client.write_all(payload).unwrap();
@@ -205,14 +211,55 @@ mod tests {
         let mut buf = Vec::new();
         let mut c = client;
         std::io::Read::read_to_end(&mut c, &mut buf).unwrap();
-        server.join().unwrap();
+        server.join().unwrap()?;
         let text = String::from_utf8_lossy(&buf);
         let status = text
             .split_whitespace()
             .nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        (status, text.into_owned())
+        Ok((status, text.into_owned()))
+    }
+
+    fn post_transcribe(body: &[u8]) -> Vec<u8> {
+        let header = format!(
+            "POST /transcribe HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut payload = header.into_bytes();
+        payload.extend_from_slice(body);
+        payload
+    }
+
+    fn with_env(vars: &[(&str, Option<&str>)]) -> EnvRestore {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| (key.to_string(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        EnvRestore { saved, _lock: _lock }
+    }
+
+    struct EnvRestore {
+        saved: Vec<(String, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -261,6 +308,7 @@ mod tests {
 
     #[test]
     fn transcribe_runs_fake_ffmpeg_ffprobe_and_parakeet() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -327,6 +375,74 @@ mod tests {
             Some(value) => std::env::set_var("PODS_PARAKEET_BIN", value),
             None => std::env::remove_var("PODS_PARAKEET_BIN"),
         }
+    }
+
+    #[test]
+    fn handle_rejects_malformed_transcribe_payload() {
+        let bad = post_transcribe(b"not json");
+        assert!(exchange_fallible(&bad).is_err());
+        let missing = post_transcribe(br#"{"other": 1}"#);
+        assert!(exchange_fallible(&missing).is_err());
+    }
+
+    #[test]
+    fn transcribe_reports_missing_ffmpeg_binary() {
+        let _env = with_env(&[("PODS_FFMPEG", Some("/nonexistent-cov-ffmpeg"))]);
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp3");
+        std::fs::write(&src, b"data").unwrap();
+        assert!(transcribe(&src).is_err());
+    }
+
+    #[test]
+    fn transcribe_reports_vanishing_ffmpeg_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("ffmpeg");
+        std::fs::write(&stub, "#!/bin/sh\nrm -f -- \"$0\"\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _env = with_env(&[("PODS_FFMPEG", stub.to_str())]);
+        let src = dir.path().join("src.mp3");
+        std::fs::write(&src, b"data").unwrap();
+        assert!(transcribe(&src).is_err());
+    }
+
+    #[test]
+    fn wav_duration_reports_missing_and_garbage_ffprobe() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let wav = dir.path().join("fixture.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        let nice = ["/usr/bin/nice", "/bin/nice"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| path.is_file())
+            .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nice, bin.join("nice")).unwrap();
+        let _env = with_env(&[("PATH", bin.to_str())]);
+        assert!(wav_duration_secs(&wav).is_err());
+        let ffprobe = bin.join("ffprobe");
+        std::fs::write(&ffprobe, "#!/bin/sh\necho bogus\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(wav_duration_secs(&wav).is_err());
+    }
+
+    #[test]
+    fn transcribe_wav_reports_missing_parakeet_binary() {
+        let _env = with_env(&[("PODS_PARAKEET_BIN", Some("/nonexistent-cov-parakeet"))]);
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("fixture.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        assert!(transcribe_wav(&wav).is_err());
     }
 }
 

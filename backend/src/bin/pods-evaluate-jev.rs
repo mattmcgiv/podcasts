@@ -4,7 +4,10 @@ use pods_backend::{jev, local_worker::{validate_segments, refine_boundaries, Seg
 use serde_json::json;
 use std::{fs::OpenOptions, io::Write};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    run(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+
+fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len()!=3 || !["legacy","adaptive","whole"].contains(&args[2].as_str()) {
         return Err("usage: pods-evaluate-jev TRANSCRIPT_JSON OUTPUT_JSON legacy|adaptive|whole".into());
     }
@@ -29,4 +32,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "input_tokens":windows.iter().map(|w|w.input_tokens).sum::<u64>(),"windows":windows,"labels":labels,"refined":refined});
     output.write_all(&serde_json::to_vec_pretty(&report)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn run_validates_args_and_transcript() {
+        assert!(run(&args(&[])).is_err());
+        assert!(run(&args(&["a", "b", "bogus"])).is_err());
+        assert!(run(&args(&["/nonexistent-cov-transcript.json", "/tmp/x.json", "whole"])).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("transcript.json");
+        std::fs::write(&transcript, "not json").unwrap();
+        let out = dir.path().join("out.json");
+        let result = run(&args(&[
+            transcript.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "whole",
+        ]));
+        assert!(result.is_err());
+    }
 }
