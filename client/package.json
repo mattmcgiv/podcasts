@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "tsc --noEmit && vitest run --coverage"
+    "check": "tsc --noEmit && vitest run --coverage && node ./scripts/check-coverage.mjs"
   },
   "dependencies": {
     "react": "19.2.7",

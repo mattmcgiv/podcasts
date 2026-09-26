@@ -8,6 +8,7 @@ type LifecycleTestWindow = Window & {
 const lifecycleWindow = window as LifecycleTestWindow;
 
 afterEach(() => {
+  if (typeof window === "undefined") return;
   delete window.webkit;
   delete lifecycleWindow.__PODS_UI_READY;
 });
@@ -46,5 +47,10 @@ describe("postPodsLifecycleEvent", () => {
     expect(lifecycleWindow.__PODS_UI_READY).toBe(false);
     expect(readinessAtPost).toEqual([false]);
     expect(postMessage).toHaveBeenCalledWith({ event: "ui-failed" });
+  });
+
+  it("does nothing when there is no window", () => {
+    vi.stubGlobal("window", undefined);
+    expect(() => postPodsLifecycleEvent("ui-ready")).not.toThrow();
   });
 });

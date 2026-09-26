@@ -40,6 +40,8 @@ export type PlayerEpisode = EpisodeItem & {
 export interface PlayerApi {
   current: PlayerEpisode | null;
   playing: boolean;
+  /** True while a play request is in flight, before the engine confirms it. */
+  starting: boolean;
   initializing: boolean;
   expanded: boolean;
   position: number;
@@ -99,6 +101,7 @@ export function usePlayer(): PlayerApi {
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [current, setCurrent] = useState<PlayerEpisode | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [position, setPosition] = useState(0);
@@ -180,6 +183,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     currentEpisodeVisitRef.current = null;
     setCurrent(null);
     setPlaying(false);
+    setStarting(false);
     setInitializing(false);
     setExpanded(false);
     setPosition(0);
@@ -377,6 +381,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           pendingVideoRef.current = null;
           beginVideo(node, item, resumeAt);
         }
+        setStarting(true);
         loadEpisodeDetail(item.id);
         if (offlineEnabled()) queueSharedResume();
         return;
@@ -399,11 +404,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         a.src = item.audio_url;
       }
+      // The source is armed but nothing is audible yet: surface the in-flight
+      // start so the play button can show a loading state instead of a flat
+      // Play icon. Cleared by the engine's play/pause/error events below.
+      setStarting(true);
       void a.play().catch((error: unknown) => {
         if (request !== playRequestRef.current) return;
         if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
         else logDiagnostic("playback-rejected", rejectionDetail(item.id, error));
         setPlaying(false);
+        setStarting(false);
         setInitializing(false);
       });
       updateMediaSessionMetadata(metadata);
@@ -468,10 +478,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   endedRef.current = handleEnded;
 
   function wireEngine(a: AudioEngine) {
-    a.preload = "metadata";
-    a.addEventListener("play", () => setPlaying(true));
+    // Keep the buffer warm (see BrowserSpeakerEngine): resume latency is the
+    // main complaint, worst over Bluetooth.
+    a.preload = "auto";
+    a.addEventListener("play", () => {
+      setPlaying(true);
+      setStarting(false);
+    });
     a.addEventListener("pause", () => {
       setPlaying(false);
+      setStarting(false);
       flushPosition();
     });
     const adoptDuration = () => {
@@ -494,6 +510,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     a.addEventListener("ended", () => void endedRef.current());
     a.addEventListener("error", () => {
       setInitializing(false);
+      setStarting(false);
       logDiagnostic("playback-error", `episode_id=${currentRef.current?.id ?? "none"} video=${videoActiveRef.current}`);
     });
     a.addEventListener("cast", ((e: Event) => {
@@ -532,6 +549,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
       else logDiagnostic("playback-rejected", rejectionDetail(item.id, error));
       setPlaying(false);
+      setStarting(false);
       setInitializing(false);
     });
     updateMediaSessionMetadata(audioMetadata(item));
@@ -553,12 +571,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const attachVideo = useCallback((node: HTMLVideoElement | null) => {
     videoNodeRef.current = node;
-    if (!node) return;
+    if (!node) {
+      // The sheet unmounted before a deferred video start: do not leave the
+      // mini player stuck on a spinner.
+      if (pendingVideoRef.current) setStarting(false);
+      return;
+    }
     const pending = pendingVideoRef.current;
     const item = pending?.item ?? (currentRef.current && isVideoMedia(currentRef.current) ? currentRef.current : null);
     if (!item || !isVideoMedia(item)) return;
     pendingVideoRef.current = null;
     beginVideo(node, item, pending?.resumeAt ?? (item.position_secs > 1 ? item.position_secs : 0));
+    // beginVideo re-issues play(). A redundant play() on an element that is
+    // already playing fires no "play" event, so only keep the in-flight flag
+    // when the element is still paused.
+    setStarting(!!pending || (audioRef.current?.paused ?? false));
     // beginVideo closes over the latest player helpers. The node identity is the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -644,6 +671,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const request = ++playRequestRef.current;
     const play = () => a.play().catch((error: unknown) => {
       if (request !== playRequestRef.current) return;
+      setStarting(false);
       if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") {
         gestureRetryRef.current = cur.id;
       } else {
@@ -651,17 +679,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
     });
     if (a.paused && gestureRetryRef.current === cur.id) {
+      setStarting(true);
       gestureRetryRef.current = null;
       void play();
     } else if (a.paused && offlineEnabled()) {
+      setStarting(true);
       void syncBeforePlayback().then(() => Api.episode(cur.id)).then(item => {
         if (request !== playRequestRef.current || currentRef.current?.id !== item.id || item.played_at != null) return;
         beginPlaybackSession(item.id, item.position_revision);
         a.currentTime = item.position_secs;
         return play();
       }).catch(() => { if (request === playRequestRef.current && currentRef.current?.id === cur.id) void play(); });
-    } else if (a.paused) void play();
-    else a.pause();
+    } else if (a.paused) {
+      setStarting(true);
+      void play();
+    } else a.pause();
   }, []);
 
   const seekTo = useCallback((secs: number) => {
@@ -739,6 +771,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     () => ({
       current,
       playing,
+      starting,
       initializing,
       expanded,
       position,
@@ -768,6 +801,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [
       current,
       playing,
+      starting,
       initializing,
       expanded,
       position,

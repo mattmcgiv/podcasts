@@ -13,6 +13,27 @@ describe("classifyYoutube", () => {
     expect(classifyYoutube("https://example.com/feed.xml")).toBeNull();
     expect(classifyYoutube("https://www.youtube.com/playlist?list=PL123")).toBeNull();
   });
+
+  it("rejects blank and unparsable input", () => {
+    expect(classifyYoutube("")).toBeNull();
+    expect(classifyYoutube("   ")).toBeNull();
+    expect(classifyYoutube("not a url")).toBeNull();
+    expect(classifyYoutube("@veritasium/x")).toBeNull();
+  });
+
+  it("accepts bare channel ids and vanity paths", () => {
+    expect(classifyYoutube("UCabcdefghijklmnopqrstuv")).toBe("channel");
+    expect(classifyYoutube("https://www.youtube.com/c/veritasium")).toBe("channel");
+    expect(classifyYoutube("https://www.youtube.com/user/veritasium")).toBe("channel");
+    expect(classifyYoutube("https://music.youtube.com/watch?v=abcdefghijk")).toBe("video");
+  });
+
+  it("rejects malformed video and channel ids", () => {
+    expect(classifyYoutube("https://youtu.be/xx")).toBeNull();
+    expect(classifyYoutube("https://www.youtube.com/watch?v=xx")).toBeNull();
+    expect(classifyYoutube("https://www.youtube.com/channel/short")).toBeNull();
+    expect(classifyYoutube("https://www.youtube.com/c/")).toBeNull();
+  });
 });
 
 describe("isVideoMedia", () => {

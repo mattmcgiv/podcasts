@@ -70,7 +70,10 @@ export class BrowserSpeakerEngine extends EventTarget implements AudioEngine {
       ? crypto.randomUUID()
       : `sess-${Date.now()}`);
     this.local = new Audio() as LocalAudio;
-    this.local.preload = "metadata";
+    // "metadata" leaves the start buffer cold: every resume has to refetch
+    // and WebKit has to renegotiate the output route — worst over Bluetooth.
+    // "auto" keeps the active source buffered so play() can start fast.
+    this.local.preload = "auto";
     this.bindLocal();
     this.onOnline = () => {
       if (!this.authFailed && !this.destroyed) void this.refreshAvailability(this.op);

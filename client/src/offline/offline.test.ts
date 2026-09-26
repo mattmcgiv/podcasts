@@ -556,6 +556,83 @@ describe("verified downloads and local Range playback", () => {
     expect(emptyState().preferences.count).toBe(50);
     expect(emptyState().preferences).not.toHaveProperty("pins");
   });
+  it("quietly skips downloads and cleanups with nothing stored", async () => {
+    await downloadEpisode(1);
+    expect(await allDownloads()).toEqual([]);
+    await seed();
+    await cleanupPlayedDownload(999);
+    expect(await allDownloads()).toEqual([]);
+  });
+  it("evicts the oldest downloads first when room runs out", async () => {
+    await prepareAudio();
+    await writeRecord("downloads", "c".repeat(64), { hash: "c".repeat(64), episode: 7, bytes: 100, received: 100, complete: true, touched: 0 });
+    await writeRecord("downloads", "d".repeat(64), { hash: "d".repeat(64), episode: 8, bytes: 100, received: 100, complete: true, touched: 0 });
+    await updateState(s => { s.preferences.limit = 10; });
+    await downloadEpisode(1);
+    expect((await allDownloads()).map(d => d.episode)).toEqual([1]);
+  });
+  it("refuses downloads when browser storage is nearly full", async () => {
+    await prepareAudio();
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "storage");
+    Object.defineProperty(navigator, "storage", { configurable: true, value: { estimate: async () => ({ quota: 1000, usage: 990 }) } });
+    try {
+      await expect(downloadEpisode(1)).rejects.toThrow("Browser storage is full");
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "storage", descriptor);
+      else Reflect.deleteProperty(navigator, "storage");
+    }
+  });
+  it("chains a second download behind a running one", async () => {
+    const bytes = new TextEncoder().encode("abcdefgh").buffer;
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
+    await seed();
+    await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
+    let finishFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockImplementation(url => {
+      if (String(url).includes("/artifacts/")) return new Promise(resolve => { finishFetch = resolve; });
+      return Promise.reject(new Error("Mac unavailable"));
+    });
+    const first = downloadEpisode(1);
+    const second = downloadEpisode(1);
+    await vi.waitFor(() => expect(currentDownloadProgress()?.episode).toBe(1));
+    finishFetch(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await first;
+    await second;
+    expect((await allDownloads())[0].complete).toBe(true);
+  });
+  it("rejects episodes with a malformed manifest", async () => {
+    await seed();
+    await updateState(s => { s.snapshot!.episodes[0].manifest!.chunk_size = 7; });
+    await expect(downloadEpisode(1)).rejects.toThrow("Invalid audio manifest");
+  });
+  it("abandons a download when the episode is marked played mid-transfer", async () => {
+    const chunk = new Uint8Array(1024 ** 2);
+    const digest = await crypto.subtle.digest("SHA-256", chunk);
+    const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
+    await seed();
+    await updateState(s => {
+      const m = s.snapshot!.episodes[0].manifest!;
+      m.bytes = 2 * 1024 ** 2; m.chunks = [digestHex, digestHex];
+    });
+    let calls = 0;
+    vi.mocked(fetch).mockImplementation(async url => {
+      if (!String(url).includes("/artifacts/")) throw new Error("Mac unavailable");
+      calls++;
+      if (calls === 1) await updateState(s => { s.snapshot!.episodes[0].played_at = 1; });
+      return new Response(chunk.buffer.slice(0), { status: 206, headers: { "Content-Range": "bytes 0-1048575/2097152" } });
+    });
+    await downloadEpisode(1);
+    expect(calls).toBe(1);
+    expect(await allDownloads()).toEqual([]);
+    expect(currentDownloadProgress()).toBeNull();
+  });
+  it("stops the automatic queue once the plan exceeds the limit", async () => {
+    await prepareAudio();
+    await updateState(s => { s.preferences.limit = 10; s.preferences.count = 2; });
+    await prefetch();
+    expect((await allDownloads()).map(d => d.episode)).toEqual([1]);
+  });
 });
 
 describe("automatic Listen downloads", () => {
@@ -816,5 +893,50 @@ describe("notification dismissal", () => {
     await clearNotifications(5);
     await clearNotifications(3);
     expect(store.visibleNotifications(await state())).toEqual([]);
+  });
+});
+
+describe("offline storage failures", () => {
+  async function withAbortedStoreMethod(method: "get" | "put" | "getAll" | "delete", run: () => Promise<unknown>) {
+    const db = await store.openDatabase();
+    const proto = Object.getPrototypeOf(db.transaction("meta", "readonly").objectStore("meta"));
+    db.close();
+    const original = proto[method];
+    proto[method] = function (...args: unknown[]) {
+      const request = original.apply(this, args);
+      try { (this as IDBObjectStore).transaction.abort(); } catch { /* already settled */ }
+      return request;
+    };
+    try {
+      await expect(run()).rejects.toThrow();
+      await new Promise(resolve => setTimeout(resolve, 5));
+    } finally {
+      proto[method] = original;
+    }
+  }
+
+  it("rolls back a state change that throws instead of writing a partial record", async () => {
+    await seed();
+    await expect(updateState(() => { throw new Error("boom"); })).rejects.toThrow("boom");
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect((await state()).snapshot?.episodes).toHaveLength(2);
+  });
+
+  it("rejects instead of hanging when the stored database is newer than this build", async () => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open("pods-offline-v1", 3);
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    await expect(readRecord("meta", "state")).rejects.toThrow();
+  });
+
+  it("surfaces aborted reads, writes, listings, and deletes", async () => {
+    await seed();
+    await withAbortedStoreMethod("get", () => readRecord("meta", "state"));
+    await withAbortedStoreMethod("put", () => writeRecord("meta", "probe", { ok: true }));
+    await expect(readRecord("meta", "probe")).resolves.toBeUndefined();
+    await withAbortedStoreMethod("getAll", () => allDownloads());
+    await withAbortedStoreMethod("delete", () => deleteDownload(hash));
   });
 });

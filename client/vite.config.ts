@@ -33,6 +33,7 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       exclude: ["src/test/**", "src/types.ts", "src/main.tsx"],
+      reporter: ["text", "html", "clover", "json", "json-summary"],
       thresholds: {
         lines: 90,
         statements: 90,

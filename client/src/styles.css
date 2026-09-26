@@ -1286,6 +1286,18 @@ input[type="search"]::-webkit-search-cancel-button {
   .stream-pulse { animation: none; opacity: 0.75; }
 }
 
+.play-spinner {
+  animation: play-spin 0.9s linear infinite;
+}
+
+@keyframes play-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .play-spinner { animation: none; opacity: 0.75; }
+}
+
 .skip {
   position: relative;
   color: var(--text);

@@ -66,6 +66,7 @@ function Probe() {
       <button onClick={() => p.setExpanded(false)}>collapse</button>
       <button onClick={p.retryShowNotes}>retry-notes</button>
       <button onClick={() => p.setCastOutput("local")}>cast-local</button>
+      <button onClick={p.retryMacAvailability}>retry-mac</button>
       <button onClick={p.undoAdSkip}>undo-skip</button>
       <span data-testid="state">
         {p.current
@@ -1470,5 +1471,185 @@ describe("PlayerProvider automatic download cleanup", () => {
     expect(await allDownloads()).toEqual([expect.objectContaining({ hash: NEXT_HASH, episode: 2 })]);
     expect(await readRecord("downloads", ARTIFACT_HASH)).toBeUndefined();
     spy.mockRestore();
+  });
+});
+
+describe("PlayerProvider edge guards", () => {
+  it("throws when used outside the provider", () => {
+    expect(() => render(<Probe />)).toThrow("usePlayer outside PlayerProvider");
+  });
+
+  it("closes playback on pods-close-episode for the current id", async () => {
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+    act(() => {
+      window.dispatchEvent(new CustomEvent("pods-close-episode", { detail: { id: 1 } }));
+    });
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("none"));
+  });
+
+  it("ignores ended events with nothing loaded", async () => {
+    await setup();
+    act(() => {
+      FakeAudio.last().emitEnded();
+    });
+    expect(screen.getByTestId("state")).toHaveTextContent("none");
+  });
+
+  it("ignores toggle with nothing loaded", async () => {
+    const { user } = await setup();
+    await user.click(screen.getByText("toggle"));
+    expect(screen.getByTestId("state")).toHaveTextContent("none");
+  });
+
+  it("drops settings that resolve after unmount", async () => {
+    installApi(baseRoutes());
+    const rendered = render(
+      <PlayerProvider>
+        <Probe />
+      </PlayerProvider>,
+    );
+    rendered.unmount();
+    await act(async () => {});
+  });
+
+  it("ignores mark-played-and-close with nothing loaded", async () => {
+    const { user } = await setup();
+    await user.click(screen.getByText("done"));
+    expect(screen.getByTestId("state")).toHaveTextContent("none");
+  });
+
+  it("retries Mac cast discovery on demand", async () => {
+    const { user } = await setup();
+    await user.click(screen.getByText("retry-mac"));
+    expect(screen.getByTestId("state")).toHaveTextContent("none");
+  });
+
+  it("skips position state without a media session", async () => {
+    Object.defineProperty(navigator, "mediaSession", { configurable: true, value: undefined });
+    const intervals: Array<() => void> = [];
+    const setIntervalSpy = vi.spyOn(window, "setInterval").mockImplementation((fn) => {
+      intervals.push(fn as () => void);
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    try {
+      const { user } = await setup();
+      await user.click(screen.getByText("play1"));
+      await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+      act(() => {
+        for (const tick of intervals) tick();
+      });
+      expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("refuses offline playback without a download", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    const { user } = await setup();
+    await user.click(screen.getByText("play1"));
+    expect(screen.getByTestId("state")).toHaveTextContent("none");
+  });
+
+  it("retries on the next tap after autoplay is blocked", async () => {
+    const { user } = await setup();
+    const blocked = Promise.reject(new DOMException("play() can only be initiated by a user gesture", "NotAllowedError"));
+    blocked.catch(() => {});
+    FakeAudio.pendingPlay = blocked;
+    await user.click(screen.getByText("play1"));
+    expect(FakeAudio.pendingPlay).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(screen.getByTestId("state")).toHaveTextContent("1:paused");
+    await user.click(screen.getByText("toggle"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+  });
+
+  it("logs a diagnostic when playback fails for any other reason", async () => {
+    const { user } = await setup();
+    FakeAudio.failNextPlay = true;
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:paused"));
+    expect(readDiagnostics().some(entry => entry.kind === "playback-rejected" && entry.detail.includes("1"))).toBe(true);
+  });
+
+  it("ignores a play failure that lands after switching episodes", async () => {
+    const { user } = await setup();
+    let rejectPlay: (error: unknown) => void = () => {};
+    const stalled = new Promise<void>((_, reject) => { rejectPlay = reject; });
+    stalled.catch(() => {});
+    FakeAudio.pendingPlay = stalled;
+    await user.click(screen.getByText("play1"));
+    await user.click(screen.getByText("play9"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("9:playing"));
+    rejectPlay(new Error("stale play failed"));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByTestId("state")).toHaveTextContent("9:playing");
+  });
+
+  it("stays put when the next episode fails to load after ended", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { user } = await setup({ "GET /api/next": new HttpError(500, { error: "boom" }) });
+      await user.click(screen.getByText("play1"));
+      await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+      await act(async () => FakeAudio.last().emitEnded());
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("playback_next_failed")));
+      expect(screen.getByTestId("state")).toHaveTextContent("none");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("drops duplicate completions and a next episode that lands after switching", async () => {
+    let resolveMark: (value: unknown) => void = () => {};
+    let resolveNext: (value: unknown) => void = () => {};
+    const markStalled = new Promise(resolve => { resolveMark = resolve; });
+    const nextStalled = new Promise(resolve => { resolveNext = resolve; });
+    const { calls, user } = await setup({
+      "POST /api/episodes/1/played": () => markStalled,
+      "GET /api/next": () => nextStalled,
+    });
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+    act(() => { FakeAudio.last().emitEnded(); });
+    act(() => { FakeAudio.last().emitEnded(); });
+    resolveMark(null);
+    await waitFor(() => expect(calls.some(c => c.key === "GET /api/next")).toBe(true));
+    await user.click(screen.getByText("play9"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("9:playing"));
+    resolveNext(null);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByTestId("state")).toHaveTextContent("9:playing");
+  });
+
+  it("does not chain autoplay from an ended episode the user already left", async () => {
+    let resolveMark: (value: unknown) => void = () => {};
+    const stalled = new Promise(resolve => { resolveMark = resolve; });
+    const { user } = await setup({ "POST /api/episodes/1/played": () => stalled });
+    await user.click(screen.getByText("play1"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("1:playing"));
+    act(() => { FakeAudio.last().emitEnded(); });
+    await user.click(screen.getByText("play9"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("9:playing"));
+    resolveMark(null);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByTestId("state")).toHaveTextContent("9:playing");
+  });
+
+  it("drops episode detail that lands after switching episodes", async () => {
+    let resolveDetail: (value: unknown) => void = () => {};
+    const stalled = new Promise(resolve => { resolveDetail = resolve; });
+    const { user, calls } = await setup({ "GET /api/episodes/1": () => stalled });
+    await user.click(screen.getByText("play1"));
+    await user.click(screen.getByText("play9"));
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("9:playing"));
+    expect(calls.filter(c => c.key === "GET /api/episodes/1")).toHaveLength(1);
+    resolveDetail({ ...episode({ id: 1, position_secs: 30 }), notes_html: "<p>stale</p>", archived_at: null });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByTestId("state")).toHaveTextContent("9:playing");
+    expect(screen.getByTestId("show-notes")).toHaveTextContent("none");
   });
 });

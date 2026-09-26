@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ContinueListening, SyncStatus } from "./SharedState";
 import { emptyState, type LocalState } from "./store";
+import type { Show } from "../types";
 import { Api } from "../api";
 import { resolveConflict, state, syncError, syncInFlight, synchronize } from "./client";
 import { prefetch } from "./downloads";
@@ -134,4 +135,45 @@ it("asks for the passkey when the Mac needs a sign-in and reports a failed attem
   vi.mocked(signInAndSync).mockRejectedValue(new Error("Passkey sign-in failed"));
   fireEvent.click(screen.getByRole("button",{name:"Continue with passkey"}));
   expect(await screen.findByRole("alert")).toHaveTextContent("Passkey sign-in failed");
+});
+it("names a subscription or setting in conflict notices", async()=>{
+  local.snapshot!.shows=[{feed_url:"https://s.example/rss",title:"Sub Show"} as unknown as Show];
+  local.outbox=[{id:"1",sequence:1,entity:"subscription",field:"https://s.example/rss",value:true,base_revision:0,conflict:4}];
+  render(<SyncStatus/>);
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed Sub Show"));
+  local.outbox=[{id:"2",sequence:2,entity:"settings",field:"autoplay",value:true,base_revision:0,conflict:4}];
+  window.dispatchEvent(new Event("pods-offline-changed"));
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed a setting"));
+});
+it("falls back when the dismissal store throws", async()=>{
+  vi.spyOn(sessionStorage,"getItem").mockImplementationOnce(()=>{throw new Error("denied");});
+  render(<SyncStatus/>);
+  expect(await screen.findByRole("status")).toHaveTextContent("not synchronized");
+});
+it("stays quiet when the local snapshot cannot load", async()=>{
+  vi.mocked(state).mockRejectedValueOnce(new Error("db down"));
+  render(<SyncStatus/>);
+  await act(async()=>{await vi.mocked(state).mock.results[0]?.value.catch(()=>{});});
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+it("syncs and prefetches from the Sync now button", async()=>{
+  render(<SyncStatus/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Sync now"}));
+  await waitFor(()=>expect(synchronize).toHaveBeenCalled());
+  await waitFor(()=>expect(prefetch).toHaveBeenCalled());
+  await waitFor(()=>expect(screen.getByRole("button",{name:"Sync now"})).toBeEnabled());
+});
+it("retries a conflicted change even when the prefetch fails", async()=>{
+  local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0,conflict:4}];
+  vi.mocked(prefetch).mockRejectedValue(new Error("offline"));
+  render(<SyncStatus/>);
+  fireEvent.click(await screen.findByRole("button",{name:/Keep this device.s change/}));
+  await waitFor(()=>expect(resolveConflict).toHaveBeenCalledWith("1",true));
+  await waitFor(()=>expect(screen.getByRole("button",{name:"Use the shared change"})).toBeEnabled());
+});
+it("hides continue listening when the episode detail fails to load", async()=>{
+  vi.mocked(Api.episode).mockRejectedValueOnce(new Error("gone"));
+  render(<ContinueListening/>);
+  await act(async()=>{});
+  expect(screen.queryByText("Continue listening")).not.toBeInTheDocument();
 });

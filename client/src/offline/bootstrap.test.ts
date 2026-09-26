@@ -2,6 +2,7 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { bootstrapOffline } from "./bootstrap";
 import * as client from "./client";
 import * as downloads from "./downloads";
+import * as voice from "../voice";
 vi.mock("./client", () => ({ backendBase: () => "https://sync.pods.mcgiv.dev:8443", offlineEnabled: vi.fn(), synchronize: vi.fn() }));
 vi.mock("./downloads", () => ({ prefetch: vi.fn(), sweepStaleDownloads: vi.fn() }));
 vi.mock("../voice", () => ({ flushVoiceDrafts: vi.fn().mockResolvedValue(undefined) }));
@@ -49,6 +50,41 @@ it("retries on a failed sync instead of waiting for the minute interval", async 
   expect(afterFail).toBeGreaterThan(initial);
   await vi.advanceTimersByTimeAsync(5000);
   expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFail);
+});
+
+it("fails clearly when the service worker never reports ready", async () => {
+  const register = vi.fn().mockResolvedValue({});
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: new Promise(() => {}) } });
+  Object.defineProperty(navigator, "storage", { configurable: true, value: {} });
+  const pending = bootstrapOffline();
+  pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(30000);
+  await expect(pending).rejects.toThrow("did not finish");
+});
+
+it("stops retrying once the Mac answers and shrugs off background failures", async () => {
+  const register = vi.fn().mockResolvedValue({});
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
+  Object.defineProperty(navigator, "storage", { configurable: true, value: {} });
+  await bootstrapOffline();
+  await vi.waitFor(() => expect(downloads.prefetch).toHaveBeenCalled());
+  const initial = vi.mocked(client.synchronize).mock.calls.length;
+  vi.mocked(client.synchronize).mockRejectedValueOnce(new Error("Mac unavailable"));
+  vi.mocked(client.synchronize).mockResolvedValue();
+  vi.mocked(downloads.prefetch).mockRejectedValue(new Error("prefetch failed"));
+  vi.mocked(voice.flushVoiceDrafts).mockRejectedValue(new Error("voice failed"));
+  window.dispatchEvent(new Event("online"));
+  await vi.waitFor(() => expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(initial));
+  const afterFail = vi.mocked(client.synchronize).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(60000);
+  await vi.waitFor(() => expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFail));
+  vi.mocked(downloads.prefetch).mockResolvedValue();
+  vi.mocked(voice.flushVoiceDrafts).mockResolvedValue(undefined);
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+  vi.mocked(downloads.sweepStaleDownloads).mockRejectedValueOnce(new Error("sweep failed"));
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.waitFor(() => expect(downloads.sweepStaleDownloads).toHaveBeenCalled());
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
 
 it("backs off while the Mac stays down instead of retrying every five seconds", async () => {

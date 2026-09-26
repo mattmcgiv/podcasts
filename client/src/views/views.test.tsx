@@ -1653,6 +1653,73 @@ describe("ShowsView search", () => {
     await waitFor(() => expect(calls.some((call) => call.key === "GET /api/search")).toBe(true));
     expect(calls.find((call) => call.key === "GET /api/search")?.url.searchParams.get("q")).toBe("abc");
   });
+
+  it("shows search failures inline", async () => {
+    installApi({
+      ...settings,
+      "GET /api/search": new HttpError(500, { error: "search exploded" }),
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "oops");
+    await screen.findByText(/search exploded/);
+  });
+
+  it("starts playback from a search result row", async () => {
+    installApi({
+      ...settings,
+      "GET /api/search": {
+        directory_configured: true,
+        podcasts: [],
+        episodes: [episode({ id: 9, title: "Result Ep", audio_url: "https://h.example/9.mp3" })],
+      },
+      "GET /api/episodes/9": { ...episode({ id: 9 }), notes_html: "", archived_at: null },
+      "PUT /api/episodes/9/position": null,
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "result");
+    await user.click(await screen.findByText("Result Ep"));
+    expect(FakeAudio.last().src).toBe("https://h.example/9.mp3");
+  });
+
+  it("swallows mark-played failures on search results", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/search": {
+        directory_configured: true,
+        podcasts: [],
+        episodes: [episode({ id: 8, title: "Flaky Ep" })],
+      },
+      "POST /api/episodes/8/played": new HttpError(500, { error: "boom" }),
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "flaky");
+    await user.click(await screen.findByRole("button", { name: "Mark played" }));
+    await waitFor(() => expect(calls.some((c) => c.key === "POST /api/episodes/8/played")).toBe(true));
+    expect(screen.getByText("Flaky Ep")).toBeInTheDocument();
+  });
+
+  it("ignores subscribe taps once subscribed", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/search": {
+        directory_configured: true,
+        podcasts: [{ title: "Once Pod", author: "", feed_url: "https://o.example/rss", image_url: "", description: "", subscribed: false }],
+        episodes: [],
+      },
+      "POST /api/shows": show({ title: "Once Pod" }),
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "once");
+    await user.click(await screen.findByRole("button", { name: "Subscribe" }));
+    const done = await screen.findByRole("button", { name: "Subscribed" });
+    fireEvent.click(done);
+    expect(calls.filter((c) => c.key === "POST /api/shows")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Subscribed" })).toBeInTheDocument();
+  });
 });
 
 describe("ShowsView", () => {

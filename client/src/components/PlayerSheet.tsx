@@ -5,7 +5,7 @@ import { fmtTime } from "../lib";
 import { usePlayer } from "../player";
 import { Artwork } from "./Artwork";
 import { isVideoMedia } from "../youtube";
-import { PauseIcon, PlayIcon } from "./MiniPlayer";
+import { PauseIcon, PlayIcon, SpinnerIcon } from "./MiniPlayer";
 
 let nextSpeedInteraction = 1;
 
@@ -52,6 +52,7 @@ export function PlayerSheet() {
   }, [p.pendingAdSkip]);
   if (!p.current || !p.expanded) return null;
   const ep = p.current;
+  const awaiting = p.starting && !p.playing;
   const showNotes = (ep.show_notes ?? []).filter(
     (note) => Number.isFinite(note.start_time) && note.start_time >= 0,
   );
@@ -132,7 +133,7 @@ export function PlayerSheet() {
           <span>{p.duration > 0 ? `-${fmtTime(Math.max(0, p.duration - p.position))}` : "--:--"}</span>
         </div>
 
-        {p.initializing && (
+        {(p.initializing || p.starting) && (
           <div className="stream-initializing" role="status" aria-label={isVideoMedia(ep) ? "Loading video" : "Loading audio"}>
             <span className="stream-pulse" aria-hidden />
             <span>{isVideoMedia(ep) ? "Loading video" : "Loading audio"}</span>
@@ -157,8 +158,13 @@ export function PlayerSheet() {
             </svg>
             <span className="skip-label">15</span>
           </button>
-          <button className="play-big" onClick={p.toggle} aria-label={p.playing ? "Pause" : "Play"}>
-            {p.playing ? <PauseIcon size={38} /> : <PlayIcon size={38} />}
+          <button
+            className={`play-big${awaiting ? " is-starting" : ""}`}
+            onClick={p.toggle}
+            aria-label={p.playing ? "Pause" : "Play"}
+            aria-busy={awaiting}
+          >
+            {awaiting ? <SpinnerIcon size={38} /> : p.playing ? <PauseIcon size={38} /> : <PlayIcon size={38} />}
           </button>
           <button className="icon-btn skip" onClick={p.skipForward} aria-label="Forward 30 seconds">
             <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>

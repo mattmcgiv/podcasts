@@ -129,4 +129,52 @@ describe("App", () => {
     expect(document.querySelector(".tab-swipe-forward")).toBeTruthy();
     await screen.findByRole("heading", { name: "Played" });
   });
+
+  it("clears the swipe animation shortly after the tab changes", async () => {
+    installApi(shellRoutes);
+    render(<App />);
+    await screen.findByText("Fresh Episode");
+
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(document.querySelector(".tab-swipe-forward")).toBeTruthy();
+    await screen.findByRole("heading", { name: "Played" });
+    await vi.waitFor(() => expect(document.querySelector(".tab-swipe-forward")).toBeNull());
+  });
+
+  it("ignores short, vertical, and past-the-edge swipes", async () => {
+    installApi(shellRoutes);
+    window.location.hash = "#/recent";
+    render(<App />);
+    await screen.findByText("Fresh Episode");
+    const main = screen.getByRole("main");
+
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 250, clientY: 242 }] });
+    expect(window.location.hash).toBe("#/recent");
+
+    fireEvent.touchStart(main, { touches: [{ clientX: 200, clientY: 400 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 210, clientY: 100 }] });
+    expect(window.location.hash).toBe("#/recent");
+
+    fireEvent.touchStart(main, { touches: [{ clientX: 80, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 275, clientY: 246 }] });
+    expect(window.location.hash).toBe("#/recent");
+    expect(document.querySelector(".tab-swipe-forward,.tab-swipe-back")).toBeNull();
+  });
+
+  it("renders the feedback report form and leaves swipes there alone", async () => {
+    installApi(shellRoutes);
+    window.location.hash = "#/feedback";
+    render(<App />);
+    await screen.findByRole("heading", { name: "New report" });
+
+    const main = screen.getByRole("main");
+    fireEvent.touchStart(main, { touches: [{ clientX: 280, clientY: 240 }] });
+    fireEvent.touchEnd(main, { changedTouches: [{ clientX: 90, clientY: 248 }] });
+    expect(window.location.hash).toBe("#/feedback");
+    expect(document.querySelector(".tab-swipe-forward,.tab-swipe-back")).toBeNull();
+    window.location.hash = "#/recent";
+  });
 });
