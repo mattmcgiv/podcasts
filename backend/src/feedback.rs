@@ -6,10 +6,16 @@
 //! `pi --provider omlx --model <model> --print` in the repo checkout so the
 //! report becomes a local code fix. Dispatch stays disabled until
 //! `PODS_FEEDBACK_REPO` names the checkout directory.
+//!
+//! Every wait and outcome lands in `browser_feedback.result`: gate deferrals
+//! name the gate, preempts name the power loss, and each run appends its pi
+//! transcript at `feedback/<id>.pi.log` in the artifact store. Attempts share
+//! one checkout, so a retry continues the previous attempt's committed or
+//! uncommitted work instead of starting over.
 use crate::{Backend, Error};
 use rusqlite::{params, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const PI_PROVIDER: &str = "omlx";
@@ -19,6 +25,7 @@ const FAILURE_BACKOFF_BASE_SECS: i64 = 300;
 const FAILURE_BACKOFF_MAX_SECS: i64 = 7200;
 const PREEMPT_RETRY_SECS: i64 = 60;
 const LAUNCH_RETRY_SECS: i64 = 60;
+const MAX_REASON_CHARS: usize = 200;
 
 pub fn model() -> String {
     std::env::var("PODS_FEEDBACK_MODEL")
@@ -77,7 +84,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let now = crate::db::now_unix();
     // A restart mid-run leaves `running` rows behind; the timeout reclaims them.
     backend.db.execute(
-        "UPDATE browser_feedback SET status='queued', next_at=0, started_at=0 WHERE status='running' AND started_at<?",
+        "UPDATE browser_feedback SET status='queued', next_at=0, started_at=0, result='reclaimed after restart' WHERE status='running' AND started_at<?",
         [now - timeout as i64],
     )?;
     let report: Option<Report> = {
@@ -99,15 +106,16 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let Some(report) = report else {
         return Ok(false);
     };
-    if crate::power_gate::require_external_power().is_err()
-        || crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx).is_err()
-    {
-        return defer(backend, &report.id);
+    if let Err(error) = crate::power_gate::require_external_power() {
+        return defer(backend, &report.id, &format!("waiting on power ({error})"));
+    }
+    if let Err(error) = crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx) {
+        return defer(backend, &report.id, &format!("waiting on memory ({error})"));
     }
     let model = model();
     let _permit = match crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_CODE_FIX, &model) {
         Ok(permit) => permit,
-        Err(_) => return defer(backend, &report.id),
+        Err(error) => return defer(backend, &report.id, &format!("waiting on omlx ({error})")),
     };
     let claimed = backend.db.execute(
         "UPDATE browser_feedback SET status='running', started_at=?, attempts=attempts+1 WHERE id=? AND status='queued'",
@@ -117,14 +125,24 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         return Ok(false);
     }
     let attempts = report.attempts + 1;
+    let log = open_pi_log(backend, &report.id);
     let prompt = dispatch_prompt(&repo, &report.kind, &report.body);
-    match run_pi(&pi_bin(), &model, &repo, &prompt, Duration::from_secs(timeout)) {
+    let outcome = run_pi(
+        &pi_bin(),
+        &model,
+        &repo,
+        &prompt,
+        Duration::from_secs(timeout),
+        log.as_ref().map(|(_, path)| path.as_path()),
+    );
+    let note = log_summary(&log);
+    match outcome {
         PiOutcome::Ok(elapsed) => {
             finish(
                 backend,
                 &report.id,
                 "done",
-                &format!("pi exit 0 in {}s", elapsed.as_secs()),
+                &format!("pi exit 0 in {}s{note}", elapsed.as_secs()),
                 0,
             )?;
         }
@@ -134,7 +152,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
                     backend,
                     &report.id,
                     &format!(
-                        "pi exit 127 after {}s (launch failed; retrying)",
+                        "pi exit 127 after {}s (launch failed; retrying){note}",
                         elapsed.as_secs()
                     ),
                 )?;
@@ -144,7 +162,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
                     &report.id,
                     attempts,
                     &format!(
-                        "pi exit {} after {}s",
+                        "pi exit {} after {}s{note}",
                         code.unwrap_or(-1),
                         elapsed.as_secs()
                     ),
@@ -156,26 +174,24 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
                 backend,
                 &report.id,
                 attempts,
-                &format!("pi timeout after {}s", limit.as_secs()),
+                &format!("pi timeout after {}s{note}", limit.as_secs()),
             )?;
         }
         PiOutcome::SpawnFailed(detail) => {
             requeue_without_attempt(backend, &report.id, &format!("pi spawn failed: {detail}"))?;
         }
         PiOutcome::Preempted => {
-            backend.db.execute(
-                "UPDATE browser_feedback SET status='queued', next_at=?, started_at=0, attempts=attempts-1 WHERE id=?",
-                params![crate::db::now_unix() + PREEMPT_RETRY_SECS, report.id],
-            )?;
+            note_preempted(backend, &report.id, &note)?;
         }
     }
     Ok(true)
 }
 
-fn defer(backend: &Backend, id: &str) -> Result<bool, Error> {
+fn defer(backend: &Backend, id: &str, reason: &str) -> Result<bool, Error> {
+    let reason: String = reason.chars().take(MAX_REASON_CHARS).collect();
     backend.db.execute(
-        "UPDATE browser_feedback SET next_at=? WHERE id=? AND status='queued'",
-        params![crate::db::now_unix() + retry_delay_secs(id), id],
+        "UPDATE browser_feedback SET next_at=?, result=? WHERE id=? AND status='queued'",
+        params![crate::db::now_unix() + retry_delay_secs(id), reason, id],
     )?;
     Ok(false)
 }
@@ -217,17 +233,82 @@ fn requeue_without_attempt(backend: &Backend, id: &str, result: &str) -> Result<
     Ok(())
 }
 
+fn note_preempted(backend: &Backend, id: &str, log_note: &str) -> Result<(), Error> {
+    backend.db.execute(
+        "UPDATE browser_feedback SET status='queued', result=?, next_at=?, started_at=0, attempts=attempts-1 WHERE id=?",
+        params![
+            format!("preempted: power lost during run; tree kept, attempt not consumed{log_note}"),
+            crate::db::now_unix() + PREEMPT_RETRY_SECS,
+            id
+        ],
+    )?;
+    Ok(())
+}
+
+fn pi_log_relative(id: &str) -> String {
+    format!("feedback/{id}.pi.log")
+}
+
+/// Reserve the per-report pi transcript. `None` dispatches without a log
+/// rather than failing the report.
+fn open_pi_log(backend: &Backend, id: &str) -> Option<(String, PathBuf)> {
+    let relative = pi_log_relative(id);
+    backend
+        .artifacts
+        .prepare_dest(&relative)
+        .ok()
+        .map(|path| (relative, path))
+}
+
+/// Open the transcript once and share it: cloned handles share one file
+/// offset, so stdout and stderr interleave instead of overwriting each other
+/// no matter which stream writes first.
+fn log_stdio_pair(path: Option<&Path>) -> (Stdio, Stdio) {
+    let pair = path
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)
+                .ok()
+        })
+        .and_then(|file| file.try_clone().ok().map(|clone| (file, clone)));
+    match pair {
+        Some((out, err)) => (Stdio::from(out), Stdio::from(err)),
+        None => (Stdio::inherit(), Stdio::inherit()),
+    }
+}
+
+fn log_summary(log: &Option<(String, PathBuf)>) -> String {
+    match log {
+        Some((relative, path)) => {
+            let bytes = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            format!("; log {relative} ({bytes} bytes)")
+        }
+        None => "; log unavailable".to_string(),
+    }
+}
+
 fn dispatch_prompt(repo: &Path, kind: &str, body: &str) -> String {
     let label = if kind == "bug" { "bug report" } else { "feature request" };
     format!(
-        "You maintain the Pods codebase checked out at {}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in the working tree. Follow AGENTS.md and the repo's existing patterns. Run the relevant tests. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
+        "You maintain the Pods codebase checked out at {}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in the working tree. Follow AGENTS.md and the repo's existing patterns. Start with `git status --short` and `git diff --stat`: a previous attempt may have left committed or uncommitted progress — continue it instead of redoing it. Keep the diff minimal and scoped to this request; do not change the merge gate or build configuration (dev/check.sh, client/package.json scripts, vite.config.ts coverage settings) and do not add new check scripts. Run the relevant tests before finishing; an untested fix is not done. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
         repo.display()
     )
 }
 
 #[cfg(unix)]
-fn run_pi(pi: &str, model: &str, repo: &Path, prompt: &str, timeout: Duration) -> PiOutcome {
+fn run_pi(
+    pi: &str,
+    model: &str,
+    repo: &Path,
+    prompt: &str,
+    timeout: Duration,
+    log: Option<&Path>,
+) -> PiOutcome {
     use std::os::unix::process::CommandExt;
+    let (log_out, log_err) = log_stdio_pair(log);
     let mut child = match Command::new(pi)
         .arg("--provider")
         .arg(PI_PROVIDER)
@@ -237,6 +318,8 @@ fn run_pi(pi: &str, model: &str, repo: &Path, prompt: &str, timeout: Duration) -
         .arg("--")
         .arg(prompt)
         .current_dir(repo)
+        .stdout(log_out)
+        .stderr(log_err)
         .process_group(0)
         .spawn()
     {
@@ -264,8 +347,16 @@ fn run_pi(pi: &str, model: &str, repo: &Path, prompt: &str, timeout: Duration) -
 }
 
 #[cfg(not(unix))]
-fn run_pi(pi: &str, model: &str, repo: &Path, prompt: &str, _timeout: Duration) -> PiOutcome {
+fn run_pi(
+    pi: &str,
+    model: &str,
+    repo: &Path,
+    prompt: &str,
+    _timeout: Duration,
+    log: Option<&Path>,
+) -> PiOutcome {
     let start = Instant::now();
+    let (log_out, log_err) = log_stdio_pair(log);
     match Command::new(pi)
         .arg("--provider")
         .arg(PI_PROVIDER)
@@ -275,6 +366,8 @@ fn run_pi(pi: &str, model: &str, repo: &Path, prompt: &str, _timeout: Duration) 
         .arg("--")
         .arg(prompt)
         .current_dir(repo)
+        .stdout(log_out)
+        .stderr(log_err)
         .status()
     {
         Ok(status) if status.success() => PiOutcome::Ok(start.elapsed()),
@@ -842,5 +935,157 @@ mod tests {
         let (status, attempts, _, _) = report_status(&backend, "r1");
         assert_eq!(status, "done");
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn defer_records_power_wait_reason() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "bug", "no power");
+        let _env = EnvGuard::apply(vec![(
+            "PODS_FEEDBACK_REPO",
+            Some(temp.path().to_string_lossy().into_owned()),
+        )]);
+        let mut memory = crate::memory_gate::TestMemory::default();
+        memory.snapshot.available_bytes = 64 * 1024 * 1024 * 1024;
+        let dispatched = crate::memory_gate::with_test_memory(memory, || {
+            crate::power_gate::with_test_power_status(
+                crate::power_gate::PowerStatus::Battery,
+                || step(&backend).unwrap(),
+            )
+        });
+        assert!(!dispatched);
+        let (status, attempts, next_at, result) = report_status(&backend, "r1");
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(next_at > crate::db::now_unix());
+        let result = result.unwrap();
+        assert!(result.contains("waiting on power"), "{result}");
+        assert!(result.contains("power_unplugged"), "{result}");
+    }
+
+    #[test]
+    fn defer_records_memory_wait_reason() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "bug", "no memory");
+        let _env = EnvGuard::apply(vec![(
+            "PODS_FEEDBACK_REPO",
+            Some(temp.path().to_string_lossy().into_owned()),
+        )]);
+        let mut memory = crate::memory_gate::TestMemory::default();
+        memory.snapshot.available_bytes = 0;
+        let dispatched = crate::memory_gate::with_test_memory(memory, || {
+            crate::power_gate::with_test_power_status(
+                crate::power_gate::PowerStatus::External,
+                || step(&backend).unwrap(),
+            )
+        });
+        assert!(!dispatched);
+        let (_, _, _, result) = report_status(&backend, "r1");
+        let result = result.unwrap();
+        assert!(result.contains("waiting on memory"), "{result}");
+        assert!(result.contains("memory_busy"), "{result}");
+    }
+
+    #[test]
+    fn defer_records_omlx_wait_reason() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "bug", "stuck sync");
+        let pi = stub_pi(temp.path(), "exit 0");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        let dispatched = open_gates(|| {
+            crate::omlx_lock::with_test_lock_env(
+                dir.path(),
+                crate::omlx_lock::Occupancy::idle(),
+                false,
+                || step(&backend).unwrap(),
+            )
+        });
+        assert!(!dispatched);
+        let (_, _, _, result) = report_status(&backend, "r1");
+        assert!(result.unwrap().contains("waiting on omlx"));
+    }
+
+    #[test]
+    fn pi_output_streams_to_per_report_log() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        let pi = stub_pi(temp.path(), "echo err-line >&2; echo out-line; exit 0");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let text = std::fs::read_to_string(backend.artifacts.url("feedback/r1.pi.log")).unwrap();
+        assert!(text.contains("out-line"), "{text}");
+        assert!(text.contains("err-line"), "{text}");
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "done");
+        let result = result.unwrap();
+        assert!(result.contains("pi exit 0"), "{result}");
+        assert!(result.contains("feedback/r1.pi.log"), "{result}");
+    }
+
+    #[test]
+    fn unloggable_report_still_dispatches() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r../1", "feature", "dark mode");
+        let pi = stub_pi(temp.path(), "exit 0");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, _, _, result) = report_status(&backend, "r../1");
+        assert_eq!(status, "done");
+        let result = result.unwrap();
+        assert!(result.contains("pi exit 0"), "{result}");
+        assert!(result.contains("log unavailable"), "{result}");
+    }
+
+    #[test]
+    fn preempt_note_frees_the_attempt_and_names_power() {
+        let (backend, _temp) = fixture();
+        let now = crate::db::now_unix();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_feedback(id,kind,body,device,client_id,created_at,status,attempts,started_at) VALUES('r1','bug','x','iPhone','client',?,'running',1,?)",
+                params![now, now],
+            )
+            .unwrap();
+        note_preempted(&backend, "r1", "; log feedback/r1.pi.log (10 bytes)").unwrap();
+        let (status, attempts, next_at, result) = report_status(&backend, "r1");
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(next_at > crate::db::now_unix());
+        let result = result.unwrap();
+        assert!(result.contains("preempted"), "{result}");
+        assert!(result.contains("feedback/r1.pi.log"), "{result}");
+    }
+
+    #[test]
+    fn prompt_continues_prior_work_and_protects_the_gate() {
+        let prompt = dispatch_prompt(Path::new("/repo"), "feature", "faster play");
+        assert!(prompt.contains("feature request"), "{prompt}");
+        assert!(prompt.contains("git status"), "{prompt}");
+        assert!(prompt.contains("continue"), "{prompt}");
+        assert!(prompt.contains("dev/check.sh"), "{prompt}");
+        assert!(prompt.contains("untested"), "{prompt}");
+        assert!(prompt.contains("Do not commit"), "{prompt}");
     }
 }

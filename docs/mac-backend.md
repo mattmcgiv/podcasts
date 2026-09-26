@@ -403,6 +403,11 @@ Optional keys: `feedback_model` (default `Qwen3.8-27B-4bit`, the show-notes mode
 Each pipeline step dispatches at most one queued report: it holds the cooperative oMLX lock under purpose `code_fix`,
 runs `pi --provider omlx --model <model> --print` in the checkout, and records the outcome in `browser_feedback`.
 Busy power, memory, or oMLX gates defer the report without consuming an attempt; three failed runs mark it `failed`.
+The `result` column always names the latest wait or outcome: deferrals record the gate (`waiting on power/memory/omlx`),
+a mid-run unplug records `preempted` without consuming the attempt, and every run appends its pi transcript at
+`feedback/<id>.pi.log` in the artifact store (fresh per attempt, kept on timeout and preempt). Retries continue the
+previous attempt's committed or uncommitted progress in the same checkout; the prompt forbids touching the merge gate
+or build configuration and requires running the relevant tests first.
 A pi launch failure — missing binary, or exit 127 from a missing interpreter — requeues without consuming an attempt, so a broken host `PATH` cannot fail a report; the recorded result names the cause and the report dispatches once the host is repaired.
 Pi must be launchable under the service `PATH` (`/opt/homebrew/bin:/usr/local/bin:~/.local/bin:~/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin`); the script-based pi also needs `node` on that `PATH`.
 Pi is instructed to leave the fix uncommitted for review. It never commits, pushes, or changes branches.

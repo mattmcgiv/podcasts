@@ -1255,7 +1255,8 @@ pub fn valid_artifact_path(path: &str) -> bool {
             || path.starts_with("resume/")
             || path.starts_with("local/")
             || path.starts_with("published/")
-            || path.starts_with("voice/"))
+            || path.starts_with("voice/")
+            || path.starts_with("feedback/"))
 }
 
 fn default_backoff(attempt: i32) -> i64 {
