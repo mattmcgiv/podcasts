@@ -108,6 +108,7 @@ impl CredentialStore {
 pub struct Backend {
     pub local: bool,
     pub db: Database,
+    pub data_root: std::path::PathBuf,
     fetcher: Arc<dyn FeedFetcher>,
     directory: Mutex<Arc<dyn DirectorySearcher>>,
     credentials: CredentialStore,
@@ -156,6 +157,7 @@ impl Backend {
         let backend = Self {
             local: false,
             db,
+            data_root: root.clone(),
             fetcher,
             directory: Mutex::new(directory),
             credentials: CredentialStore::new(stored_key),

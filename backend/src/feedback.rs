@@ -9,9 +9,12 @@
 //!
 //! Every wait and outcome lands in `browser_feedback.result`: gate deferrals
 //! name the gate, preempts name the power loss, and each run appends its pi
-//! transcript at `feedback/<id>.pi.log` in the artifact store. Attempts share
-//! one checkout, so a retry continues the previous attempt's committed or
-//! uncommitted work instead of starting over.
+//! transcript at `feedback/<id>.pi.log` in the artifact store. Each report gets
+//! an isolated git worktree (`feedback-worktrees/<id>` under the data root)
+//! on its own `feedback/<id>` branch, reused across attempts so a retry
+//! continues earlier work. pi never touches the owner's checkout; review the
+//! branch and remove the worktree by hand after merging — the backend never
+//! removes worktrees itself, so unreviewed work is never destroyed.
 use crate::{Backend, Error};
 use rusqlite::{params, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -125,17 +128,24 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         return Ok(false);
     }
     let attempts = report.attempts + 1;
+    let (worktree, branch) = match ensure_worktree(&repo, backend, &report.id) {
+        Ok(pair) => pair,
+        Err(error) => {
+            requeue_without_attempt(backend, &report.id, &format!("worktree setup failed: {error}"))?;
+            return Ok(true);
+        }
+    };
     let log = open_pi_log(backend, &report.id);
-    let prompt = dispatch_prompt(&repo, &report.kind, &report.body);
+    let prompt = dispatch_prompt(&worktree, &branch, &report.kind, &report.body);
     let outcome = run_pi(
         &pi_bin(),
         &model,
-        &repo,
+        &worktree,
         &prompt,
         Duration::from_secs(timeout),
         log.as_ref().map(|(_, path)| path.as_path()),
     );
-    let note = log_summary(&log);
+    let note = format!("{}{}", log_summary(&log), worktree_note(&worktree, &branch));
     match outcome {
         PiOutcome::Ok(elapsed) => {
             finish(
@@ -290,11 +300,77 @@ fn log_summary(log: &Option<(String, PathBuf)>) -> String {
     }
 }
 
-fn dispatch_prompt(repo: &Path, kind: &str, body: &str) -> String {
+fn worktrees_root(backend: &Backend) -> PathBuf {
+    backend.data_root.join("feedback-worktrees")
+}
+
+fn worktree_branch(id: &str) -> String {
+    format!("feedback/{id}")
+}
+
+/// Report ids arrive from the browser: keep them inside the worktrees directory.
+fn valid_worktree_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && !id.contains('/') && !id.contains("..") && !id.starts_with('.')
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|error| format!("git not launchable: {error}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        format!("git {} failed", args.join(" "))
+    } else {
+        format!(
+            "git {} failed: {}",
+            args.join(" "),
+            detail.chars().take(300).collect::<String>()
+        )
+    })
+}
+
+/// Isolated checkout for one report, reused across attempts so retries
+/// continue earlier work. The branch preserves the lineage for review.
+fn ensure_worktree(repo: &Path, backend: &Backend, id: &str) -> Result<(PathBuf, String), String> {
+    if !valid_worktree_id(id) {
+        return Err(format!("invalid report id {id:?}"));
+    }
+    let dir = worktrees_root(backend).join(id);
+    let branch = worktree_branch(id);
+    if dir.join(".git").exists() {
+        return Ok((dir, branch));
+    }
+    if dir.exists() {
+        return Err(format!("worktree path blocked: {}", dir.display()));
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("worktree root not writable: {error}"))?;
+    }
+    // Fresh branch first; an existing branch (worktree removed by hand) is reused instead.
+    let dir_arg = dir.to_string_lossy().into_owned();
+    match git(repo, &["worktree", "add", "-b", &branch, &dir_arg, "HEAD"]) {
+        Ok(_) => Ok((dir, branch)),
+        Err(first) => git(repo, &["worktree", "add", &dir_arg, &branch])
+            .map(|_| (dir, branch))
+            .map_err(|second| format!("{first}; then {second}")),
+    }
+}
+
+fn worktree_note(dir: &Path, branch: &str) -> String {
+    format!("; worktree {} ({branch})", dir.display())
+}
+
+fn dispatch_prompt(worktree: &Path, branch: &str, kind: &str, body: &str) -> String {
     let label = if kind == "bug" { "bug report" } else { "feature request" };
     format!(
-        "You maintain the Pods codebase checked out at {}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in the working tree. Follow AGENTS.md and the repo's existing patterns. Start with `git status --short` and `git diff --stat`: a previous attempt may have left committed or uncommitted progress — continue it instead of redoing it. Keep the diff minimal and scoped to this request; do not change the merge gate or build configuration (dev/check.sh, client/package.json scripts, vite.config.ts coverage settings) and do not add new check scripts. Run the relevant tests before finishing; an untested fix is not done. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
-        repo.display()
+        "You maintain the Pods codebase checked out at {} on branch {branch}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in this worktree. Follow AGENTS.md and the repo's existing patterns. Start with `git status --short` and `git diff --stat`: a previous attempt may have left committed or uncommitted progress here — continue it instead of redoing it. Keep the diff minimal and scoped to this request; do not change the merge gate or build configuration (dev/check.sh, client/package.json scripts, vite.config.ts coverage settings) and do not add new check scripts. Verify backend changes with `cargo test` from this worktree. The client test container mounts the main checkout rather than this worktree, so never run dev/check.sh or npm here — client changes are tested after merge, and your closing summary must say that. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
+        worktree.display()
     )
 }
 
@@ -489,6 +565,34 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         path
+    }
+
+    /// Minimal git checkout for worktree tests. Requires the git binary:
+    /// backend tests run on the Mac host. Identity and signing come from
+    /// `-c` flags so no global gitconfig is touched or needed.
+    fn git_repo(path: &Path) {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("git binary");
+            assert!(status.success(), "{args:?}");
+        };
+        run(&["init", "-b", "main"]);
+        run(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
     }
 
     struct MockOmlx {
@@ -689,10 +793,11 @@ mod tests {
 
     #[test]
     fn prompt_names_report_and_forbids_history_writes() {
-        let prompt = dispatch_prompt(Path::new("/repo"), "bug", "it broke");
+        let prompt = dispatch_prompt(Path::new("/wt"), "feedback/r1", "bug", "it broke");
         assert!(prompt.contains("bug report"), "{prompt}");
         assert!(prompt.contains("it broke"), "{prompt}");
-        assert!(prompt.contains("/repo"), "{prompt}");
+        assert!(prompt.contains("/wt"), "{prompt}");
+        assert!(prompt.contains("feedback/r1"), "{prompt}");
         assert!(prompt.contains("Do not commit"), "{prompt}");
     }
 
@@ -709,6 +814,7 @@ mod tests {
     fn successful_run_marks_report_done_and_invokes_pi_with_omlx_model() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "crash on launch");
+        git_repo(temp.path());
         let args_log = temp.path().join("args.log");
         let pi = stub_pi(
             temp.path(),
@@ -738,6 +844,7 @@ mod tests {
     fn failing_run_retries_then_marks_failed() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
         let pi = stub_pi(temp.path(), "exit 1");
         let _env = EnvGuard::apply(vec![
             (
@@ -778,6 +885,7 @@ mod tests {
     fn exit_127_requeues_without_consuming_an_attempt() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
         let pi = stub_pi(temp.path(), "exit 127");
         let _env = EnvGuard::apply(vec![
             (
@@ -814,6 +922,7 @@ mod tests {
     fn spawn_failure_requeues_without_consuming_an_attempt() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "crash on launch");
+        git_repo(temp.path());
         let _env = EnvGuard::apply(vec![
             (
                 "PODS_FEEDBACK_REPO",
@@ -893,6 +1002,7 @@ mod tests {
     fn timed_out_run_requeues_with_backoff() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "feature", "slow model");
+        git_repo(temp.path());
         let pi = stub_pi(temp.path(), "sleep 30");
         let _env = EnvGuard::apply(vec![
             (
@@ -921,6 +1031,7 @@ mod tests {
                 params![crate::db::now_unix(), crate::db::now_unix() - 10_000],
             )
             .unwrap();
+        git_repo(temp.path());
         let pi = stub_pi(temp.path(), "exit 0");
         let _env = EnvGuard::apply(vec![
             (
@@ -1016,6 +1127,7 @@ mod tests {
     fn pi_output_streams_to_per_report_log() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
         let pi = stub_pi(temp.path(), "echo err-line >&2; echo out-line; exit 0");
         let _env = EnvGuard::apply(vec![
             (
@@ -1037,24 +1149,27 @@ mod tests {
     }
 
     #[test]
-    fn unloggable_report_still_dispatches() {
+    fn invalid_report_id_requeues_without_dispatch() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r../1", "feature", "dark mode");
-        let pi = stub_pi(temp.path(), "exit 0");
-        let _env = EnvGuard::apply(vec![
-            (
-                "PODS_FEEDBACK_REPO",
-                Some(temp.path().to_string_lossy().into_owned()),
-            ),
-            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
-        ]);
+        let _env = EnvGuard::apply(vec![(
+            "PODS_FEEDBACK_REPO",
+            Some(temp.path().to_string_lossy().into_owned()),
+        )]);
         let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
         assert!(dispatched);
-        let (status, _, _, result) = report_status(&backend, "r../1");
-        assert_eq!(status, "done");
+        let (status, attempts, next_at, result) = report_status(&backend, "r../1");
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(next_at > crate::db::now_unix());
         let result = result.unwrap();
-        assert!(result.contains("pi exit 0"), "{result}");
-        assert!(result.contains("log unavailable"), "{result}");
+        assert!(result.contains("worktree setup failed"), "{result}");
+        assert!(result.contains("invalid report id"), "{result}");
+    }
+
+    #[test]
+    fn log_summary_names_missing_log() {
+        assert_eq!(log_summary(&None), "; log unavailable");
     }
 
     #[test]
@@ -1080,12 +1195,118 @@ mod tests {
 
     #[test]
     fn prompt_continues_prior_work_and_protects_the_gate() {
-        let prompt = dispatch_prompt(Path::new("/repo"), "feature", "faster play");
+        let prompt = dispatch_prompt(Path::new("/wt"), "feedback/r1", "feature", "faster play");
         assert!(prompt.contains("feature request"), "{prompt}");
         assert!(prompt.contains("git status"), "{prompt}");
         assert!(prompt.contains("continue"), "{prompt}");
         assert!(prompt.contains("dev/check.sh"), "{prompt}");
-        assert!(prompt.contains("untested"), "{prompt}");
+        assert!(prompt.contains("never run dev/check.sh"), "{prompt}");
+        assert!(prompt.contains("tested after merge"), "{prompt}");
         assert!(prompt.contains("Do not commit"), "{prompt}");
+    }
+
+    fn git_branches(repo: &Path, pattern: &str) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["branch", "--list", pattern])
+            .output()
+            .expect("git binary");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn dispatch_creates_isolated_worktree_and_runs_pi_inside() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
+        let cwd_log = temp.path().join("cwd.log");
+        let pi = stub_pi(temp.path(), &format!("pwd > '{}'; exit 0", cwd_log.display()));
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let tree = temp.path().join("feedback-worktrees").join("r1");
+        assert!(tree.join(".git").exists(), "{}", tree.display());
+        let cwd = std::fs::read_to_string(&cwd_log).unwrap();
+        assert!(
+            cwd.trim().ends_with("feedback-worktrees/r1"),
+            "{cwd}"
+        );
+        assert!(git_branches(temp.path(), "feedback/r1").contains("feedback/r1"));
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "done");
+        let result = result.unwrap();
+        assert!(result.contains("worktree"), "{result}");
+        assert!(result.contains("feedback/r1"), "{result}");
+    }
+
+    #[test]
+    fn retry_reuses_report_worktree_and_branch() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
+        let pi = stub_pi(
+            temp.path(),
+            "if [ -f ran-once ]; then exit 0; else touch ran-once; exit 1; fi",
+        );
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        open_gates(|| {
+            with_lock(|| {
+                assert!(step(&backend).unwrap());
+                let (status, attempts, _, _) = report_status(&backend, "r1");
+                assert_eq!(status, "queued");
+                assert_eq!(attempts, 1);
+                let tree = temp.path().join("feedback-worktrees").join("r1");
+                assert!(tree.join("ran-once").is_file());
+                backend
+                    .db
+                    .execute("UPDATE browser_feedback SET next_at=0 WHERE id='r1'", [])
+                    .unwrap();
+                assert!(step(&backend).unwrap());
+                let (status, attempts, _, _) = report_status(&backend, "r1");
+                assert_eq!(status, "done");
+                assert_eq!(attempts, 2);
+                assert!(tree.join("ran-once").is_file());
+            })
+        });
+        let branches = git_branches(temp.path(), "feedback/*");
+        assert_eq!(branches.lines().count(), 1, "{branches}");
+        assert!(branches.contains("feedback/r1"), "{branches}");
+    }
+
+    #[test]
+    fn non_git_repo_requeues_without_dispatch() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        let pi = stub_pi(temp.path(), "exit 0");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, attempts, next_at, result) = report_status(&backend, "r1");
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(next_at > crate::db::now_unix());
+        let result = result.unwrap();
+        assert!(result.contains("worktree setup failed"), "{result}");
+        assert!(result.contains("not a git repository"), "{result}");
     }
 }

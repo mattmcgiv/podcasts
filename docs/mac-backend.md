@@ -405,9 +405,15 @@ runs `pi --provider omlx --model <model> --print` in the checkout, and records t
 Busy power, memory, or oMLX gates defer the report without consuming an attempt; three failed runs mark it `failed`.
 The `result` column always names the latest wait or outcome: deferrals record the gate (`waiting on power/memory/omlx`),
 a mid-run unplug records `preempted` without consuming the attempt, and every run appends its pi transcript at
-`feedback/<id>.pi.log` in the artifact store (fresh per attempt, kept on timeout and preempt). Retries continue the
-previous attempt's committed or uncommitted progress in the same checkout; the prompt forbids touching the merge gate
-or build configuration and requires running the relevant tests first.
+`feedback/<id>.pi.log` in the artifact store (fresh per attempt, kept on timeout and preempt). Each report gets an
+isolated git worktree at `data/AdRemovalData/feedback-worktrees/<id>` on its own `feedback/<id>` branch, created from
+the checkout's HEAD on first dispatch and reused across attempts, so retries continue the previous attempt's committed
+or uncommitted progress there. pi never touches the owner's checkout. Review with `git -C <worktree> diff` (or
+`git diff main...feedback/<id>`) and merge as usual; afterwards remove the worktree by hand
+(`git worktree remove <dir>`) and delete the branch — the backend never removes worktrees itself, so unreviewed work
+is never destroyed. The prompt forbids touching the merge gate or build configuration. The client test container
+mounts the main checkout rather than the worktree, so pi never runs dev/check.sh there; backend changes are verified
+with `cargo test` from the worktree, and client changes are tested after merge.
 A pi launch failure — missing binary, or exit 127 from a missing interpreter — requeues without consuming an attempt, so a broken host `PATH` cannot fail a report; the recorded result names the cause and the report dispatches once the host is repaired.
 Pi must be launchable under the service `PATH` (`/opt/homebrew/bin:/usr/local/bin:~/.local/bin:~/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin`); the script-based pi also needs `node` on that `PATH`.
 Pi is instructed to leave the fix uncommitted for review. It never commits, pushes, or changes branches.
