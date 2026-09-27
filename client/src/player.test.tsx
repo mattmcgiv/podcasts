@@ -18,7 +18,7 @@ import { allDownloads, readRecord, updateState, writeRecord } from "./offline/st
 import { readDiagnostics } from "./offline/diagnostics";
 import * as store from "./offline/store";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
-import type { EpisodeItem } from "./types";
+import type { EpisodeDetail, EpisodeItem } from "./types";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1326,6 +1326,188 @@ describe("PlayerProvider offline position flush", () => {
       window.dispatchEvent(new Event("pagehide"));
     });
     expect(setPosition).toHaveBeenCalledWith(1, 0, ARTIFACT_HASH);
+  });
+});
+
+describe("PlayerProvider offline toggle resume", () => {
+  function renderToggle(item: EpisodeItem) {
+    window.PODS_LOCAL_CLIENT = true;
+    vi.spyOn(Api, "setPosition").mockResolvedValue(undefined);
+    render(
+      <PlayerProvider>
+        <OfflinePositionProbe item={item} />
+      </PlayerProvider>,
+    );
+  }
+
+  function freshDetail(overrides: Partial<EpisodeDetail> = {}): EpisodeDetail {
+    return {
+      ...downloadedEpisode(),
+      notes_html: "",
+      archived_at: null,
+      show_notes: [],
+      ad_markers: [],
+      ...overrides,
+    };
+  }
+
+  async function pauseAt30(): Promise<FakeAudio> {
+    renderToggle(downloadedEpisode());
+    const setup = vi.spyOn(Api, "episode").mockResolvedValue(freshDetail());
+    try {
+      await act(async () => {
+        screen.getByText("play-offline").click();
+      });
+      await waitFor(() => expect(setup).toHaveBeenCalled());
+      await act(async () => {});
+    } finally {
+      setup.mockRestore();
+    }
+    const audio = FakeAudio.last();
+    act(() => {
+      audio.emitLoadedMetadata(1800);
+    });
+    expect(audio.currentTime).toBe(30);
+    act(() => {
+      screen.getByText("toggle").click();
+    });
+    expect(screen.getByTestId("state")).toHaveTextContent("1:paused");
+    return audio;
+  }
+
+  it("resumes audio on toggle before the Mac sync returns", async () => {
+    const audio = await pauseAt30();
+    const play = vi.spyOn(audio, "play");
+    let resolveDetail!: (detail: EpisodeDetail) => void;
+    const episode = vi.spyOn(Api, "episode").mockReturnValue(
+      new Promise<EpisodeDetail>((resolve) => {
+        resolveDetail = resolve;
+      }),
+    );
+    try {
+      act(() => {
+        screen.getByText("toggle").click();
+        // This assertion runs before any microtask: tap-to-sound must not wait on the Mac.
+        expect(play).toHaveBeenCalledTimes(1);
+      });
+      expect(audio.paused).toBe(false);
+      expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+      await act(async () => {
+        resolveDetail(freshDetail());
+      });
+      expect(audio.currentTime).toBe(30);
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("adopts a newer shared playhead in the background after toggle", async () => {
+    const audio = await pauseAt30();
+    const episode = vi.spyOn(Api, "episode").mockResolvedValue(freshDetail({ position_secs: 100 }));
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      await waitFor(() => expect(audio.currentTime).toBe(100));
+      expect(screen.getByTestId("pos")).toHaveTextContent("100");
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("ignores a shared playhead within a quarter second of the tap", async () => {
+    const audio = await pauseAt30();
+    const episode = vi.spyOn(Api, "episode").mockResolvedValue(freshDetail({ position_secs: 30.1 }));
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      await waitFor(() => expect(episode).toHaveBeenCalled());
+      await act(async () => {});
+      expect(audio.currentTime).toBe(30);
+      expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("does not adopt the shared playhead after the user scrubs", async () => {
+    const audio = await pauseAt30();
+    let resolveDetail!: (detail: EpisodeDetail) => void;
+    const episode = vi.spyOn(Api, "episode").mockReturnValue(
+      new Promise<EpisodeDetail>((resolve) => {
+        resolveDetail = resolve;
+      }),
+    );
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      await waitFor(() => expect(episode).toHaveBeenCalled());
+      act(() => {
+        screen.getByText("restart").click();
+      });
+      expect(audio.currentTime).toBe(0);
+      await act(async () => {
+        resolveDetail(freshDetail({ position_secs: 100 }));
+      });
+      expect(audio.currentTime).toBe(0);
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("closes when the episode was marked played elsewhere", async () => {
+    await pauseAt30();
+    const episode = vi.spyOn(Api, "episode").mockResolvedValue(freshDetail({ played_at: 1_790_000_000 }));
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("none"));
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("ignores a late shared playhead after a newer toggle", async () => {
+    const audio = await pauseAt30();
+    let resolveDetail!: (detail: EpisodeDetail) => void;
+    const episode = vi.spyOn(Api, "episode").mockReturnValue(
+      new Promise<EpisodeDetail>((resolve) => {
+        resolveDetail = resolve;
+      }),
+    );
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      await waitFor(() => expect(episode).toHaveBeenCalled());
+      act(() => {
+        screen.getByText("toggle").click();
+      });
+      expect(screen.getByTestId("state")).toHaveTextContent("1:paused");
+      await act(async () => {
+        resolveDetail(freshDetail({ position_secs: 100 }));
+      });
+      expect(audio.currentTime).toBe(30);
+    } finally {
+      episode.mockRestore();
+    }
+  });
+
+  it("stays playing when the shared playhead fetch fails", async () => {
+    const audio = await pauseAt30();
+    const episode = vi.spyOn(Api, "episode").mockRejectedValue(new Error("mac unreachable"));
+    try {
+      await act(async () => {
+        screen.getByText("toggle").click();
+      });
+      expect(audio.paused).toBe(false);
+      expect(screen.getByTestId("state")).toHaveTextContent("1:playing");
+    } finally {
+      episode.mockRestore();
+    }
   });
 });
 

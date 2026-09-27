@@ -684,17 +684,34 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void play();
     } else if (a.paused && offlineEnabled()) {
       setStarting(true);
-      void syncBeforePlayback().then(() => Api.episode(cur.id)).then(item => {
-        if (request !== playRequestRef.current || currentRef.current?.id !== item.id || item.played_at != null) return;
-        beginPlaybackSession(item.id, item.position_revision);
-        a.currentTime = item.position_secs;
-        return play();
-      }).catch(() => { if (request === playRequestRef.current && currentRef.current?.id === cur.id) void play(); });
+      // Resume audio the moment the tap lands; the Mac round trip must not
+      // delay tap-to-sound (worst over Bluetooth). The shared playhead is
+      // then adopted in the background, unless the user scrubs meanwhile.
+      const tapPosition = a.currentTime;
+      adoptRemoteResumeRef.current = true;
+      void play();
+      void syncBeforePlayback()
+        .then(() => Api.episode(cur.id))
+        .then(item => {
+          if (request !== playRequestRef.current || currentRef.current?.id !== item.id) return;
+          if (item.played_at != null) {
+            close();
+            return;
+          }
+          beginPlaybackSession(item.id, item.position_revision);
+          if (!adoptRemoteResumeRef.current) return;
+          // Within 0.25s of where playback resumed, the shared position is a
+          // stale echo of this device, not another device's playhead.
+          if (Math.abs(item.position_secs - tapPosition) <= 0.25) return;
+          a.currentTime = item.position_secs;
+          setPosition(item.position_secs);
+        })
+        .catch(() => {});
     } else if (a.paused) {
       setStarting(true);
       void play();
     } else a.pause();
-  }, []);
+  }, [close]);
 
   const seekTo = useCallback((secs: number) => {
     const a = audioRef.current;

@@ -1298,6 +1298,24 @@ input[type="search"]::-webkit-search-cancel-button {
   .play-spinner { animation: none; opacity: 0.75; }
 }
 
+.play-big,
+.mini-toggle {
+  transition: transform 110ms ease;
+}
+
+/* The press is acknowledged the moment it lands, before the buffer is ready. */
+.play-big.is-starting,
+.mini-toggle.is-starting {
+  transform: scale(0.88);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .play-big,
+  .mini-toggle {
+    transition: none;
+  }
+}
+
 .skip {
   position: relative;
   color: var(--text);
