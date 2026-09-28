@@ -860,7 +860,7 @@ class ShipTests(unittest.TestCase):
                 ship_git("commit", "-m", "main moves", cwd=repo)
                 ship_git("push", "origin", "main", cwd=repo)
                 with patch.object(manage, "ship_container_ready", return_value=True):
-                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                    self.assertIsNone(manage.land_ready(db, repo))
                 status, result = ship_feedback_status(db, "r1")
                 self.assertEqual(status, "needs-review")
                 self.assertIn("rebase conflict", result)
@@ -874,7 +874,7 @@ class ShipTests(unittest.TestCase):
                 db = ship_fixture_db(root)
                 ship_insert_ready(db)
                 with patch.object(manage, "ship_container_ready", return_value=True):
-                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                    self.assertIsNone(manage.land_ready(db, repo))
                 status, result = ship_feedback_status(db, "r1")
                 self.assertEqual(status, "needs-review")
                 self.assertIn("worktree is missing", result)

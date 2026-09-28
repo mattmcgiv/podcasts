@@ -691,7 +691,7 @@ def land_ready(db, repo):
     except ShipBlocked as error:
         ship_mark(db, report_id, "needs-review", f"land blocked: {error}")
         print(f"ship: {report_id} needs review: {error}")
-        return report_id
+        return None
 
 
 def ship_dist_hashes(dist):
@@ -718,14 +718,21 @@ import time
 
 new_tab("__DEPLOY_URL__")
 wait_for_load()
-nodes = cdp("Accessibility.getFullAXTree")["nodes"]
-for n in nodes:
-    name = (n.get("name") or {}).get("value", "")
-    role = (n.get("role") or {}).get("value", "")
-    if role == "radio" and name.strip() == "Production":
-        box = cdp("DOM.getBoxModel", backendNodeId=n.get("backendDOMNodeId"))["model"]["content"]
-        click_at_xy(sum(box[0::2]) / 4, sum(box[1::2]) / 4)
+deadline = time.time() + 60
+while time.time() < deadline:
+    nodes = cdp("Accessibility.getFullAXTree")["nodes"]
+    picked = False
+    for n in nodes:
+        name = (n.get("name") or {}).get("value", "")
+        role = (n.get("role") or {}).get("value", "")
+        if role == "radio" and name.strip() == "Production":
+            box = cdp("DOM.getBoxModel", backendNodeId=n.get("backendDOMNodeId"))["model"]["content"]
+            click_at_xy(sum(box[0::2]) / 4, sum(box[1::2]) / 4)
+            picked = True
+            break
+    if picked:
         break
+    time.sleep(2)
 else:
     raise RuntimeError("production environment radio not found")
 upload_file("input[accept='.zip']", "__ZIP__")
@@ -768,8 +775,9 @@ def ship_upload(zip_path, account, project):
     except (subprocess.TimeoutExpired, OSError) as error:
         raise ShipRetry(f"dashboard upload failed: {ship_reason(error)}") from error
     if completed.returncode != 0:
-        tail = ((completed.stdout or "") + (completed.stderr or "")).replace("\n", " ")[-400:]
-        raise ShipRetry(f"dashboard upload failed: {tail}")
+        lines = ((completed.stderr or "") + "\n" + (completed.stdout or "")).strip().splitlines()
+        last = lines[-1].strip()[:200] if lines else "no output"
+        raise ShipRetry(f"dashboard upload failed: {last}")
     return (completed.stdout or "").strip().splitlines()[-1][:200] if (completed.stdout or "").strip() else "uploaded"
 
 
@@ -821,11 +829,11 @@ def ship_landed(db, repo, config):
             ship_mark(db, report_id, "landed", f"ship failed ({attempts}/{SHIP_MAX_ATTEMPTS}): {error}",
                       ship_attempts=attempts, next_at=int(time.time()) + ship_backoff_secs(attempts))
         print(f"ship: {report_id} deferred: {error}")
-        return report_id
+        return None
     except ShipBlocked as error:
         ship_mark(db, report_id, "needs-review", f"ship blocked: {error}")
         print(f"ship: {report_id} needs review: {error}")
-        return report_id
+        return None
 
 
 def ship_once():
