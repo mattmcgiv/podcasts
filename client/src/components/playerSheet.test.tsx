@@ -222,6 +222,22 @@ describe("PlayerSheet + MiniPlayer", () => {
     expect(screen.getByRole("button", { name: "Next: Long-form takeaway (+57 mins)" })).toBeInTheDocument();
   });
 
+  it("shows the current chapter between the title and the scrubber", async () => {
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
+    const audio = FakeAudio.last();
+    act(() => audio.emitLoadedMetadata(4000));
+
+    expect(screen.queryByLabelText(/Current chapter:/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("slider", { name: "Seek" }), { target: { value: "50" } });
+    expect(screen.getByLabelText("Current chapter: Ads")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("slider", { name: "Seek" }), { target: { value: "130" } });
+    const current = screen.getByLabelText("Current chapter: A new direction");
+    expect(current.previousElementSibling).toHaveClass("sheet-title");
+    expect(current.nextElementSibling).toHaveClass("scrubber");
+  });
+
   it("places playback options above Chapters and collapses consecutive ad markers", async () => {
     const { user } = setup();
     await user.click(screen.getByText("start"));

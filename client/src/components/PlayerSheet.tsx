@@ -71,6 +71,7 @@ export function PlayerSheet() {
     .filter((chapter, index, sorted) => (
       !chapter.isAd || index === 0 || !sorted[index - 1].isAd
     ));
+  const currentChapter = chapters.filter((chapter) => chapter.start_time <= p.position).at(-1);
   const nextChapter = showNotes
     .filter((chapter) => chapter.start_time > p.position)
     .sort((a, b) => a.start_time - b.start_time || a.id.localeCompare(b.id))[0];
@@ -117,6 +118,11 @@ export function PlayerSheet() {
           {ep.title}
           {isArticle(ep) && <span className="article-badge">Article</span>}
         </h2>
+        {currentChapter && (
+          <p className="sheet-current-chapter" aria-label={`Current chapter: ${currentChapter.title}`}>
+            {currentChapter.title}
+          </p>
+        )}
 
         <input
           className="scrubber"

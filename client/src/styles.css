@@ -1202,6 +1202,19 @@ input[type="search"]::-webkit-search-cancel-button {
   text-align: center;
 }
 
+.sheet-title:has(+ .sheet-current-chapter) {
+  margin-bottom: 4px;
+}
+
+.sheet-current-chapter {
+  margin: 0 0 14px;
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+}
+
 .scrubber {
   width: 100%;
   accent-color: var(--accent);
