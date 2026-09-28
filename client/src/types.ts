@@ -92,6 +92,7 @@ export interface DirectoryPodcast {
   image_url: string;
   description: string;
   subscribed: boolean;
+  show_id?: number;
 }
 
 export interface FeedPreviewEpisode {

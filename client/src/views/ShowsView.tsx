@@ -204,6 +204,20 @@ function DirectoryRow({ podcast }: { podcast: DirectoryPodcast }) {
     }
   }
 
+  async function unsubscribe() {
+    if (state !== "done" || podcast.show_id == null) return;
+    setState("busy");
+    setError(null);
+    try {
+      await Api.unsubscribe(podcast.show_id);
+      setState("idle");
+      emitEpisodesChanged();
+    } catch (nextError) {
+      setState("done");
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    }
+  }
+
   return (
     <li className="podcast-row">
       <Artwork src={podcast.image_url} size={56} />
@@ -212,7 +226,11 @@ function DirectoryRow({ podcast }: { podcast: DirectoryPodcast }) {
         <span className="row-sub">{podcast.author}</span>
         {error && <span className="error small">{error}</span>}
       </span>
-      <button className={`subscribe-btn${state === "done" ? " done" : ""}`} disabled={state !== "idle"} onClick={() => void subscribe()}>
+      <button
+        className={`subscribe-btn${state === "done" ? " done" : ""}`}
+        disabled={state === "busy" || (state === "done" && podcast.show_id == null)}
+        onClick={() => void (state === "done" ? unsubscribe() : subscribe())}
+      >
         {state === "done" ? "Subscribed" : state === "busy" ? "…" : "Subscribe"}
       </button>
     </li>

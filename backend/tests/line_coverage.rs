@@ -860,6 +860,7 @@ impl DirectorySearcher for FakeDirectory {
             image_url: "https://example.org/i.png".into(),
             description: "d".into(),
             subscribed: false,
+            show_id: None,
         }])
     }
     fn search_appearances(&self, person: &str) -> Result<Vec<DirectoryAppearance>, Error> {

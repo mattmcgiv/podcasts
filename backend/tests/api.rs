@@ -572,11 +572,14 @@ fn test_search_includes_configured_directory_results() {
             image_url: "".into(),
             description: "".into(),
             subscribed: false,
+            show_id: None,
         }],
     }));
     let results: SearchResults = decode(&call(&backend, "GET", "/api/search?q=found", None));
     assert!(results.directory_configured);
     assert_eq!(results.podcasts[0].title, "Found Pod");
+    assert!(!results.podcasts[0].subscribed);
+    assert_eq!(results.podcasts[0].show_id, None);
 }
 
 fn youtube_atom(channel: &str, videos: &[(&str, &str, &str)]) -> String {

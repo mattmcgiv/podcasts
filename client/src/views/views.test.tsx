@@ -1566,7 +1566,7 @@ describe("ShowsView search", () => {
         directory_configured: true,
         podcasts: [
           { title: "Found Pod", author: "Au", feed_url: "https://f.example/rss", image_url: "", description: "", subscribed: false },
-          { title: "Already Sub", author: "Au2", feed_url: "https://g.example/rss", image_url: "", description: "", subscribed: true },
+          { title: "Already Sub", author: "Au2", feed_url: "https://g.example/rss", image_url: "", description: "", subscribed: true, show_id: 6 },
         ],
         episodes: [episode({ id: 8, title: "Matching Episode" })],
       },
@@ -1580,7 +1580,7 @@ describe("ShowsView search", () => {
 
     await screen.findByText("Found Pod");
     expect(screen.getByText("Matching Episode")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Subscribed" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Subscribed" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Mark played" }));
     await waitFor(() => expect(calls.some((c) => c.key === "POST /api/episodes/8/played")).toBe(true));
     expect(calls.find((c) => c.key === "GET /api/search")?.url.searchParams.get("q")).toBe("found");
@@ -1608,6 +1608,49 @@ describe("ShowsView search", () => {
     await user.click(await screen.findByRole("button", { name: "Subscribe" }));
     await screen.findByText(/upstream error/);
     expect(screen.getByRole("button", { name: "Subscribe" })).toBeEnabled();
+  });
+
+  it("unsubscribes a subscribed show from the search results", async () => {
+    const { calls } = installApi({
+      ...settings,
+      "GET /api/search": {
+        directory_configured: true,
+        podcasts: [
+          { title: "Already Sub", author: "Au2", feed_url: "https://g.example/rss", image_url: "", description: "", subscribed: true, show_id: 6 },
+        ],
+        episodes: [],
+      },
+      "DELETE /api/shows/6": null,
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "already");
+
+    const button = await screen.findByRole("button", { name: "Subscribed" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    await waitFor(() => expect(calls.some((c) => c.key === "DELETE /api/shows/6")).toBe(true));
+    expect(await screen.findByRole("button", { name: "Subscribe" })).toBeInTheDocument();
+  });
+
+  it("keeps the subscribed state and shows an error when unsubscribe fails", async () => {
+    installApi({
+      ...settings,
+      "GET /api/search": {
+        directory_configured: true,
+        podcasts: [
+          { title: "Locked Sub", author: "Au2", feed_url: "https://l.example/rss", image_url: "", description: "", subscribed: true, show_id: 7 },
+        ],
+        episodes: [],
+      },
+      "DELETE /api/shows/7": new HttpError(500, { error: "boom" }),
+    });
+    const user = userEvent.setup();
+    wrap(<ShowsView />);
+    await user.type(screen.getByRole("searchbox"), "locked");
+    await user.click(await screen.findByRole("button", { name: "Subscribed" }));
+    await screen.findByText("boom");
+    expect(screen.getByRole("button", { name: "Subscribed" })).toBeEnabled();
   });
 
   it("clears the input with the × button in one tap", async () => {

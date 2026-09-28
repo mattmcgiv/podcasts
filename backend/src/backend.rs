@@ -1419,10 +1419,18 @@ impl Backend {
             let mut pods = directory.search(query)?;
             let conn = self.db.lock()?;
             for p in &mut pods {
-                let sub: Option<i64> = conn
-                    .query_row("SELECT is_subscribed FROM podcasts WHERE feed_url = ?", params![p.feed_url], |r| r.get(0))
+                let row: Option<(i64, i64)> = conn
+                    .query_row(
+                        "SELECT id, is_subscribed FROM podcasts WHERE feed_url = ?",
+                        params![p.feed_url],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
                     .optional()?;
-                p.subscribed = sub == Some(1);
+                let Some((id, flag)) = row else {
+                    continue;
+                };
+                p.subscribed = flag == 1;
+                p.show_id = (flag == 1).then_some(id);
             }
             pods
         } else {

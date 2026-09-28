@@ -197,6 +197,8 @@ pub struct DirectoryPodcast {
     pub image_url: String,
     pub description: String,
     pub subscribed: bool,
+    /// Library podcast id when subscribed, so the client can unsubscribe from search results.
+    pub show_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -131,6 +131,7 @@ impl DirectorySearcher for PodcastIndexClient {
                         .unwrap_or_default(),
                     description: feed.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     subscribed: false,
+                    show_id: None,
                 })
             })
             .collect())

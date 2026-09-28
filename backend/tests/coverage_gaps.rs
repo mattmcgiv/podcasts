@@ -1521,18 +1521,35 @@ fn test_cov_backend_search_marks_subscribed_directory_results() {
         [],
     )
     .unwrap();
+    db.execute(
+        "INSERT INTO podcasts (id, feed_url, title, created_at, is_subscribed) VALUES (2, 'https://c.example/rss', 'C', 1, 0)",
+        [],
+    )
+    .unwrap();
     let backend = Backend::with_data_root(
         db,
         std::sync::Arc::new(MockFeedFetcher::default()),
         std::sync::Arc::new(StubDirectory {
-            podcasts: vec![DirectoryPodcast {
-                title: "Found".into(),
-                author: "Au".into(),
-                feed_url: "https://f.example/rss".into(),
-                image_url: "".into(),
-                description: "".into(),
-                subscribed: false,
-            }],
+            podcasts: vec![
+                DirectoryPodcast {
+                    title: "Found".into(),
+                    author: "Au".into(),
+                    feed_url: "https://f.example/rss".into(),
+                    image_url: "".into(),
+                    description: "".into(),
+                    subscribed: false,
+                    show_id: None,
+                },
+                DirectoryPodcast {
+                    title: "Cached".into(),
+                    author: "Au".into(),
+                    feed_url: "https://c.example/rss".into(),
+                    image_url: "".into(),
+                    description: "".into(),
+                    subscribed: false,
+                    show_id: None,
+                },
+            ],
         }),
         Some(temp.path().to_owned()),
     );
@@ -1540,6 +1557,9 @@ fn test_cov_backend_search_marks_subscribed_directory_results() {
     assert_eq!(response.status_code, 200);
     let results: SearchResults = serde_json::from_slice(&response.body).unwrap();
     assert!(results.podcasts[0].subscribed);
+    assert_eq!(results.podcasts[0].show_id, Some(1));
+    assert!(!results.podcasts[1].subscribed);
+    assert_eq!(results.podcasts[1].show_id, None);
 }
 
 #[test]
