@@ -782,11 +782,13 @@ def ship_upload(zip_path, account, project):
 
 
 def ship_confirm_live(hashes):
+    # Cloudflare 403s urllib's default UA; check with a browser UA instead.
+    agent = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"}
     try:
-        with urllib.request.urlopen(PRODUCTION_URL + "/", timeout=30) as response:
+        with urllib.request.urlopen(urllib.request.Request(PRODUCTION_URL + "/", headers=agent), timeout=30) as response:
             html = response.read().decode("utf-8", "replace")
             csp = response.headers.get("Content-Security-Policy", "")
-        with urllib.request.urlopen(PRODUCTION_URL + "/sw.js", timeout=30) as response:
+        with urllib.request.urlopen(urllib.request.Request(PRODUCTION_URL + "/sw.js", headers=agent), timeout=30) as response:
             sw_csp = response.headers.get("Content-Security-Policy", "")
     except Exception as error:
         raise ShipRetry(f"live site unreachable: {ship_reason(error, limit=120)}") from error
