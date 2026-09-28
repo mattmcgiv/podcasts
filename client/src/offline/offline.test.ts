@@ -262,6 +262,9 @@ describe("synchronization", () => {
     expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], outcome: "pending" as never }] })).toThrow("Unsupported");
     const feedback = [{ id: "r1", kind: "bug" as const, status: "queued" as const, created_at: 10 }];
     expect(() => validateSnapshot({ ...snapshot(), feedback })).not.toThrow();
+    for (const status of ["queued", "running", "done", "failed", "ready", "landed", "deployed", "needs-review"] as const) {
+      expect(() => validateSnapshot({ ...snapshot(), feedback: [{ ...feedback[0], status }] })).not.toThrow();
+    }
     expect(() => validateSnapshot({ ...snapshot(), feedback: [{ ...feedback[0], kind: "rant" as never }] })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), feedback: [{ ...feedback[0], status: "pending" as never }] })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), feedback: "queued" as never })).toThrow("Unsupported");

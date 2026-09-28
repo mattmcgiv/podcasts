@@ -258,7 +258,16 @@ export interface AdRemovalStatusesPayload {
 
 export type FeedbackKind = "feature" | "bug";
 
-export type FeedbackStatusState = "queued" | "running" | "done" | "failed";
+/** Matches browser_feedback.status. Ship states past dispatch are part of the snapshot. */
+export type FeedbackStatusState =
+  | "queued"
+  | "running"
+  | "done"
+  | "failed"
+  | "ready"
+  | "landed"
+  | "deployed"
+  | "needs-review";
 
 /** A user-typed report the Mac has received, with its dispatch state. */
 export interface FeedbackStatus {

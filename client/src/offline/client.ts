@@ -337,7 +337,7 @@ export function validateSnapshot(snapshot: Snapshot): void {
 }
 
 const FEEDBACK_KINDS = new Set(["feature", "bug"]);
-const FEEDBACK_STATUSES = new Set(["queued", "running", "done", "failed"]);
+const FEEDBACK_STATUSES = new Set(["queued", "running", "done", "failed", "ready", "landed", "deployed", "needs-review"]);
 
 function isFeedbackStatus(value: unknown): value is FeedbackStatus {
   if (value == null || typeof value !== "object") return false;
