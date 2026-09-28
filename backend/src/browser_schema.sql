@@ -75,7 +75,13 @@ END;
 
 -- User-typed feature requests and bug reports synced from the browser.
 -- status: queued (awaiting pi dispatch), running (pi child active),
--- done (pi exited 0), failed (terminal dispatch failure).
+-- done (pi exited 0, awaiting verification; transitional, then ready or
+-- needs-review), failed (terminal dispatch failure), ready (verified, awaiting
+-- host landing), landed (merged to main and pushed, awaiting Pages ship),
+-- deployed (live on the production site), needs-review (verify, land, or ship
+-- needs a human; the worktree is intact).
+-- ship_attempts counts Pages ship tries for landed rows; landing failures go
+-- straight to needs-review.
 CREATE TABLE IF NOT EXISTS browser_feedback (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK(kind IN ('feature','bug')),
@@ -83,8 +89,9 @@ CREATE TABLE IF NOT EXISTS browser_feedback (
     device TEXT NOT NULL,
     client_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed')),
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed','ready','landed','deployed','needs-review')),
     attempts INTEGER NOT NULL DEFAULT 0,
+    ship_attempts INTEGER NOT NULL DEFAULT 0,
     next_at INTEGER NOT NULL DEFAULT 0,
     started_at INTEGER NOT NULL DEFAULT 0,
     result TEXT

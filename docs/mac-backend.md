@@ -389,7 +389,8 @@ The model endpoint must use loopback. The default is `http://127.0.0.1:8000/v1/c
 
 Settings has a Send feedback view for typed feature requests and bug reports.
 Reports queue in the browser outbox and sync through `/api/sync/actions` (entity `feedback`) when the Mac is connected.
-The snapshot carries each received report's dispatch state: `queued`, `running`, `done`, or `failed`.
+The snapshot carries each received report's pipeline state: `queued`, `running`, `done` (transitional),
+`failed`, `ready`, `landed`, `deployed`, or `needs-review`.
 
 Dispatch stays disabled until `mac.json` names the checkout Pi should edit:
 
@@ -408,12 +409,23 @@ a mid-run unplug records `preempted` without consuming the attempt, and every ru
 `feedback/<id>.pi.log` in the artifact store (fresh per attempt, kept on timeout and preempt). Each report gets an
 isolated git worktree at `data/AdRemovalData/feedback-worktrees/<id>` on its own `feedback/<id>` branch, created from
 the checkout's HEAD on first dispatch and reused across attempts, so retries continue the previous attempt's committed
-or uncommitted progress there. pi never touches the owner's checkout. Review with `git -C <worktree> diff` (or
-`git diff main...feedback/<id>`) and merge as usual; afterwards remove the worktree by hand
-(`git worktree remove <dir>`) and delete the branch — the backend never removes worktrees itself, so unreviewed work
-is never destroyed. The prompt forbids touching the merge gate or build configuration. The client test container
-mounts the main checkout rather than the worktree, so pi never runs dev/check.sh there; backend changes are verified
-with `cargo test` from the worktree, and client changes are tested after merge.
+or uncommitted progress there. pi never touches the owner's checkout. A clean pi exit is verified, not trusted: the
+diff must be non-empty, must avoid protected build/gate paths (anything under `dev/` or `infra/`,
+`client/package.json`, `client/package-lock.json`, `client/vite.config.ts`, `client/scripts/`, `backend/Cargo.toml`,
+`backend/Cargo.lock`), and must pass the area suites — `cargo test` for `backend/` changes, the client gate in an
+ephemeral container (worktree `client/` mounted, guest-only `node_modules`) for `client/` changes. Verified reports
+become `ready`; anything else becomes `needs-review` with the reason, worktree intact. Finished `done` rows from
+before the verify stage are verified the same way as backfill.
+A host timer (`dev.mcgiv.pods-ship`, every 5 minutes, installed alongside the backend agent) lands each `ready`
+report: it commits the worktree to `feedback/<id>`, rebases onto `main`, fast-forward merges, re-runs the merge
+gate on `main`, and pushes — then ships the client through the Pages dashboard exactly as **Deploy the client**
+describes and confirms the live hashes and CSP headers. Landed reports become `landed`, live ones `deployed`;
+ship failures retry with backoff (5 tries), land or ship problems that need a person become `needs-review`.
+Review a stuck report with `git -C <worktree> diff` (or `git diff main...feedback/<id>`) and merge as usual;
+afterwards remove the worktree by hand (`git worktree remove <dir>`) and delete the branch — the backend never
+removes worktrees itself, so unreviewed work is never destroyed. The prompt forbids touching the merge gate or
+build configuration, and the verifier enforces it. pi never runs `dev/check.sh` or npm in the worktree: the client
+test container mounts the main checkout rather than the worktree, so client changes are verified after pi finishes.
 A pi launch failure — missing binary, or exit 127 from a missing interpreter — requeues without consuming an attempt, so a broken host `PATH` cannot fail a report; the recorded result names the cause and the report dispatches once the host is repaired.
 Pi must be launchable under the service `PATH` (`/opt/homebrew/bin:/usr/local/bin:~/.local/bin:~/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin`); the script-based pi also needs `node` on that `PATH`.
 Pi is instructed to leave the fix uncommitted for review. It never commits, pushes, or changes branches.

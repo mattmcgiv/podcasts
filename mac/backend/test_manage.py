@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import manage
@@ -702,3 +703,186 @@ class ManageTests(unittest.TestCase):
             manage.maybe_start_omlx(config, 1 + manage.OMLX_DOWN_GRACE_SECS, state)
             notify.assert_called_once_with("oMLX start failed")
             self.assertEqual(state["next_start_at"], 1 + manage.OMLX_DOWN_GRACE_SECS + manage.OMLX_START_INTERVAL_SECS)
+
+
+def ship_git(*args, cwd):
+    completed = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip()
+
+
+def ship_fixture_repo(root):
+    repo = root / "repo"
+    repo.mkdir()
+    ship_git("init", "-b", "main", cwd=repo)
+    ship_git("config", "user.email", "t@t", cwd=repo)
+    ship_git("config", "user.name", "t", cwd=repo)
+    ship_git("config", "commit.gpgsign", "false", cwd=repo)
+    (repo / "README.md").write_text("base\n")
+    gate = repo / "dev/check.sh"
+    gate.parent.mkdir()
+    gate.write_text("#!/bin/sh\nexit 0\n")
+    gate.chmod(0o755)
+    ship_git("add", "-A", cwd=repo)
+    ship_git("commit", "-m", "base", cwd=repo)
+    origin = root / "origin.git"
+    ship_git("init", "--bare", str(origin), cwd=root)
+    ship_git("remote", "add", "origin", str(origin), cwd=repo)
+    ship_git("push", "origin", "main", cwd=repo)
+    return repo, origin
+
+
+def ship_fixture_db(state):
+    return processing_db(state / "data/pods.sqlite")
+
+
+def ship_insert_ready(db, report_id="r1", kind="feature", body="dark mode"):
+    db.execute("INSERT INTO browser_feedback(id,kind,body,device,client_id,created_at,status,attempts,ship_attempts,next_at,started_at) "
+               "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+               (report_id, kind, body, "iPhone", "client", 7, "ready", 1, 0, 0, 0))
+    db.commit()
+
+
+def ship_feedback_status(db, report_id):
+    return db.execute("SELECT status, result FROM browser_feedback WHERE id=?", (report_id,)).fetchone()
+
+
+class ShipTests(unittest.TestCase):
+    def test_ship_reason_truncates_and_flattens(self):
+        self.assertEqual(manage.ship_reason(ValueError("a\nb" * 200)), ("ValueError: " + "a b" * 200)[:300])
+        self.assertTrue(manage.ship_reason(ValueError("x" * 500)).startswith("ValueError: "))
+        self.assertEqual(len(manage.ship_reason(ValueError("x" * 500))), 300)
+
+    def test_ship_valid_id_rejects_escapes(self):
+        self.assertTrue(manage.ship_valid_id("9c4ac8ab-dd8a-43c9-8ae2-f0d477ec3ae1"))
+        for bad in ("", "../x", "a/b", ".hidden", "x" * 129):
+            self.assertFalse(manage.ship_valid_id(bad), bad)
+
+    def test_ship_commit_message_names_report(self):
+        message = manage.ship_commit_message("9c4ac8ab-dd8a", "feature", "dark mode\nsecond line")
+        self.assertEqual(message, "Feedback 9c4ac8ab (feature request): dark mode")
+        self.assertIn("bug report", manage.ship_commit_message("r1", "bug", "crash"))
+
+    def test_ship_backoff_caps(self):
+        self.assertEqual(manage.ship_backoff_secs(1), 300)
+        self.assertEqual(manage.ship_backoff_secs(2), 600)
+        self.assertEqual(manage.ship_backoff_secs(99), 3600)
+
+    def test_ship_lock_serializes_and_recovers_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(manage, "STATE", Path(tmp)):
+                with manage.ship_lock() as first:
+                    self.assertTrue(first)
+                    with manage.ship_lock() as second:
+                        self.assertFalse(second)
+                with manage.ship_lock() as third:
+                    self.assertTrue(third)
+                lock = Path(tmp) / "ship.lock"
+                lock.mkdir()
+                old = manage.SHIP_LOCK_TIMEOUT_SECS + 5
+                os.utime(lock, (time.time() - old, time.time() - old))
+                with manage.ship_lock() as recovered:
+                    self.assertTrue(recovered)
+
+    def test_ship_zip_requires_site_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "dist"
+            (dist / "assets").mkdir(parents=True)
+            (dist / "index.html").write_text("<html></html>")
+            (dist / "_headers").write_text("x")
+            with self.assertRaises(manage.ShipBlocked):
+                manage.ship_zip_dist(dist, Path(tmp) / "bad.zip")
+            (dist / "sw.js").write_text("x")
+            (dist / "assets/main-abc.js").write_text("x")
+            names = manage.ship_zip_dist(dist, Path(tmp) / "ok.zip")
+            self.assertIn("index.html", names)
+            self.assertIn("assets/main-abc.js", names)
+
+    def test_ship_dist_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp)
+            (dist / "index.html").write_text('<script src="/assets/main-ikiaS2H4.js"></script>'
+                                             '<link href="/assets/main-Bo3PpRhs.css">')
+            self.assertEqual(manage.ship_dist_hashes(dist), {"assets/main-ikiaS2H4.js", "assets/main-Bo3PpRhs.css"})
+
+    def test_land_ready_merges_and_pushes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(manage, "STATE", root):
+                repo, origin = ship_fixture_repo(root)
+                db = ship_fixture_db(root)
+                ship_insert_ready(db)
+                worktree = root / "data/AdRemovalData/feedback-worktrees/r1"
+                worktree.parent.mkdir(parents=True)
+                ship_git("-C", str(repo), "worktree", "add", str(worktree), "-b", "feedback/r1", cwd=root)
+                (worktree / "fix.txt").write_text("fixed\n")
+                with patch.object(manage, "ship_container_ready", return_value=True):
+                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                self.assertEqual((repo / "fix.txt").read_text(), "fixed\n")
+                self.assertEqual(ship_git("rev-parse", "main", cwd=repo), ship_git("rev-parse", "main", cwd=origin))
+                status, result = ship_feedback_status(db, "r1")
+                self.assertEqual(status, "landed")
+                self.assertIn("feedback/r1", result)
+                with patch.object(manage, "ship_container_ready", return_value=True):
+                    db.execute("UPDATE browser_feedback SET status='ready' WHERE id='r1'")
+                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                self.assertEqual(ship_feedback_status(db, "r1")[0], "landed")
+
+    def test_land_ready_retries_on_dirty_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(manage, "STATE", root):
+                repo, _ = ship_fixture_repo(root)
+                db = ship_fixture_db(root)
+                ship_insert_ready(db)
+                worktree = root / "data/AdRemovalData/feedback-worktrees/r1"
+                worktree.parent.mkdir(parents=True)
+                ship_git("-C", str(repo), "worktree", "add", str(worktree), "-b", "feedback/r1", cwd=root)
+                (repo / "README.md").write_text("dirty\n")
+                with patch.object(manage, "ship_container_ready", return_value=True):
+                    with self.assertRaises(manage.ShipRetry):
+                        manage.land_ready(db, repo)
+                self.assertEqual(ship_feedback_status(db, "r1")[0], "ready")
+
+    def test_land_ready_blocks_on_rebase_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(manage, "STATE", root):
+                repo, _ = ship_fixture_repo(root)
+                db = ship_fixture_db(root)
+                ship_insert_ready(db)
+                worktree = root / "data/AdRemovalData/feedback-worktrees/r1"
+                worktree.parent.mkdir(parents=True)
+                ship_git("-C", str(repo), "worktree", "add", str(worktree), "-b", "feedback/r1", cwd=root)
+                (worktree / "README.md").write_text("branch\n")
+                (repo / "README.md").write_text("main\n")
+                ship_git("add", "-A", cwd=repo)
+                ship_git("commit", "-m", "main moves", cwd=repo)
+                ship_git("push", "origin", "main", cwd=repo)
+                with patch.object(manage, "ship_container_ready", return_value=True):
+                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                status, result = ship_feedback_status(db, "r1")
+                self.assertEqual(status, "needs-review")
+                self.assertIn("rebase conflict", result)
+                self.assertEqual((repo / "README.md").read_text(), "main\n")
+
+    def test_land_ready_blocks_on_missing_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(manage, "STATE", root):
+                repo, _ = ship_fixture_repo(root)
+                db = ship_fixture_db(root)
+                ship_insert_ready(db)
+                with patch.object(manage, "ship_container_ready", return_value=True):
+                    self.assertEqual(manage.land_ready(db, repo), "r1")
+                status, result = ship_feedback_status(db, "r1")
+                self.assertEqual(status, "needs-review")
+                self.assertIn("worktree is missing", result)
+
+    def test_ship_mark_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = processing_db(Path(tmp) / "pods.sqlite")
+            ship_insert_ready(db)
+            manage.ship_mark(db, "r1", "landed", "merged", ship_attempts=0)
+            manage.ship_mark(db, "r1", "deployed", "live")
+            self.assertEqual(ship_feedback_status(db, "r1")[0], "deployed")

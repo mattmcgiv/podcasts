@@ -1,5 +1,6 @@
 """Mac service setup, immutable releases, DNS, certificates, and backup."""
 import argparse
+import contextlib
 from contextlib import closing
 import hashlib
 import ipaddress
@@ -7,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import secrets
 import shutil
 import signal
@@ -19,6 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = Path(os.environ.get("PODS_STATE_DIR", str(Path.home() / ".local/share/pods")))
@@ -31,6 +34,20 @@ OMLX_DOWN_GRACE_SECS = 60
 OMLX_START_INTERVAL_SECS = 15 * 60
 OMLX_FAST_FAIL_SECS = 0.3
 OMLX_APP_CLI = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
+SHIP_INTERVAL_SECS = 300
+SHIP_LOCK_TIMEOUT_SECS = 30 * 60
+SHIP_MAX_ATTEMPTS = 5
+SHIP_BACKOFF_BASE_SECS = 300
+SHIP_BACKOFF_MAX_SECS = 3600
+SHIP_GATE_TIMEOUT_SECS = 900
+SHIP_BUILD_TIMEOUT_SECS = 600
+SHIP_BROWSER_TIMEOUT_SECS = 600
+FEEDBACK_BOT_NAME = "Pods Feedback"
+FEEDBACK_BOT_EMAIL = "feedback@pods.local"
+CF_ACCOUNT_DEFAULT = "46df77812ed7f1a7cd0c8039f8c60079"
+PAGES_PROJECT_DEFAULT = "pods-mcgiv"
+PRODUCTION_URL = "https://pods.mcgiv.dev"
+SYNC_ORIGIN = "https://sync.pods.mcgiv.dev:8443"
 
 
 def read_config():
@@ -517,6 +534,331 @@ def retry_job(db, episode):
     raise ValueError("Episode job is not eligible")
 
 
+class ShipRetry(Exception):
+    """Transient land/ship failure: keep the row, back off, try next tick."""
+
+
+class ShipBlocked(Exception):
+    """Land/ship needs a human: the row becomes needs-review, work intact."""
+
+
+def ship_reason(error, limit=300):
+    return f"{type(error).__name__}: {error}".replace("\n", " ").strip()[:limit]
+
+
+def ship_run(args, timeout=120):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise ShipRetry(f"{args[0]} timed out after {timeout}s") from error
+    except OSError as error:
+        raise ShipRetry(f"{args[0]} not launchable: {error}") from error
+
+
+def ship_git(repo, *args, timeout=120):
+    completed = ship_run(["git", "-C", str(repo), *args], timeout=timeout)
+    if completed.returncode != 0:
+        tail = ((completed.stdout or "") + (completed.stderr or "")).replace("\n", " ").strip()[-200:]
+        raise ShipBlocked(f"git {' '.join(args)} failed: {tail}")
+    return completed.stdout.strip()
+
+
+def ship_container_ready():
+    return ship_run(["container", "exec", "pods-dev", "true"], timeout=30).returncode == 0
+
+
+@contextlib.contextmanager
+def ship_lock():
+    path = STATE / "ship.lock"
+    try:
+        path.mkdir()
+    except FileExistsError:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except FileNotFoundError:
+            age = SHIP_LOCK_TIMEOUT_SECS + 1
+        if age < SHIP_LOCK_TIMEOUT_SECS:
+            yield False
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        try:
+            path.mkdir()
+        except FileExistsError:
+            yield False
+            return
+    try:
+        yield True
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def ship_db():
+    return sqlite3.connect(STATE / "data/pods.sqlite", timeout=30)
+
+
+def ship_select(db, status, throttle=True):
+    query = "SELECT id,kind,body,ship_attempts FROM browser_feedback WHERE status=?"
+    params = [status]
+    if throttle:
+        query += " AND next_at<=?"
+        params.append(int(time.time()))
+    query += " ORDER BY created_at LIMIT 1"
+    return db.execute(query, params).fetchone()
+
+
+def ship_mark(db, report_id, status, result, ship_attempts=None, next_at=0):
+    if ship_attempts is None:
+        db.execute("UPDATE browser_feedback SET status=?, result=?, next_at=?, started_at=0 WHERE id=?",
+                   (status, result[:2000], next_at, report_id))
+    else:
+        db.execute("UPDATE browser_feedback SET status=?, result=?, next_at=?, started_at=0, ship_attempts=? WHERE id=?",
+                   (status, result[:2000], next_at, ship_attempts, report_id))
+    db.commit()
+
+
+def ship_backoff_secs(attempts):
+    return min(SHIP_BACKOFF_BASE_SECS * attempts, SHIP_BACKOFF_MAX_SECS)
+
+
+def ship_valid_id(report_id):
+    return bool(report_id) and len(report_id) <= 128 and "/" not in report_id \
+        and ".." not in report_id and not report_id.startswith(".")
+
+
+def ship_commit_message(report_id, kind, body):
+    lines = (body or "").strip().splitlines()
+    summary = lines[0][:120] if lines else kind
+    label = "bug report" if kind == "bug" else "feature request"
+    return f"Feedback {report_id[:8]} ({label}): {summary}"
+
+
+def land_ready(db, repo):
+    row = ship_select(db, "ready", throttle=False)
+    if row is None:
+        return None
+    report_id, kind, body, _ = row
+    branch = f"feedback/{report_id}"
+    try:
+        if not ship_valid_id(report_id):
+            raise ShipBlocked(f"invalid report id {report_id!r}")
+        worktree = STATE / "data/AdRemovalData/feedback-worktrees" / report_id
+        if not (worktree / ".git").exists():
+            raise ShipBlocked("worktree is missing")
+        if not ship_git(repo, "branch", "--list", branch):
+            raise ShipBlocked("branch is missing")
+        if ship_git(repo, "branch", "--show-current") != "main":
+            raise ShipRetry("main checkout is on another branch")
+        if ship_git(repo, "status", "--porcelain") != "":
+            raise ShipRetry("main checkout is dirty")
+        if not ship_container_ready():
+            raise ShipRetry("pods-dev is down")
+        ahead = int(ship_git(repo, "rev-list", "--count", "origin/main..main"))
+        if ahead > 0 and ship_run(["git", "-C", str(repo), "push", "origin", "main"], timeout=180).returncode != 0:
+            raise ShipRetry("main is ahead and push failed")
+        # Commit first: a fresh branch trivially matches main, so the delta
+        # check below only means "already landed" after this commit step.
+        if ship_git(worktree, "status", "--porcelain") != "":
+            ship_git(worktree, "add", "-A")
+            committed = ship_run(["git", "-C", str(worktree), "-c", f"user.name={FEEDBACK_BOT_NAME}",
+                                  "-c", f"user.email={FEEDBACK_BOT_EMAIL}",
+                                  "commit", "-m", ship_commit_message(report_id, kind, body)], timeout=120)
+            if committed.returncode != 0:
+                raise ShipBlocked(f"worktree commit failed: {(committed.stderr or '').strip()[:200]}")
+        if int(ship_git(worktree, "rev-list", "--count", f"main..{branch}")) == 0:
+            ship_mark(db, report_id, "landed", f"already on main ({branch})", ship_attempts=0)
+            return report_id
+        if ship_run(["git", "-C", str(worktree), "rebase", "main"], timeout=300).returncode != 0:
+            ship_run(["git", "-C", str(worktree), "rebase", "--abort"], timeout=60)
+            raise ShipBlocked("rebase conflict with main")
+        pre = ship_git(repo, "rev-parse", "main")
+        merged = ship_run(["git", "-C", str(repo), "merge", "--ff-only", branch], timeout=120)
+        if merged.returncode != 0:
+            raise ShipBlocked(f"merge failed after rebase: {(merged.stderr or '').strip()[:200]}")
+        gate = ship_run([str(repo / "dev/check.sh")], timeout=SHIP_GATE_TIMEOUT_SECS)
+        if gate.returncode != 0:
+            ship_run(["git", "-C", str(repo), "reset", "--hard", pre], timeout=120)
+            tail = ((gate.stdout or "") + (gate.stderr or "")).replace("\n", " ").strip()[-400:]
+            raise ShipBlocked(f"merge gate failed: {tail}")
+        if ship_run(["git", "-C", str(repo), "push", "origin", "main"], timeout=180).returncode != 0:
+            ship_run(["git", "-C", str(repo), "fetch", "origin"], timeout=120)
+            rebased = ship_run(["git", "-C", str(repo), "pull", "--rebase", "origin", "main"], timeout=300)
+            if rebased.returncode == 0:
+                ship_run(["git", "-C", str(repo), "push", "origin", "main"], timeout=180)
+            if ship_git(repo, "rev-list", "--count", "origin/main..main") != "0":
+                raise ShipBlocked("push rejected; merge kept on local main")
+        ship_mark(db, report_id, "landed", f"merged {branch} to main and pushed", ship_attempts=0)
+        return report_id
+    except ShipBlocked as error:
+        ship_mark(db, report_id, "needs-review", f"land blocked: {error}")
+        print(f"ship: {report_id} needs review: {error}")
+        return report_id
+
+
+def ship_dist_hashes(dist):
+    return set(re.findall(r"assets/main-[A-Za-z0-9_-]+\.(?:js|css)", (dist / "index.html").read_text()))
+
+
+def ship_zip_dist(dist, path):
+    names = []
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file in sorted(dist.rglob("*")):
+            if file.is_file() and file.name != ".DS_Store":
+                archive.write(file, file.relative_to(dist))
+                names.append(file.relative_to(dist).as_posix())
+    missing = {"index.html", "_headers", "sw.js"} - set(names)
+    if missing:
+        raise ShipBlocked(f"zip is missing site root files: {sorted(missing)}")
+    if any(name.startswith("dist/") or "node_modules" in name for name in names):
+        raise ShipBlocked("zip nests the site root")
+    return names
+
+
+SHIP_HARNESS = """
+import time
+
+new_tab("__DEPLOY_URL__")
+wait_for_load()
+nodes = cdp("Accessibility.getFullAXTree")["nodes"]
+for n in nodes:
+    name = (n.get("name") or {}).get("value", "")
+    role = (n.get("role") or {}).get("value", "")
+    if role == "radio" and name.strip() == "Production":
+        box = cdp("DOM.getBoxModel", backendNodeId=n.get("backendDOMNodeId"))["model"]["content"]
+        click_at_xy(sum(box[0::2]) / 4, sum(box[1::2]) / 4)
+        break
+else:
+    raise RuntimeError("production environment radio not found")
+upload_file("input[accept='.zip']", "__ZIP__")
+deadline = time.time() + 180
+while time.time() < deadline:
+    nodes = cdp("Accessibility.getFullAXTree")["nodes"]
+    if any("All files were successfully uploaded." in ((n.get("name") or {}).get("value", "") or "") for n in nodes):
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError("zip upload timed out")
+js("Array.from(document.querySelectorAll('button')).filter(function(b){return b.textContent.indexOf('Save and deploy')>=0}).forEach(function(b){b.click()})")
+link = None
+deadline = time.time() + 300
+while time.time() < deadline:
+    nodes = cdp("Accessibility.getFullAXTree")["nodes"]
+    done = False
+    for n in nodes:
+        name = (n.get("name") or {}).get("value", "") or ""
+        role = (n.get("role") or {}).get("value", "")
+        if role == "heading" and name.strip() == "Success!":
+            done = True
+        if role == "link" and "pages.dev" in name:
+            link = name.strip()
+    if done:
+        break
+    time.sleep(4)
+else:
+    raise RuntimeError("deployment did not reach Success")
+print("deployed " + str(link))
+"""
+
+
+def ship_upload(zip_path, account, project):
+    script = SHIP_HARNESS.replace("__DEPLOY_URL__", f"https://dash.cloudflare.com/{account}/pages/view/{project}/deployments/new")
+    script = script.replace("__ZIP__", str(zip_path))
+    try:
+        completed = subprocess.run(["browser-harness"], input=script, capture_output=True, text=True,
+                                   timeout=SHIP_BROWSER_TIMEOUT_SECS)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise ShipRetry(f"dashboard upload failed: {ship_reason(error)}") from error
+    if completed.returncode != 0:
+        tail = ((completed.stdout or "") + (completed.stderr or "")).replace("\n", " ")[-400:]
+        raise ShipRetry(f"dashboard upload failed: {tail}")
+    return (completed.stdout or "").strip().splitlines()[-1][:200] if (completed.stdout or "").strip() else "uploaded"
+
+
+def ship_confirm_live(hashes):
+    try:
+        with urllib.request.urlopen(PRODUCTION_URL + "/", timeout=30) as response:
+            html = response.read().decode("utf-8", "replace")
+            csp = response.headers.get("Content-Security-Policy", "")
+        with urllib.request.urlopen(PRODUCTION_URL + "/sw.js", timeout=30) as response:
+            sw_csp = response.headers.get("Content-Security-Policy", "")
+    except Exception as error:
+        raise ShipRetry(f"live site unreachable: {ship_reason(error, limit=120)}") from error
+    if not hashes or not all(marker in html for marker in hashes):
+        raise ShipRetry("live site does not serve this build yet")
+    if SYNC_ORIGIN not in csp:
+        raise ShipBlocked("live HTML lost the sync connect-src")
+    if "connect-src 'self' https:" not in sw_csp:
+        raise ShipBlocked("live sw.js lost the worker connect-src")
+
+
+def ship_landed(db, repo, config):
+    row = ship_select(db, "landed", throttle=True)
+    if row is None:
+        return None
+    report_id, kind, body, attempts = row
+    try:
+        if not ship_container_ready():
+            raise ShipRetry("pods-dev is down")
+        built = ship_run([str(repo / "dev/sh.sh"), "sh", "-c", "cd /work/client && npm run build"],
+                         timeout=SHIP_BUILD_TIMEOUT_SECS)
+        if built.returncode != 0:
+            raise ShipRetry(f"client build failed: {((built.stdout or '') + (built.stderr or '')).replace(chr(10), ' ').strip()[-200:]}")
+        dist = repo / "client/dist"
+        hashes = ship_dist_hashes(dist)
+        with tempfile.TemporaryDirectory(prefix="pods-ship-") as tmp:
+            zip_path = Path(tmp) / f"pods-ship-{report_id[:8]}.zip"
+            ship_zip_dist(dist, zip_path)
+            account = config.get("cloudflare_account", CF_ACCOUNT_DEFAULT)
+            project = config.get("pages_project", PAGES_PROJECT_DEFAULT)
+            deployed = ship_upload(zip_path, account, project)
+        ship_confirm_live(hashes)
+        ship_mark(db, report_id, "deployed", f"live on {PRODUCTION_URL} ({deployed})")
+        return report_id
+    except ShipRetry as error:
+        attempts += 1
+        if attempts >= SHIP_MAX_ATTEMPTS:
+            ship_mark(db, report_id, "needs-review", f"ship failed {attempts}x: {error}")
+        else:
+            ship_mark(db, report_id, "landed", f"ship failed ({attempts}/{SHIP_MAX_ATTEMPTS}): {error}",
+                      ship_attempts=attempts, next_at=int(time.time()) + ship_backoff_secs(attempts))
+        print(f"ship: {report_id} deferred: {error}")
+        return report_id
+    except ShipBlocked as error:
+        ship_mark(db, report_id, "needs-review", f"ship blocked: {error}")
+        print(f"ship: {report_id} needs review: {error}")
+        return report_id
+
+
+def ship_once():
+    config = read_config()
+    if not config.get("feedback_repo"):
+        print("ship: feedback_repo is not configured; idle")
+        return
+    repo = Path(config["feedback_repo"])
+    if not (repo / ".git").exists():
+        print(f"ship: {repo} is not a checkout; idle")
+        return
+    try:
+        with sqlite3.connect(STATE / "data/pods.sqlite", timeout=30) as db:
+            with ship_lock() as locked:
+                if not locked:
+                    print("ship: another run holds the lock")
+                    return
+                try:
+                    landed = land_ready(db, repo)
+                    if landed:
+                        print(f"ship: landed {landed}")
+                except ShipRetry as error:
+                    print(f"ship: land deferred: {error}")
+                try:
+                    shipped = ship_landed(db, repo, config)
+                    if shipped:
+                        print(f"ship: shipped {shipped}")
+                except ShipRetry as error:
+                    print(f"ship: ship deferred: {error}")
+    except Exception as error:
+        print(f"ship: unexpected {ship_reason(error)}")
+
+
 def install_agent():
     config = read_config()
     if not (STATE / "current/pods-backend").is_file():
@@ -533,18 +875,27 @@ def install_agent():
              "StandardOutPath": str(STATE / "service.log"), "StandardErrorPath": str(STATE / "service-error.log")}
     path.write_bytes(plistlib.dumps(value))
     print(f"Prepared {path}. Start with launchctl bootstrap gui/{os.getuid()} {path}")
+    ship_path = directory / "dev.mcgiv.pods-ship.plist"
+    ship_value = {"Label": "dev.mcgiv.pods-ship",
+                  "ProgramArguments": [sys.executable, str(STATE / "current/runtime/manage.py"), "ship"],
+                  "RunAtLoad": True, "StartInterval": SHIP_INTERVAL_SECS,
+                  "EnvironmentVariables": environment,
+                  "StandardOutPath": str(STATE / "ship.log"), "StandardErrorPath": str(STATE / "ship-error.log")}
+    ship_path.write_bytes(plistlib.dumps(ship_value))
+    print(f"Prepared {ship_path}. Start with launchctl bootstrap gui/{os.getuid()} {ship_path}")
 
 
 def main():
     os.environ["PATH"] = PATH
     os.umask(0o077)
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["install", "agent", "run", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll", "devices"])
+    parser.add_argument("command", choices=["install", "agent", "run", "ship", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll", "devices"])
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     if args.command == "install": install()
     elif args.command == "agent": install_agent()
     elif args.command == "run": launch()
+    elif args.command == "ship": ship_once()
     elif args.command == "certificate": certificate()
     elif args.command == "enroll": enroll()
     elif args.command.startswith("acme-"): acme_hook(args.command == "acme-cleanup")

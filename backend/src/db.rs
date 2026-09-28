@@ -16,6 +16,7 @@ impl Database {
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
         migrate_browser_operation_identity(&conn)?;
+        migrate_browser_feedback_pipeline(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -29,6 +30,7 @@ impl Database {
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
         migrate_browser_operation_identity(&conn)?;
+        migrate_browser_feedback_pipeline(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -117,6 +119,51 @@ fn migrate_browser_progress(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Widen the feedback status set for the verify/land/ship pipeline and add
+/// the ship-attempt counter. A CHECK change needs a table rebuild; the guard
+/// keeps it a one-time no-op afterwards.
+fn migrate_browser_feedback_pipeline(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='browser_feedback'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else { return Ok(()) };
+    if sql.contains("needs-review") {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('browser_feedback') WHERE name='ship_attempts'",
+            [], |row| row.get(0))?;
+        if exists == 0 {
+            conn.execute("ALTER TABLE browser_feedback ADD COLUMN ship_attempts INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE browser_feedback_v2 (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind IN ('feature','bug')),
+            body TEXT NOT NULL,
+            device TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed','ready','landed','deployed','needs-review')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            ship_attempts INTEGER NOT NULL DEFAULT 0,
+            next_at INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL DEFAULT 0,
+            result TEXT
+        );
+        INSERT INTO browser_feedback_v2(id,kind,body,device,client_id,created_at,status,attempts,ship_attempts,next_at,started_at,result)
+            SELECT id,kind,body,device,client_id,created_at,status,attempts,0,next_at,started_at,result FROM browser_feedback;
+        DROP TABLE browser_feedback;
+        ALTER TABLE browser_feedback_v2 RENAME TO browser_feedback;
+        CREATE INDEX IF NOT EXISTS idx_browser_feedback_dispatch ON browser_feedback(status, next_at, created_at);",
+    )?;
+    Ok(())
+}
+
 #[test]
 fn browser_operation_identity_drops_sequence_uniqueness() {
     let conn = Connection::open_in_memory().unwrap();
@@ -154,6 +201,36 @@ fn browser_progress_migrates_existing_jobs_idempotently() {
     migrate_browser_progress(&conn).unwrap();
     let values: (String, i64, i64) = conn.query_row("SELECT stage,completed_units,total_units FROM browser_jobs", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
     assert_eq!(values, ("transcribing".into(),180,200));
+}
+
+#[test]
+fn browser_feedback_pipeline_widens_statuses_idempotently() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE browser_feedback (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK(kind IN ('feature','bug')),
+            body TEXT NOT NULL,
+            device TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_at INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL DEFAULT 0,
+            result TEXT
+        );
+        INSERT INTO browser_feedback VALUES('r1','feature','dark mode','iPhone','client',7,'done',1,0,0,'pi exit 0');",
+    )
+    .unwrap();
+    migrate_browser_feedback_pipeline(&conn).unwrap();
+    migrate_browser_feedback_pipeline(&conn).unwrap();
+    let kept: (String, i64, i64, String) = conn.query_row(
+        "SELECT status, attempts, ship_attempts, result FROM browser_feedback WHERE id='r1'",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+    assert_eq!(kept, ("done".to_string(), 1, 0, "pi exit 0".to_string()));
+    conn.execute("UPDATE browser_feedback SET status='ready' WHERE id='r1'", []).unwrap();
+    conn.execute("UPDATE browser_feedback SET ship_attempts=2 WHERE id='r1'", []).unwrap();
 }
 
 pub fn now_unix() -> i64 {

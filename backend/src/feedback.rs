@@ -7,14 +7,22 @@
 //! report becomes a local code fix. Dispatch stays disabled until
 //! `PODS_FEEDBACK_REPO` names the checkout directory.
 //!
+//! A clean pi exit is not trusted on its own: `verify` checks the worktree
+//! diff is non-empty, touches no protected build/gate path, and passes the
+//! area test suites (cargo for `backend/`, the client gate in an ephemeral
+//! container for `client/`). Verified reports become `ready` for the host
+//! land-and-ship timer; anything else becomes `needs-review` with the reason.
+//! Old `done` rows are verified the same way as backfill, so no finished
+//! report waits silently.
+//!
 //! Every wait and outcome lands in `browser_feedback.result`: gate deferrals
 //! name the gate, preempts name the power loss, and each run appends its pi
 //! transcript at `feedback/<id>.pi.log` in the artifact store. Each report gets
 //! an isolated git worktree (`feedback-worktrees/<id>` under the data root)
 //! on its own `feedback/<id>` branch, reused across attempts so a retry
-//! continues earlier work. pi never touches the owner's checkout; review the
-//! branch and remove the worktree by hand after merging — the backend never
-//! removes worktrees itself, so unreviewed work is never destroyed.
+//! continues earlier work. pi never touches the owner's checkout and never
+//! commits; the backend never removes worktrees itself, so unreviewed work
+//! is never destroyed.
 use crate::{Backend, Error};
 use rusqlite::{params, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -24,11 +32,13 @@ use std::time::{Duration, Instant};
 pub const PI_PROVIDER: &str = "omlx";
 pub const MAX_ATTEMPTS: i64 = 3;
 const DEFAULT_TIMEOUT_SECS: u64 = 1800;
+const DEFAULT_VERIFY_TIMEOUT_SECS: u64 = 600;
 const FAILURE_BACKOFF_BASE_SECS: i64 = 300;
 const FAILURE_BACKOFF_MAX_SECS: i64 = 7200;
 const PREEMPT_RETRY_SECS: i64 = 60;
 const LAUNCH_RETRY_SECS: i64 = 60;
 const MAX_REASON_CHARS: usize = 200;
+const MAX_VERIFY_TAIL_CHARS: usize = 1200;
 
 pub fn model() -> String {
     std::env::var("PODS_FEEDBACK_MODEL")
@@ -57,6 +67,28 @@ fn timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
 }
 
+fn verify_timeout_secs() -> u64 {
+    std::env::var("PODS_FEEDBACK_VERIFY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_VERIFY_TIMEOUT_SECS)
+}
+
+fn cargo_bin() -> String {
+    std::env::var("PODS_FEEDBACK_CARGO")
+        .ok()
+        .filter(|bin| !bin.is_empty())
+        .unwrap_or_else(|| "cargo".to_string())
+}
+
+fn container_bin() -> String {
+    std::env::var("PODS_FEEDBACK_CONTAINER")
+        .ok()
+        .filter(|bin| !bin.is_empty())
+        .unwrap_or_else(|| "container".to_string())
+}
+
 /// 30–60 seconds, deterministic from the report id. Mirrors the oMLX busy range.
 fn retry_delay_secs(id: &str) -> i64 {
     30 + (id.bytes().fold(0u64, |sum, byte| sum.wrapping_add(byte as u64)) % 31) as i64
@@ -79,17 +111,20 @@ enum PiOutcome {
 
 /// Claim and dispatch the oldest queued report. Gate failures defer the report
 /// without consuming an attempt and return `Ok(false)` so episode work proceeds.
+/// With nothing queued, one finished-but-unverified `done` report is verified
+/// as backfill; verification needs only the worktree, not the repo checkout.
 pub fn step(backend: &Backend) -> Result<bool, Error> {
-    let Some(repo) = repo_dir() else {
-        return Ok(false);
-    };
     let timeout = timeout_secs();
     let now = crate::db::now_unix();
     // A restart mid-run leaves `running` rows behind; the timeout reclaims them.
+    // This is pure bookkeeping, so it runs even while dispatch is disabled.
     backend.db.execute(
         "UPDATE browser_feedback SET status='queued', next_at=0, started_at=0, result='reclaimed after restart' WHERE status='running' AND started_at<?",
         [now - timeout as i64],
     )?;
+    let Some(repo) = repo_dir() else {
+        return verify_backfill(backend);
+    };
     let report: Option<Report> = {
         let conn = backend.db.lock()?;
         conn.query_row(
@@ -107,7 +142,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         .optional()?
     };
     let Some(report) = report else {
-        return Ok(false);
+        return verify_backfill(backend);
     };
     if let Err(error) = crate::power_gate::require_external_power() {
         return defer(backend, &report.id, &format!("waiting on power ({error})"));
@@ -148,13 +183,23 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let note = format!("{}{}", log_summary(&log), worktree_note(&worktree, &branch));
     match outcome {
         PiOutcome::Ok(elapsed) => {
-            finish(
-                backend,
-                &report.id,
-                "done",
-                &format!("pi exit 0 in {}s{note}", elapsed.as_secs()),
-                0,
-            )?;
+            let prefix = format!("pi exit 0 in {}s", elapsed.as_secs());
+            match verify(&worktree, &report.id) {
+                Ok(summary) => finish(
+                    backend,
+                    &report.id,
+                    "ready",
+                    &format!("{prefix}; verified: {summary}{note}"),
+                    0,
+                )?,
+                Err(reason) => finish(
+                    backend,
+                    &report.id,
+                    "needs-review",
+                    &format!("{prefix} but {reason}{note}"),
+                    0,
+                )?,
+            }
         }
         PiOutcome::Exit(code, elapsed) => {
             if code == Some(127) {
@@ -195,6 +240,208 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         }
     }
     Ok(true)
+}
+
+/// Verify one finished-but-unverified report left over from before the
+/// verify stage existed. New runs verify inline; this drains the backlog.
+fn verify_backfill(backend: &Backend) -> Result<bool, Error> {
+    let id: Option<String> = backend
+        .db
+        .lock()?
+        .query_row(
+            "SELECT id FROM browser_feedback WHERE status='done' ORDER BY created_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    let worktree = worktrees_root(backend).join(&id);
+    let note = worktree_note(&worktree, &worktree_branch(&id));
+    match verify(&worktree, &id) {
+        Ok(summary) => finish(
+            backend,
+            &id,
+            "ready",
+            &format!("backfill verified: {summary}{note}"),
+            0,
+        )?,
+        Err(reason) => finish(
+            backend,
+            &id,
+            "needs-review",
+            &format!("backfill {reason}{note}"),
+            0,
+        )?,
+    }
+    Ok(true)
+}
+
+/// Check a finished run before it becomes landable: the diff must be
+/// non-empty, avoid protected build/gate paths, and pass the area suites.
+/// `Ok` carries a short summary for the result column; `Err` carries the
+/// reason the report needs a human. Both keep the worktree intact.
+fn verify(worktree: &Path, id: &str) -> Result<String, String> {
+    if !worktree.join(".git").exists() {
+        return Err("the worktree is missing".to_string());
+    }
+    let files = changed_files(worktree)?;
+    if files.is_empty() {
+        return Err("no file changed".to_string());
+    }
+    if let Some(hit) = files.iter().find(|file| verify_protected_path(file)) {
+        return Err(format!("protected path changed: {hit}"));
+    }
+    let timeout = Duration::from_secs(verify_timeout_secs());
+    let mut ran = Vec::new();
+    if files.iter().any(|file| file.starts_with("backend/")) {
+        let manifest = worktree.join("backend/Cargo.toml").to_string_lossy().into_owned();
+        let secs = run_verify_cmd(
+            &cargo_bin(),
+            &["test", "--manifest-path", &manifest, "--features", "passkey"],
+            worktree,
+            timeout,
+            id,
+            "cargo test",
+        )?;
+        ran.push(format!("cargo test {secs}s"));
+    }
+    if files.iter().any(|file| file.starts_with("client/")) {
+        let mount = format!("{}:/work/client", worktree.join("client").display());
+        let secs = run_verify_cmd(
+            &container_bin(),
+            &[
+                "run", "--rm", "--dns", "1.1.1.1", "--cpus", "6", "--memory", "8g",
+                "-v", &mount, "--tmpfs", "/work/client/node_modules", "pods-dev-img",
+                "sh", "-c", "cd /work/client && npm ci --no-audit --no-fund && npm run check",
+            ],
+            worktree,
+            timeout,
+            id,
+            "client gate",
+        )?;
+        ran.push(format!("client gate {secs}s"));
+    }
+    let suites = if ran.is_empty() {
+        "no code touched".to_string()
+    } else {
+        ran.join(", ")
+    };
+    Ok(format!("{} file(s); {suites}", files.len()))
+}
+
+/// Uncommitted changes plus any branch delta: pi is told not to commit, but
+/// a committed change still ships, so it must be verified too.
+fn changed_files(worktree: &Path) -> Result<Vec<String>, String> {
+    let mut files = std::collections::BTreeSet::new();
+    let status = git(worktree, &["status", "--porcelain=v1", "-uall"])?;
+    for line in status.lines() {
+        let path = line.get(3..).unwrap_or("").trim();
+        // Renames print `old -> new`; the new name is what ships.
+        let path = path.rsplit(" -> ").next().unwrap_or("").trim().trim_matches('"');
+        if !path.is_empty() {
+            files.insert(path.to_string());
+        }
+    }
+    if let Ok(delta) = git(worktree, &["diff", "--name-only", "main...HEAD"]) {
+        for line in delta.lines() {
+            let path = line.trim();
+            if !path.is_empty() {
+                files.insert(path.to_string());
+            }
+        }
+    }
+    Ok(files.into_iter().collect())
+}
+
+/// Build configuration and the merge gate itself. Mirrors the dispatch
+/// prompt; the prompt tells pi, this enforces. A fix that legitimately needs
+/// one of these paths goes through a human.
+fn verify_protected_path(path: &str) -> bool {
+    path.starts_with("dev/")
+        || path.starts_with("infra/")
+        || path.starts_with(".github/")
+        || path.starts_with("client/scripts/")
+        || path == "client/package.json"
+        || path == "client/package-lock.json"
+        || path == "client/vite.config.ts"
+        || path.starts_with("backend/Cargo.")
+}
+
+/// Run one verify command with a timeout. Stdout and stderr share a capture
+/// file so the failure reason can quote the tail.
+fn run_verify_cmd(
+    bin: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+    id: &str,
+    label: &str,
+) -> Result<u64, String> {
+    let capture =
+        std::env::temp_dir().join(format!("pods-verify-{}-{id}-{label}.log", std::process::id()));
+    let (log_out, log_err) = log_stdio_pair(Some(&capture));
+    let mut cmd = Command::new(bin);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .args(args)
+        .current_dir(cwd)
+        .stdout(log_out)
+        .stderr(log_err)
+        .spawn()
+        .map_err(|error| format!("{label} not launchable: {error}"))?;
+    let start = Instant::now();
+    let status = loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("{label} wait failed: {error}"))?
+        {
+            Some(status) => break status,
+            None => {}
+        }
+        if start.elapsed() >= timeout {
+            kill_verify_child(&mut child);
+            let _ = std::fs::remove_file(&capture);
+            return Err(format!("{label} timeout after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    let secs = start.elapsed().as_secs();
+    let tail = read_tail(&capture, MAX_VERIFY_TAIL_CHARS);
+    let _ = std::fs::remove_file(&capture);
+    if status.success() {
+        Ok(secs)
+    } else {
+        Err(format!(
+            "{label} exit {} after {secs}s: {tail}",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+fn read_tail(path: &Path, max_chars: usize) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    trimmed.chars().rev().take(max_chars).collect::<String>().chars().rev().collect()
+}
+
+#[cfg(unix)]
+fn kill_verify_child(child: &mut std::process::Child) {
+    preempt_process_group(child);
+}
+
+#[cfg(not(unix))]
+fn kill_verify_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn defer(backend: &Backend, id: &str, reason: &str) -> Result<bool, Error> {
@@ -369,7 +616,7 @@ fn worktree_note(dir: &Path, branch: &str) -> String {
 fn dispatch_prompt(worktree: &Path, branch: &str, kind: &str, body: &str) -> String {
     let label = if kind == "bug" { "bug report" } else { "feature request" };
     format!(
-        "You maintain the Pods codebase checked out at {} on branch {branch}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in this worktree. Follow AGENTS.md and the repo's existing patterns. Start with `git status --short` and `git diff --stat`: a previous attempt may have left committed or uncommitted progress here — continue it instead of redoing it. Keep the diff minimal and scoped to this request; do not change the merge gate or build configuration (dev/check.sh, client/package.json scripts, vite.config.ts coverage settings) and do not add new check scripts. Verify backend changes with `cargo test` from this worktree. The client test container mounts the main checkout rather than this worktree, so never run dev/check.sh or npm here — client changes are tested after merge, and your closing summary must say that. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
+        "You maintain the Pods codebase checked out at {} on branch {branch}. The owner filed this {label} from the app:\n\n---\n{body}\n---\n\nImplement the fix in this worktree. Follow AGENTS.md and the repo's existing patterns. Start with `git status --short` and `git diff --stat`: a previous attempt may have left committed or uncommitted progress here — continue it instead of redoing it. Keep the diff minimal and scoped to this request; do not change the merge gate or build configuration (anything under dev/ or infra/, client/package.json, client/package-lock.json, client/vite.config.ts, client/scripts/, backend/Cargo.toml, backend/Cargo.lock) and do not add new check scripts — the verifier rejects those paths and your run will need a human. Verify backend changes with `cargo test` from this worktree. The client test container mounts the main checkout rather than this worktree, so never run dev/check.sh or npm here — client changes are verified after you finish, and your closing summary must say that. Do not commit, push, or change branches; leave the fix uncommitted for review and end with a short summary of what changed.",
         worktree.display()
     )
 }
@@ -557,7 +804,11 @@ mod tests {
     }
 
     fn stub_pi(dir: &Path, script: &str) -> PathBuf {
-        let path = dir.join("pi-stub");
+        stub_bin(dir, "pi-stub", script)
+    }
+
+    fn stub_bin(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         #[cfg(unix)]
         {
@@ -811,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_run_marks_report_done_and_invokes_pi_with_omlx_model() {
+    fn successful_run_without_changes_needs_review_and_invokes_pi_with_omlx_model() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "crash on launch");
         git_repo(temp.path());
@@ -830,9 +1081,11 @@ mod tests {
         let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
         assert!(dispatched);
         let (status, attempts, _, result) = report_status(&backend, "r1");
-        assert_eq!(status, "done");
+        assert_eq!(status, "needs-review");
         assert_eq!(attempts, 1);
-        assert!(result.unwrap().contains("pi exit 0"));
+        let result = result.unwrap();
+        assert!(result.contains("pi exit 0"), "{result}");
+        assert!(result.contains("no file changed"), "{result}");
         let args = std::fs::read_to_string(&args_log).unwrap();
         assert!(args.contains("--provider omlx"), "{args}");
         assert!(args.contains(&format!("--model {}", model())), "{args}");
@@ -1044,7 +1297,7 @@ mod tests {
         let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
         assert!(dispatched);
         let (status, attempts, _, _) = report_status(&backend, "r1");
-        assert_eq!(status, "done");
+        assert_eq!(status, "needs-review");
         assert_eq!(attempts, 2);
     }
 
@@ -1142,7 +1395,7 @@ mod tests {
         assert!(text.contains("out-line"), "{text}");
         assert!(text.contains("err-line"), "{text}");
         let (status, _, _, result) = report_status(&backend, "r1");
-        assert_eq!(status, "done");
+        assert_eq!(status, "needs-review");
         let result = result.unwrap();
         assert!(result.contains("pi exit 0"), "{result}");
         assert!(result.contains("feedback/r1.pi.log"), "{result}");
@@ -1201,7 +1454,8 @@ mod tests {
         assert!(prompt.contains("continue"), "{prompt}");
         assert!(prompt.contains("dev/check.sh"), "{prompt}");
         assert!(prompt.contains("never run dev/check.sh"), "{prompt}");
-        assert!(prompt.contains("tested after merge"), "{prompt}");
+        assert!(prompt.contains("verifier rejects"), "{prompt}");
+        assert!(prompt.contains("verified after you finish"), "{prompt}");
         assert!(prompt.contains("Do not commit"), "{prompt}");
     }
 
@@ -1241,7 +1495,7 @@ mod tests {
         );
         assert!(git_branches(temp.path(), "feedback/r1").contains("feedback/r1"));
         let (status, _, _, result) = report_status(&backend, "r1");
-        assert_eq!(status, "done");
+        assert_eq!(status, "needs-review");
         let result = result.unwrap();
         assert!(result.contains("worktree"), "{result}");
         assert!(result.contains("feedback/r1"), "{result}");
@@ -1276,9 +1530,11 @@ mod tests {
                     .execute("UPDATE browser_feedback SET next_at=0 WHERE id='r1'", [])
                     .unwrap();
                 assert!(step(&backend).unwrap());
-                let (status, attempts, _, _) = report_status(&backend, "r1");
-                assert_eq!(status, "done");
+                let (status, attempts, _, result) = report_status(&backend, "r1");
+                assert_eq!(status, "ready");
                 assert_eq!(attempts, 2);
+                let result = result.unwrap();
+                assert!(result.contains("1 file(s)"), "{result}");
                 assert!(tree.join("ran-once").is_file());
             })
         });
@@ -1308,5 +1564,168 @@ mod tests {
         let result = result.unwrap();
         assert!(result.contains("worktree setup failed"), "{result}");
         assert!(result.contains("not a git repository"), "{result}");
+    }
+
+    #[test]
+    fn verify_protected_paths_cover_build_config() {
+        for path in [
+            "dev/check.sh",
+            "dev/Dockerfile",
+            "infra/deploy.sh",
+            ".github/workflows/ci.yml",
+            "client/scripts/check-coverage.mjs",
+            "client/package.json",
+            "client/package-lock.json",
+            "client/vite.config.ts",
+            "backend/Cargo.toml",
+            "backend/Cargo.lock",
+        ] {
+            assert!(verify_protected_path(path), "{path}");
+        }
+        for path in [
+            "client/src/player.tsx",
+            "backend/src/feedback.rs",
+            "docs/mac-backend.md",
+            "AGENTS.md",
+        ] {
+            assert!(!verify_protected_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn verify_marks_ready_when_client_gate_passes() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
+        let args_log = temp.path().join("container-args.log");
+        let pi = stub_pi(temp.path(), "mkdir -p client && echo x > client/note.txt && exit 0");
+        let gate = stub_bin(
+            temp.path(),
+            "container-stub",
+            &format!("echo \"$*\" >> '{}'\nexit 0", args_log.display()),
+        );
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_CONTAINER", Some(gate.to_string_lossy().into_owned())),
+            // No backend/ file changed, so cargo must not run at all.
+            ("PODS_FEEDBACK_CARGO", Some("/nonexistent-pods-cargo".to_string())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "ready");
+        let result = result.unwrap();
+        assert!(result.contains("verified: 1 file(s); client gate"), "{result}");
+        let args = std::fs::read_to_string(&args_log).unwrap();
+        assert!(args.contains("pods-dev-img"), "{args}");
+        assert!(args.contains("npm run check"), "{args}");
+        assert!(args.contains("/work/client/node_modules"), "{args}");
+        // Only the client/ subtree is mounted into the container, never .git.
+        assert!(!args.contains(":/work/.git"), "{args}");
+    }
+
+    #[test]
+    fn verify_rejects_protected_path() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
+        let pi = stub_pi(temp.path(), "mkdir -p client && echo x > client/package.json && exit 0");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_CARGO", Some("/nonexistent-pods-cargo".to_string())),
+            ("PODS_FEEDBACK_CONTAINER", Some("/nonexistent-pods-container".to_string())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "needs-review");
+        let result = result.unwrap();
+        assert!(result.contains("protected path changed: client/package.json"), "{result}");
+    }
+
+    #[test]
+    fn verify_backend_failure_needs_review_with_tail() {
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "bug", "crash on launch");
+        git_repo(temp.path());
+        let pi = stub_pi(temp.path(), "mkdir -p backend && echo x > backend/fix.rs && exit 0");
+        let cargo = stub_bin(temp.path(), "cargo-stub", "echo boom >&2; exit 1");
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_CARGO", Some(cargo.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_CONTAINER", Some("/nonexistent-pods-container".to_string())),
+        ]);
+        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        assert!(dispatched);
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "needs-review");
+        let result = result.unwrap();
+        assert!(result.contains("cargo test exit 1"), "{result}");
+        assert!(result.contains("boom"), "{result}");
+    }
+
+    #[test]
+    fn backfill_verifies_old_done_row_without_repo() {
+        let (backend, temp) = fixture();
+        git_repo(temp.path());
+        let tree = temp.path().join("feedback-worktrees").join("r1");
+        let dir_arg = tree.to_string_lossy().into_owned();
+        let added = Command::new("git")
+            .arg("-C")
+            .arg(temp.path())
+            .args(["worktree", "add", "-b", "feedback/r1", &dir_arg, "HEAD"])
+            .status()
+            .expect("git binary");
+        assert!(added.success());
+        std::fs::create_dir_all(tree.join("client")).unwrap();
+        std::fs::write(tree.join("client/note.txt"), "x").unwrap();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_feedback(id,kind,body,device,client_id,created_at,status,attempts) VALUES('r1','feature','dark mode','iPhone','client',?, 'done',1)",
+                params![crate::db::now_unix()],
+            )
+            .unwrap();
+        let gate = stub_bin(temp.path(), "container-stub", "exit 0");
+        let _env = EnvGuard::apply(vec![
+            ("PODS_FEEDBACK_REPO", None),
+            ("PODS_FEEDBACK_CONTAINER", Some(gate.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_CARGO", Some("/nonexistent-pods-cargo".to_string())),
+        ]);
+        assert!(step(&backend).unwrap());
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "ready");
+        let result = result.unwrap();
+        assert!(result.contains("backfill verified"), "{result}");
+    }
+
+    #[test]
+    fn backfill_missing_worktree_needs_review() {
+        let (backend, _temp) = fixture();
+        backend
+            .db
+            .execute(
+                "INSERT INTO browser_feedback(id,kind,body,device,client_id,created_at,status,attempts) VALUES('r1','feature','dark mode','iPhone','client',?, 'done',1)",
+                params![crate::db::now_unix()],
+            )
+            .unwrap();
+        let _env = EnvGuard::apply(vec![("PODS_FEEDBACK_REPO", None)]);
+        assert!(step(&backend).unwrap());
+        let (status, _, _, result) = report_status(&backend, "r1");
+        assert_eq!(status, "needs-review");
+        let result = result.unwrap();
+        assert!(result.contains("worktree is missing"), "{result}");
     }
 }

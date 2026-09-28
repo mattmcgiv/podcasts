@@ -22,6 +22,14 @@ export function feedbackStatusLabel(status: string): string {
       return "Fixed on the Mac";
     case "failed":
       return "The Mac could not dispatch it";
+    case "ready":
+      return "Verified on the Mac — landing soon";
+    case "landed":
+      return "Merged on the Mac — deploying";
+    case "deployed":
+      return "Live in the app";
+    case "needs-review":
+      return "Needs your review";
     default:
       return status;
   }

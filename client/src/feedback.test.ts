@@ -34,6 +34,10 @@ describe("feedback labels", () => {
     expect(feedbackStatusLabel("running")).toBe("The Mac is working on it");
     expect(feedbackStatusLabel("done")).toBe("Fixed on the Mac");
     expect(feedbackStatusLabel("failed")).toBe("The Mac could not dispatch it");
+    expect(feedbackStatusLabel("ready")).toBe("Verified on the Mac — landing soon");
+    expect(feedbackStatusLabel("landed")).toBe("Merged on the Mac — deploying");
+    expect(feedbackStatusLabel("deployed")).toBe("Live in the app");
+    expect(feedbackStatusLabel("needs-review")).toBe("Needs your review");
     expect(feedbackStatusLabel("stale")).toBe("stale");
   });
 });
