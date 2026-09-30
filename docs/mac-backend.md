@@ -311,7 +311,7 @@ The `devices` command lists each syncing browser's last sync moment, newest firs
 The command `python3 mac/backend/manage.py retry EPISODE_ID` requests a fresh automatic run.
 It does not accept corrected labels.
 
-The source classifier is pipeline v24.
+The source classifier is pipeline v25.
 It uses a bounded repair of at most two model calls per window. The second call uses 24 context segments.
 Labels are binary: `ad` or `content`. Mixed or unclear audio is `content`, so the episode still publishes.
 The repair keeps strict block validation. Invalid or disagreeing JSON fails closed after two attempts.
@@ -319,7 +319,7 @@ A last-attempt ad/content overlap publishes the disputed IDs as content.
 Content-bound versions include repair and retry semantics, not only the initial prompt.
 
 Source `CLASSIFIER_VERSION` is `pods-local-v5-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-content-aac128`.
-Source `VERSION` is `pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128`.
+Source `VERSION` is `pods-local-v25-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-asr1-full-chapters-binary-aac128`.
 
 The v21 real fixture is the episode 20720 transcript.
 It produces 977 segment labels.

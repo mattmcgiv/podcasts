@@ -28,7 +28,7 @@ pub const REASONING_EFFORT: &str = "low";
 const CLASSIFIER_VERSION: &str =
     "pods-local-v6-whisper-large-v3-fp16-ad24-context12-blocks-repair-conflict-incomplete-content-aac128";
 pub const VERSION: &str =
-    "pods-local-v24-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-full-chapters-binary-aac128";
+    "pods-local-v25-whisper-large-v3-fp16-repair-open24-gap8-discourse-trim-shift8-brand-echo-asr1-full-chapters-binary-aac128";
 pub const WINDOW_CORE: usize = 24;
 pub const WINDOW_CONTEXT: usize = 12;
 const WINDOW_REPAIR_CONTEXT: usize = 24;
@@ -1606,11 +1606,48 @@ fn brand_tokens(text: &str) -> impl Iterator<Item = String> {
         .filter(|token| token.len() >= BRAND_TOKEN_MIN_CHARS)
 }
 
+/// Exact match, or one insertion/deletion/substitution. Whisper often swaps one
+/// vowel in a long proper noun (Tetragrammatin / Tetragrammaton).
+fn same_brand_token(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    let (longer, shorter) = if left.len() >= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let extra = longer.len() - shorter.len();
+    if extra > 1 {
+        return false;
+    }
+    if extra == 0 {
+        return left.iter().zip(right).filter(|(a, b)| a != b).count() == 1;
+    }
+    let mut skipped = false;
+    let mut short_index = 0;
+    for &byte in longer {
+        if short_index < shorter.len() && byte == shorter[short_index] {
+            short_index += 1;
+        } else if skipped {
+            return false;
+        } else {
+            skipped = true;
+        }
+    }
+    true
+}
+
 fn shares_brand_token(pre: &[Segment], post: &str) -> bool {
     let after: Vec<String> = brand_tokens(post).collect();
     !after.is_empty()
         && pre.iter().any(|segment| {
-            brand_tokens(&segment.text).any(|token| after.iter().any(|other| other == &token))
+            brand_tokens(&segment.text).any(|token| {
+                after
+                    .iter()
+                    .any(|other| same_brand_token(&token, other))
+            })
         })
 }
 

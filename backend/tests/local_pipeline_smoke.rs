@@ -96,11 +96,13 @@ fn with_gap_at(segments: &mut [Segment], index: usize, start: f64) {
 
 #[test]
 fn boundary_algorithm_version_identifies_gap_discourse_trim() {
-    assert!(VERSION.contains("v24"));
+    assert!(VERSION.contains("v25"));
     assert!(VERSION.contains("binary"));
     assert!(VERSION.contains("gap8"));
     assert!(VERSION.contains("discourse"));
     assert!(VERSION.contains("brand-echo"));
+    assert!(VERSION.contains("asr1"));
+    assert!(!VERSION.contains("v24"));
     assert!(!VERSION.contains("v23"));
     assert!(!VERSION.contains("v22"));
     assert!(!VERSION.contains("v21"));
@@ -191,6 +193,19 @@ fn long_pause_inside_branded_self_promo_is_kept() {
     let coarse = apply_boundaries(&segments, &[(10, 16)]).unwrap();
     let labels = refine_boundaries(&segments, &coarse)
         .expect("a mid-promo bumper that repeats the brand must not fail closed");
+    assert_eq!(labeled_blocks(&labels), vec![(10, 16)]);
+}
+
+#[test]
+fn long_pause_inside_asr_misspelled_brand_self_promo_is_kept() {
+    let mut segments = fixture_segments(20);
+    segments[10].text = "Tetragrammatin is a website.".into();
+    segments[11].text = "Tetragrammatin is a whole world of knowledge.".into();
+    segments[12].text = "Biodynamics, Tetragrammaton, Graphic Design, Tetragrammaton, Mythology and Magic, Tetragrammaton, Obscure Film,".into();
+    with_gap_at(&mut segments, 12, 25.52);
+    let coarse = apply_boundaries(&segments, &[(10, 16)]).unwrap();
+    let labels = refine_boundaries(&segments, &coarse)
+        .expect("an ASR brand slip across a bumper must not fail closed");
     assert_eq!(labeled_blocks(&labels), vec![(10, 16)]);
 }
 
