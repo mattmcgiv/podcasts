@@ -1185,9 +1185,12 @@ input[type="search"]::-webkit-search-cancel-button {
 .player-video {
   display: block;
   width: 100%;
+  /* Non-zero box before metadata. A 0-height video starts audio with no picture. */
+  aspect-ratio: 16 / 9;
   max-height: 70vh;
   margin: 14px 0 18px;
   background: #000;
+  object-fit: contain;
 }
 
 .sheet-art .art {

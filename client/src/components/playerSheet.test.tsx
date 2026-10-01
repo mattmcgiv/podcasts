@@ -94,11 +94,20 @@ describe("PlayerSheet + MiniPlayer", () => {
     const user = userEvent.setup();
     render(<PlayerProvider><StartVideo /><PlayerSheet /></PlayerProvider>);
     await user.click(screen.getByRole("button", { name: "play video" }));
-    const video = await screen.findByLabelText("Channel Video");
+    const video = await screen.findByLabelText("Channel Video") as HTMLVideoElement;
     expect(video.tagName).toBe("VIDEO");
     expect(video).toHaveAttribute("controls");
     expect(video).toHaveAttribute("playsinline");
     expect(screen.queryByRole("group", { name: "Audio output" })).not.toBeInTheDocument();
+    Object.defineProperty(video, "videoWidth", { configurable: true, value: 720 });
+    Object.defineProperty(video, "videoHeight", { configurable: true, value: 1280 });
+    Object.defineProperty(video, "paused", { configurable: true, value: false });
+    act(() => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+      video.dispatchEvent(new Event("play"));
+      video.dispatchEvent(new Event("seeked"));
+    });
+    expect(video.style.aspectRatio).toBe("720 / 1280");
   });
 
   it("shows a minimal indicator while the audio stream initializes", async () => {

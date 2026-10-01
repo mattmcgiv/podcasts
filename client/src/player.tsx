@@ -24,6 +24,7 @@ import {
 import { POSITION_SYNC_INTERVAL_MS, SKIP_BACK_SECS, SKIP_FORWARD_SECS } from "./config";
 import { emitEpisodesChanged } from "./events";
 import type { EpisodeAdMarker, EpisodeItem, EpisodeShowNote, PlayContext } from "./types";
+import { recoverBlackVideo } from "./videoPicture";
 import { isVideoMedia } from "./youtube";
 
 function rejectionDetail(id: number, error: unknown): string {
@@ -122,6 +123,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const videoNodeRef = useRef<HTMLVideoElement | null>(null);
   const videoActiveRef = useRef(false);
   const videoWiredRef = useRef(false);
+  const videoPictureRef = useRef<(() => void) | null>(null);
   const pendingVideoRef = useRef<{ item: EpisodeItem; resumeAt: number } | null>(null);
   const currentRef = useRef<PlayerEpisode | null>(null);
   const playingHashRef = useRef<string | undefined>(undefined);
@@ -484,6 +486,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     a.addEventListener("play", () => {
       setPlaying(true);
       setStarting(false);
+      if (a === videoEngineRef.current && videoNodeRef.current) armVideoPicture(videoNodeRef.current);
     });
     a.addEventListener("pause", () => {
       setPlaying(false);
@@ -501,11 +504,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     a.addEventListener("loadedmetadata", () => {
       setInitializing(false);
       adoptDuration();
+      const node = videoNodeRef.current;
+      if (a === videoEngineRef.current && node && node.videoWidth > 0 && node.videoHeight > 0) {
+        node.style.aspectRatio = `${node.videoWidth} / ${node.videoHeight}`;
+      }
       if (resumeAtRef.current > 0) {
         a.currentTime = resumeAtRef.current;
         resumeAtRef.current = 0;
       }
       a.playbackRate = speedRef.current;
+    });
+    a.addEventListener("seeked", () => {
+      const node = videoNodeRef.current;
+      if (a === videoEngineRef.current && node && !node.paused) armVideoPicture(node);
     });
     a.addEventListener("ended", () => void endedRef.current());
     a.addEventListener("error", () => {
@@ -545,6 +556,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     engine.playbackRate = speedRef.current;
     resumeAtRef.current = resumeAt;
     if (engine.src !== item.audio_url) engine.src = item.audio_url;
+    // A zero-height box makes iPhone WebKit start audio and skip the picture layer.
+    node.getBoundingClientRect();
     void engine.play().catch((error: unknown) => {
       if ((error instanceof Error || error instanceof DOMException) && error.name === "NotAllowedError") gestureRetryRef.current = item.id;
       else logDiagnostic("playback-rejected", rejectionDetail(item.id, error));
@@ -569,9 +582,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return a;
   }
 
+  function armVideoPicture(node: HTMLVideoElement) {
+    videoPictureRef.current?.();
+    videoPictureRef.current = recoverBlackVideo(node);
+  }
+
   const attachVideo = useCallback((node: HTMLVideoElement | null) => {
     videoNodeRef.current = node;
     if (!node) {
+      videoPictureRef.current?.();
+      videoPictureRef.current = null;
       // The sheet unmounted before a deferred video start: do not leave the
       // mini player stuck on a spinner.
       if (pendingVideoRef.current) setStarting(false);
