@@ -1225,7 +1225,8 @@ impl Backend {
     fn clear_played(&self, id: i64) -> Result<(), Error> {
         self.require_episode(id)?;
         self.db.execute(
-            "UPDATE episode_state SET played_at = NULL, archived_at = NULL, updated_at = ? WHERE episode_id = ?",
+            // Unplayed restarts from the beginning. A finished episode's playhead sits at its end.
+            "UPDATE episode_state SET played_at = NULL, archived_at = NULL, position_secs = 0, updated_at = ? WHERE episode_id = ?",
             params![db::now_unix(), id],
         )?;
         Ok(())

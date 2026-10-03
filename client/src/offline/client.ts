@@ -423,7 +423,13 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
       if (markedPlayed) {
         window.dispatchEvent(new CustomEvent("pods-close-episode", { detail: { id: episode.id } }));
         try { await cleanupPlayedDownload(episode.id); } catch { /* Sweep on bootstrap/prefetch/sync. */ }
-      } else void prefetch().catch(() => {});
+      } else {
+        // Unplayed restarts from the beginning. A finished episode's playhead sits at its end.
+        if (episode.position_secs > 0 && episode.manifest) {
+          await enqueue(String(episode.id), "position", { seconds: 0, artifact_hash: episode.manifest.hash, original_seconds: 0 });
+        }
+        void prefetch().catch(() => {});
+      }
     }
     else if (match[2] === "position") {
       const hash = String(body.artifact_hash ?? episode.manifest?.hash);

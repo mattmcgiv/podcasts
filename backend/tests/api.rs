@@ -372,7 +372,11 @@ fn test_played_position_settings_and_next_round_trip() {
     assert_eq!(call(&h.backend, "POST", &format!("/api/episodes/{ep3}/played"), None).status_code, 204);
     let played: Page<EpisodeItem> = decode(&call(&h.backend, "GET", "/api/played", None));
     assert_eq!(played.items[0].id, ep3);
+    assert_eq!(call(&h.backend, "PUT", &format!("/api/episodes/{ep3}/position"), Some(json!({"seconds": 600.0}))).status_code, 204);
     assert_eq!(call(&h.backend, "DELETE", &format!("/api/episodes/{ep3}/played"), None).status_code, 204);
+    let unplayed: EpisodeDetail = decode(&call(&h.backend, "GET", &format!("/api/episodes/{ep3}"), None));
+    assert!(unplayed.played_at.is_none());
+    assert_eq!(unplayed.position_secs, 0.0, "unplayed restarts from the beginning");
     assert_eq!(call(&h.backend, "PUT", &format!("/api/episodes/{ep2}/position"), Some(json!({"seconds": 42.5}))).status_code, 204);
     let detail: EpisodeDetail = decode(&call(&h.backend, "GET", &format!("/api/episodes/{ep2}"), None));
     assert_eq!(detail.position_secs, 42.5);

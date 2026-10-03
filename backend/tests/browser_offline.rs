@@ -955,6 +955,31 @@ fn conflicting_field_does_not_overwrite_and_other_fields_are_independent() {
 }
 
 #[test]
+fn unplayed_restarts_a_finished_episode_from_the_beginning() {
+    let (backend, _temp, manifest) = fixture();
+    let finished = apply_actions(
+        &backend,
+        action(
+            "finished",
+            1,
+            "position",
+            json!({"seconds":9,"artifact_hash":manifest.hash}),
+            0,
+        ),
+    )
+    .unwrap();
+    assert_eq!(finished["results"][0]["status"], "applied");
+    let played = apply_actions(&backend, action("played", 2, "played", json!(true), 0)).unwrap();
+    let rev = played["results"][0]["revision"].as_i64().unwrap();
+    let unplayed =
+        apply_actions(&backend, action("unplayed", 3, "played", json!(false), rev)).unwrap();
+    assert_eq!(unplayed["results"][0]["status"], "applied");
+    let value = snapshot(&backend).unwrap();
+    assert!(value["episodes"][0]["played_at"].is_null());
+    assert_eq!(value["episodes"][0]["position_secs"], 0.0);
+}
+
+#[test]
 fn failed_batch_rolls_back_earlier_actions() {
     let (backend, _temp, _) = fixture();
     let mut first = action("one", 1, "played", json!(true), 0);

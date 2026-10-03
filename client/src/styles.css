@@ -1176,6 +1176,11 @@ input[type="search"]::-webkit-search-cancel-button {
   -webkit-overflow-scrolling: touch;
 }
 
+.sheet-main {
+  display: flex;
+  flex-direction: column;
+}
+
 .sheet-art {
   display: flex;
   justify-content: center;
@@ -1841,6 +1846,33 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 @media (min-width: 1000px) and (orientation: landscape) {
   .sheet-art .art { max-width: 180px; max-height: 180px; }
+}
+/* Desktop: player on the left, Chapters from the top of the right column. Each column scrolls on its own. */
+@media (min-width: 1000px) {
+  .player-sheet:has(.show-notes) { max-width: 1280px; }
+  .sheet-body:has(> .show-notes) {
+    max-width: none;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    column-gap: 32px;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+  .sheet-body:has(> .show-notes) > .sheet-main,
+  .sheet-body > .show-notes {
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: calc(40px + var(--safe-bottom));
+  }
+  .sheet-body > .show-notes {
+    margin-top: 0;
+    border-top: 0;
+    border-left: 1px solid var(--line);
+    padding-top: 18px;
+    padding-left: 32px;
+  }
 }
 .feedback-view { padding-bottom: 24px; }
 .feedback-input {

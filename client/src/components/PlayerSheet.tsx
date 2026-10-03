@@ -101,176 +101,178 @@ export function PlayerSheet() {
       </header>
 
       <div className="sheet-body sheet-scroll-region">
-        {isVideoMedia(ep) ? (
-          <video
-            ref={p.attachVideo}
-            className="player-video"
-            controls
-            playsInline
-            aria-label={ep.title}
+        <div className="sheet-main">
+          {isVideoMedia(ep) ? (
+            <video
+              ref={p.attachVideo}
+              className="player-video"
+              controls
+              playsInline
+              aria-label={ep.title}
+            />
+          ) : (
+            <div className="sheet-art">
+              <Artwork src={ep.image_url || ep.podcast_image} size={224} article={isArticle(ep)} />
+            </div>
+          )}
+          <h2 className="sheet-title">
+            {ep.title}
+            {isArticle(ep) && <span className="article-badge">Article</span>}
+          </h2>
+          {currentChapter && (
+            <p className="sheet-current-chapter" aria-label={`Current chapter: ${currentChapter.title}`}>
+              {currentChapter.title}
+            </p>
+          )}
+
+          <input
+            className="scrubber"
+            type="range"
+            min={0}
+            max={Math.max(p.duration, p.position, 1)}
+            step={1}
+            value={Math.floor(p.position)}
+            onChange={(e) => p.seekTo(Number(e.target.value))}
+            aria-label="Seek"
           />
-        ) : (
-          <div className="sheet-art">
-            <Artwork src={ep.image_url || ep.podcast_image} size={224} article={isArticle(ep)} />
+          <div className="time-row">
+            <span>{fmtTime(p.position)}</span>
+            <span>{p.duration > 0 ? `-${fmtTime(Math.max(0, p.duration - p.position))}` : "--:--"}</span>
           </div>
-        )}
-        <h2 className="sheet-title">
-          {ep.title}
-          {isArticle(ep) && <span className="article-badge">Article</span>}
-        </h2>
-        {currentChapter && (
-          <p className="sheet-current-chapter" aria-label={`Current chapter: ${currentChapter.title}`}>
-            {currentChapter.title}
-          </p>
-        )}
 
-        <input
-          className="scrubber"
-          type="range"
-          min={0}
-          max={Math.max(p.duration, p.position, 1)}
-          step={1}
-          value={Math.floor(p.position)}
-          onChange={(e) => p.seekTo(Number(e.target.value))}
-          aria-label="Seek"
-        />
-        <div className="time-row">
-          <span>{fmtTime(p.position)}</span>
-          <span>{p.duration > 0 ? `-${fmtTime(Math.max(0, p.duration - p.position))}` : "--:--"}</span>
-        </div>
+          {(p.initializing || p.starting) && (
+            <div className="stream-initializing" role="status" aria-label={isVideoMedia(ep) ? "Loading video" : "Loading audio"}>
+              <span className="stream-pulse" aria-hidden />
+              <span>{isVideoMedia(ep) ? "Loading video" : "Loading audio"}</span>
+            </div>
+          )}
 
-        {(p.initializing || p.starting) && (
-          <div className="stream-initializing" role="status" aria-label={isVideoMedia(ep) ? "Loading video" : "Loading audio"}>
-            <span className="stream-pulse" aria-hidden />
-            <span>{isVideoMedia(ep) ? "Loading video" : "Loading audio"}</span>
-          </div>
-        )}
-
-        {nextChapter && (
-          <button
-            type="button"
-            className="next-chapter-link"
-            onClick={() => p.seekTo(nextChapter.start_time)}
-          >
-            <span className="next-chapter-prefix">Next:</span>{" "}{nextChapter.title}{" "}
-            <span className="next-chapter-time">({fmtChapterDelta(nextChapter.start_time - p.position)})</span>
-          </button>
-        )}
-
-        <div className="controls-row">
-          <button className="icon-btn skip" onClick={p.skipBack} aria-label="Back 15 seconds">
-            <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>
-              <path d="M11 8V4l-5 5 5 5v-4c3.3 0 6 2.7 6 6h2a8 8 0 00-8-8z" fill="currentColor" />
-            </svg>
-            <span className="skip-label">15</span>
-          </button>
-          <button
-            className={`play-big${awaiting ? " is-starting" : ""}`}
-            onClick={p.toggle}
-            aria-label={p.playing ? "Pause" : "Play"}
-            aria-busy={awaiting}
-          >
-            {awaiting ? <SpinnerIcon size={38} /> : p.playing ? <PauseIcon size={38} /> : <PlayIcon size={38} />}
-          </button>
-          <button className="icon-btn skip" onClick={p.skipForward} aria-label="Forward 30 seconds">
-            <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>
-              <path d="M13 8V4l5 5-5 5v-4c-3.3 0-6 2.7-6 6H5a8 8 0 018-8z" fill="currentColor" />
-            </svg>
-            <span className="skip-label">30</span>
-          </button>
-        </div>
-
-        <div className="speed-row" role="group" aria-label="Playback speed">
-          {SPEEDS.map((s) => (
+          {nextChapter && (
             <button
-              key={s}
               type="button"
-              className={`chip speed-chip${p.speed === s ? " active" : ""}`}
-              onPointerDown={() => {
-                const correlationID = speedCorrelationID();
-                pendingSpeedInteraction.current = correlationID;
-                console.log(`speed_pointer_received correlation_id=${correlationID} requested_rate=${s}`);
-              }}
-              onClick={() => {
-                const correlationID = pendingSpeedInteraction.current ?? speedCorrelationID();
-                pendingSpeedInteraction.current = null;
-                console.log(`speed_click correlation_id=${correlationID} requested_rate=${s}`);
-                p.setSpeed(s, correlationID);
-              }}
+              className="next-chapter-link"
+              onClick={() => p.seekTo(nextChapter.start_time)}
             >
-              {s}×
+              <span className="next-chapter-prefix">Next:</span>{" "}{nextChapter.title}{" "}
+              <span className="next-chapter-time">({fmtChapterDelta(nextChapter.start_time - p.position)})</span>
             </button>
-          ))}
-        </div>
+          )}
 
-        <div className="player-options">
-          {!isVideoMedia(ep) && (
-          <div className="cast-row" role="group" aria-label="Audio output">
-            <span className="cast-label">Play on</span>
-            <div className="cast-choices">
+          <div className="controls-row">
+            <button className="icon-btn skip" onClick={p.skipBack} aria-label="Back 15 seconds">
+              <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>
+                <path d="M11 8V4l-5 5 5 5v-4c3.3 0 6 2.7 6 6h2a8 8 0 00-8-8z" fill="currentColor" />
+              </svg>
+              <span className="skip-label">15</span>
+            </button>
+            <button
+              className={`play-big${awaiting ? " is-starting" : ""}`}
+              onClick={p.toggle}
+              aria-label={p.playing ? "Pause" : "Play"}
+              aria-busy={awaiting}
+            >
+              {awaiting ? <SpinnerIcon size={38} /> : p.playing ? <PauseIcon size={38} /> : <PlayIcon size={38} />}
+            </button>
+            <button className="icon-btn skip" onClick={p.skipForward} aria-label="Forward 30 seconds">
+              <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden>
+                <path d="M13 8V4l5 5-5 5v-4c-3.3 0-6 2.7-6 6H5a8 8 0 018-8z" fill="currentColor" />
+              </svg>
+              <span className="skip-label">30</span>
+            </button>
+          </div>
+
+          <div className="speed-row" role="group" aria-label="Playback speed">
+            {SPEEDS.map((s) => (
               <button
+                key={s}
                 type="button"
-                className={`chip${p.cast.output !== "mac" ? " active" : ""}`}
-                onClick={() => p.setCastOutput("local")}
+                className={`chip speed-chip${p.speed === s ? " active" : ""}`}
+                onPointerDown={() => {
+                  const correlationID = speedCorrelationID();
+                  pendingSpeedInteraction.current = correlationID;
+                  console.log(`speed_pointer_received correlation_id=${correlationID} requested_rate=${s}`);
+                }}
+                onClick={() => {
+                  const correlationID = pendingSpeedInteraction.current ?? speedCorrelationID();
+                  pendingSpeedInteraction.current = null;
+                  console.log(`speed_click correlation_id=${correlationID} requested_rate=${s}`);
+                  p.setSpeed(s, correlationID);
+                }}
               >
-                This device
+                {s}×
               </button>
-              <button
-                type="button"
-                className={`chip${p.cast.output === "mac" ? " active" : ""}`}
-                onClick={() => p.setCastOutput("mac")}
-                disabled={!p.cast.available && !p.cast.connected}
-                title={
-                  p.cast.available || p.cast.connected
-                    ? p.cast.name ?? "Mac"
-                    : "Mac is not reachable through Tailscale"
-                }
-              >
-                {p.cast.connected || p.cast.output === "mac"
-                  ? "Mac"
-                  : p.cast.available
-                    ? "Mac"
-                    : "Mac (offline)"}
-              </button>
-              {!p.cast.available && !p.cast.connected && (
-                <button type="button" className="chip" onClick={p.retryMacAvailability}>
-                  Retry Mac
+            ))}
+          </div>
+
+          <div className="player-options">
+            {!isVideoMedia(ep) && (
+            <div className="cast-row" role="group" aria-label="Audio output">
+              <span className="cast-label">Play on</span>
+              <div className="cast-choices">
+                <button
+                  type="button"
+                  className={`chip${p.cast.output !== "mac" ? " active" : ""}`}
+                  onClick={() => p.setCastOutput("local")}
+                >
+                  This device
                 </button>
+                <button
+                  type="button"
+                  className={`chip${p.cast.output === "mac" ? " active" : ""}`}
+                  onClick={() => p.setCastOutput("mac")}
+                  disabled={!p.cast.available && !p.cast.connected}
+                  title={
+                    p.cast.available || p.cast.connected
+                      ? p.cast.name ?? "Mac"
+                      : "Mac is not reachable through Tailscale"
+                  }
+                >
+                  {p.cast.connected || p.cast.output === "mac"
+                    ? "Mac"
+                    : p.cast.available
+                      ? "Mac"
+                      : "Mac (offline)"}
+                </button>
+                {!p.cast.available && !p.cast.connected && (
+                  <button type="button" className="chip" onClick={p.retryMacAvailability}>
+                    Retry Mac
+                  </button>
+                )}
+              </div>
+              {p.cast.error && (
+                <p className="cast-error" role="status" aria-label="Mac speaker message">
+                  {p.cast.error}
+                </p>
+              )}
+              {p.cast.connected && p.cast.output === "mac" && (
+                <p className="cast-hint" role="status">
+                  Playing through Mac · progress saves on this phone
+                </p>
               )}
             </div>
-            {p.cast.error && (
-              <p className="cast-error" role="status" aria-label="Mac speaker message">
-                {p.cast.error}
-              </p>
             )}
-            {p.cast.connected && p.cast.output === "mac" && (
-              <p className="cast-hint" role="status">
-                Playing through Mac · progress saves on this phone
-              </p>
-            )}
-          </div>
-          )}
-          <div className="player-action-row">
-            <button
-              type="button"
-              className="chip mark-played-btn"
-              onClick={() => void p.markPlayedAndClose()}
-            >
-              Mark played
-            </button>
-            <button
-              type="button"
-              className="autoplay-toggle"
-              role="switch"
-              aria-checked={p.autoplay}
-              aria-label="Autoplay next"
-              onClick={() => p.setAutoplay(!p.autoplay)}
-            >
-              <span>Autoplay next</span>
-              <span className="autoplay-toggle-track" aria-hidden>
-                <span className="autoplay-toggle-thumb" />
-              </span>
-            </button>
+            <div className="player-action-row">
+              <button
+                type="button"
+                className="chip mark-played-btn"
+                onClick={() => void p.markPlayedAndClose()}
+              >
+                Mark played
+              </button>
+              <button
+                type="button"
+                className="autoplay-toggle"
+                role="switch"
+                aria-checked={p.autoplay}
+                aria-label="Autoplay next"
+                onClick={() => p.setAutoplay(!p.autoplay)}
+              >
+                <span>Autoplay next</span>
+                <span className="autoplay-toggle-track" aria-hidden>
+                  <span className="autoplay-toggle-thumb" />
+                </span>
+              </button>
+            </div>
           </div>
         </div>
 

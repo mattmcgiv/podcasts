@@ -792,6 +792,8 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                         "played" => {
                             let played = value.as_bool().ok_or_else(||Error::Invalid("invalid played value".into()))?;
                             tx.execute("UPDATE episode_state SET played_at=?,updated_at=? WHERE episode_id=?",params![if played {Some(crate::db::now_unix())} else {None},crate::db::now_unix(),episode])?;
+                            // Unplayed restarts from the beginning. A finished episode's playhead sits at its end.
+                            if !played { tx.execute("UPDATE episode_state SET position_secs=0 WHERE episode_id=?",[episode])?; }
                         }
                         _ => return Err(Error::Invalid("unsupported field".into())),
                     }

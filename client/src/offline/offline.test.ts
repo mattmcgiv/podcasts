@@ -174,6 +174,21 @@ describe("durable local library", () => {
     video.episodes[0].audio_url = `/_media/${hash}.m4a`;
     expect(() => validateSnapshot(video)).toThrow("Mac supplied an unpublished episode.");
   });
+  it("restarts an unmarked finished episode from the beginning while disconnected", async () => {
+    await seed();
+    await localRequest("/episodes/1/position", { method: "PUT", body: JSON.stringify({ seconds: 10 }) });
+    await localRequest("/episodes/1/played", { method: "POST" });
+    await localRequest("/episodes/1/played", { method: "DELETE" });
+    const episode = await localRequest<EpisodeDetail>("/episodes/1");
+    expect(episode.played_at).toBeNull();
+    expect(episode.position_secs).toBe(0);
+    expect((await state()).outbox.filter(o => o.entity === "1" && o.field === "position").at(-1)?.value)
+      .toEqual({ seconds: 0, artifact_hash: hash, original_seconds: 0 });
+    const untouched = (await state()).outbox.length;
+    await localRequest("/episodes/2/played", { method: "DELETE" });
+    expect((await state()).outbox.filter(o => o.entity === "2" && o.field === "position")).toEqual([]);
+    expect((await state()).outbox.length).toBe(untouched + 1);
+  });
   it("queues subscriptions and settings; exports and imports OPML while disconnected", async () => {
     await seed();
     const xml = await localRequest<string>("/opml", {}, true);
