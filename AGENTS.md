@@ -21,6 +21,13 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 - Vite dev server: `:5173`.
 - Client production deploy: **Deploy the client** in `docs/mac-backend.md`. Build in `pods-dev`, zip `client/dist/` at the zip root, then upload that zip with local Chrome through browser-harness in the Cloudflare Pages dashboard. Do not use Wrangler, `npx`, GitHub Actions, or `infra/deploy.sh`. Do not create a new Pages project or change DNS.
 
+## Menu bar app
+
+The Mac menu-bar app is Pods Pipeline Preview (`Pods Speaker`, `dev.mcgiv.pods.speaker`). `~/Applications/Pods Pipeline Preview.app` is a symlink to `/Applications/Pods Pipeline Preview.app`.
+
+- The next build has to replace the app in `/Applications`. Copying a new bundle onto the `~/Applications` path would replace the link, and `mbm` would hide the icon again. MenuBarAgent does not attribute a status item whose real path is outside `/Applications`, and `mbm` hides every unattributed icon while it is running.
+- After replacing the bundle, relaunch it from `/Applications`. Login agent `dev.mcgiv.pods-speaker` runs `open -W "/Applications/Pods Pipeline Preview.app"`.
+
 ## Default app/runtime
 
 - The browser at `pods.mcgiv.dev` is the supported client. The native iOS app is deprecated; retain its source and data for migration only.
