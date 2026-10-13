@@ -1849,11 +1849,14 @@ fn video_dimensions(path: &Path) -> Result<(u32, u32), Error> {
     ))
 }
 
+/// Audio comes from input 1, a second open of the same source. With one
+/// demuxer feeding both trims, ffmpeg 9 can drop the audio of a span that
+/// starts late in a long file, and the duration check then blocks the job.
 pub fn video_filter_graph(spans: &[Interval]) -> String {
     let mut filters = String::new();
     for (index, span) in spans.iter().enumerate() {
         filters.push_str(&format!(
-            "[0:v]trim=start={:.6}:end={:.6},setpts=PTS-STARTPTS[v{index}];[0:a]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[a{index}];",
+            "[0:v]trim=start={:.6}:end={:.6},setpts=PTS-STARTPTS[v{index}];[1:a]atrim=start={:.6}:end={:.6},asetpts=PTS-STARTPTS[a{index}];",
             span.original_start, span.original_end, span.original_start, span.original_end
         ));
     }
@@ -1905,11 +1908,24 @@ fn render_video(
     let script = dest.with_extension("filters");
     fs::write(&script, &filters).map_err(failure)?;
     let temp = dest.with_extension("partial.mp4");
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_video_render_command(source, &script, &temp)
+        .status()
+        .map_err(failure)?;
+    if !status.success() {
+        return Err(failure("video rendering failed"));
+    }
+    fs::rename(temp, dest).map_err(failure)
+}
+
+fn ffmpeg_video_render_command(source: &Path, script: &Path, temp: &Path) -> Command {
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-nostdin", "-v", "error", "-y", "-i"])
         .arg(source)
+        .arg("-i")
+        .arg(source)
         .arg("-/filter_complex")
-        .arg(&script)
+        .arg(script)
         .args([
             "-map",
             "[v]",
@@ -1932,13 +1948,8 @@ fn render_video(
             "-movflags",
             "+faststart",
         ])
-        .arg(&temp)
-        .status()
-        .map_err(failure)?;
-    if !status.success() {
-        return Err(failure("video rendering failed"));
-    }
-    fs::rename(temp, dest).map_err(failure)
+        .arg(temp);
+    command
 }
 
 fn prepare_youtube(backend: &Backend) {
@@ -2983,7 +2994,30 @@ mod download_tests {
         assert!(graph.contains("concat=n=2:v=1:a=1"));
         assert!(graph.contains("scale=-2:min(720\\,ih)"));
         assert!(graph.contains("[0:v]trim=start=0.000000:end=1.500000"));
-        assert!(graph.contains("[0:a]atrim=start=3.000000:end=4.000000"));
+        assert!(graph.contains("[1:a]atrim=start=3.000000:end=4.000000"));
+        assert!(!graph.contains("[0:a]"));
+    }
+
+    #[test]
+    fn video_render_command_opens_the_source_again_for_audio() {
+        let command = ffmpeg_video_render_command(
+            Path::new("source.mp4"),
+            Path::new("out.filters"),
+            Path::new("out.partial.mp4"),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let inputs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-i" && pair[1] == "source.mp4")
+            .count();
+        assert_eq!(inputs, 2);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-/filter_complex" && pair[1] == "out.filters"));
+        assert_eq!(args.last().map(String::as_str), Some("out.partial.mp4"));
     }
 
     #[test]
