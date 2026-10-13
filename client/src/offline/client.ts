@@ -296,7 +296,7 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
   }
 }
 
-const NOTIFICATION_CATEGORIES = new Set(["audio_download", "speech_to_text", "ad_classification", "show_notes"]);
+const NOTIFICATION_CATEGORIES = new Set(["audio_download", "speech_to_text", "ad_classification", "show_notes", "processing"]);
 const NOTIFICATION_OUTCOMES = new Set(["retry", "blocked"]);
 
 function isProcessingNotification(value: unknown): value is ProcessingNotification {

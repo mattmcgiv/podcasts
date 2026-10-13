@@ -260,6 +260,21 @@ describe("Mac disconnected", () => {
 });
 
 describe("synchronization", () => {
+  it("applies new episodes alongside processing failure notices without losing downloads", async () => {
+    await seed();
+    await writeRecord("downloads", hash, { hash, episode: 1, bytes: 8, complete: true, touched: 0 });
+    const incoming = snapshot();
+    const newHash = "c".repeat(64);
+    incoming.episodes.push({ ...incoming.episodes[0], id: 3, title: "New episode", audio_url: `/_media/${newHash}.m4a`, manifest: { ...manifest, episode_id: 3, hash: newHash } });
+    incoming.notifications = [{ id: 1, episode_id: 2, category: "processing", failed_stage: "rendering", message: "Processing failed.", outcome: "retry", created_at: 1, episode_title: "Episode 2", podcast_title: "Example" }];
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(incoming)));
+    await synchronize();
+    expect((await state()).snapshot?.episodes.map(e => e.id)).toEqual([1,2,3]);
+    expect((await state()).snapshot?.notifications?.[0].category).toBe("processing");
+    expect(await allDownloads()).toMatchObject([{ hash, complete: true }]);
+    expect(syncError()).toBeNull();
+  });
+
   it("rejects unprocessed snapshots before replacing local data", async () => {
     await seed();
     const invalid = snapshot(); invalid.episodes[0].audio_url = "https://publisher.example/original.mp3";
@@ -272,6 +287,7 @@ describe("synchronization", () => {
       { id: 1, episode_id: 2, category: "audio_download" as const, failed_stage: "downloading", message: "Audio download failed.", outcome: "retry" as const, created_at: 10, episode_title: "A", podcast_title: "Example" },
     ];
     expect(() => validateSnapshot({ ...snapshot(), notifications: newestFirst })).not.toThrow();
+    expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], category: "processing", failed_stage: "rendering" }] })).not.toThrow();
     expect(() => validateSnapshot({ ...snapshot(), notifications: [...newestFirst].reverse() })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], category: "download" as never }] })).toThrow("Unsupported");
     expect(() => validateSnapshot({ ...snapshot(), notifications: [{ ...newestFirst[0], outcome: "pending" as never }] })).toThrow("Unsupported");
