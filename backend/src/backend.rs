@@ -181,6 +181,9 @@ impl Backend {
             trusted_origins: auth::trusted_origins_from_env(),
             youtube: Mutex::new(Arc::new(crate::youtube::CommandProbe)),
         };
+        if let Err(error) = crate::reliability::recover(&backend.db) {
+            eprintln!("pipeline recovery failed: {}", crate::reliability::safe_detail(&error.to_string()));
+        }
         let _ = backend.recover_interrupted_state();
         backend
     }
@@ -835,6 +838,16 @@ impl Backend {
             FeedFetchResponse::Data(data, _) => Ok(data),
             FeedFetchResponse::NotModified(_) => Err(Error::Upstream("feed returned HTTP 304".into())),
         }
+    }
+
+    /// A forbidden signed enclosure can be replaced by a fresh URL from its feed.
+    pub(crate) fn refresh_episode_source(&self, episode: i64) -> Result<String, Error> {
+        let (feed,guid): (String,String) = self.db.lock()?.query_row("SELECT p.feed_url,e.guid FROM episodes e JOIN podcasts p ON p.id=e.podcast_id WHERE e.id=?",[episode],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let bytes=self.fetch_url(&feed)?;
+        let parsed=crate::feeds::parse_feed(&bytes)?;
+        let item=parsed.episodes.iter().find(|e|e.guid==guid).ok_or(Error::NotFound)?;
+        self.db.execute("UPDATE episodes SET audio_url=? WHERE id=?",params![item.audio_url,episode])?;
+        Ok(item.audio_url.clone())
     }
 
     /// One article URL becomes one episode under the shared Articles show.
@@ -1623,12 +1636,19 @@ impl Backend {
         if slot.is_some() {
             return;
         }
+        if self.local {
+            if let Err(error)=crate::reliability::reconcile_publications(self) { eprintln!("publication reconciliation failed: {}",crate::reliability::safe_detail(&error.to_string())); }
+        }
         self.runtime_stop.store(false, Ordering::SeqCst);
         let backend = self.clone();
         let stop = self.runtime_stop.clone();
         *slot = Some(std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                let _ = backend.run_pipeline_step();
+                if let Err(error)=backend.run_pipeline_step() {
+                    let message=crate::reliability::safe_detail(&error.to_string());
+                    eprintln!("pipeline step failed: {message}");
+                    let _=backend.db.execute("INSERT INTO settings(key,value) VALUES('pipeline_worker_error',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[message]);
+                } else { let _=backend.db.execute("DELETE FROM settings WHERE key='pipeline_worker_error'",[]); }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }));

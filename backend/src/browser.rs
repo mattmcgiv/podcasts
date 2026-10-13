@@ -152,10 +152,15 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
             .ok_or_else(|| Error::Invalid("url is required".into()))?
             .to_string();
         let kind = ingest_library_url(backend, &url)?;
-        return Ok(HttpResponse::json(json!({ "kind": kind }), 201));
+        return Ok(HttpResponse::json(json!({ "kind": kind, "submission_id": if kind == "video" || kind == "article" { let conn = backend.db.lock()?; Some(crate::reliability::enqueue(&conn,kind,&url)?) } else { None }, "state":"queued" }), 201));
+    }
+    if request.path().starts_with("/api/internal/pipeline") {
+        if request.header("origin").is_some() || request.header("host").is_some_and(|h| !matches!(h,"127.0.0.1:18180"|"localhost:18180")) { return Err(Error::Forbidden("local request required".into())); }
+        return pipeline_route(backend, request);
     }
     crate::auth::require_session(&backend.auth, &backend.db, request)?;
     let path = request.path();
+    if path.starts_with("/api/pipeline") { return pipeline_route(backend,request); }
     if path.starts_with("/api/auth/") {
         return Ok(backend.handle_legacy(request));
     }
@@ -241,7 +246,7 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
 }
 
 /// Client-visible publications require finished show notes.
-const NOTES_READY_SQL: &str = "json_array_length(b.notes_json) > 0";
+const NOTES_READY_SQL: &str = "json_array_length(b.notes_json) > 0 AND NOT EXISTS(SELECT 1 FROM browser_missing_artifacts missing WHERE missing.episode_id=b.episode_id)";
 
 pub fn publication(backend: &Backend, id: i64) -> Result<(Manifest, Value), Error> {
     publication_on(&*backend.db.lock()?, id)
@@ -433,7 +438,7 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     Ok(
         json!({"version":1,"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
         "settings":settings,"versions":versions,"writers":writers,"refresh_status":refresh_status,"notifications":notifications,
-        "feedback":feedback,
+        "feedback":feedback,"pipeline":crate::reliability::status(conn)?,
         "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":storage,
             "memory":crate::memory_gate::status_json()}}),
     )
@@ -674,9 +679,8 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                 let subscribed = tx.query_row("SELECT is_subscribed FROM podcasts WHERE feed_url=?",[field],|r|r.get::<_,bool>(0)).optional()?.unwrap_or(false);
                 identical = stale && action["value"].as_bool() == Some(subscribed);
             } else if entity == "listen" {
-                let queued = tx.query_row("SELECT value FROM settings WHERE key=?", [crate::youtube::LISTEN_SETTING], |r| r.get::<_, String>(0)).optional()?.unwrap_or_else(|| "[]".into());
-                let items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&queued).unwrap_or_default();
-                identical = action["value"].as_bool() == Some(true) && items.iter().any(|item| item.url == field);
+                let source = crate::reliability::canonical("video",field)?;
+                identical = action["value"].as_bool() == Some(true) && tx.query_row("SELECT EXISTS(SELECT 1 FROM browser_intake WHERE kind='video' AND source=?)",[source],|r|r.get::<_,bool>(0))?;
             } else if entity == "feedback" {
                 identical = tx.query_row("SELECT COUNT(*) FROM browser_feedback WHERE id=?", [field], |r| r.get::<_, i64>(0))? > 0;
             } else if let Ok(episode) = entity.parse::<i64>() {
@@ -718,12 +722,7 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                     if value.as_bool() != Some(true) {
                         return Err(Error::Invalid("listen value must be true".into()));
                     }
-                    let queued = crate::db::setting(tx, crate::youtube::LISTEN_SETTING)?.unwrap_or_else(|| "[]".into());
-                    let mut items: Vec<crate::youtube::PendingListen> = serde_json::from_str(&queued).unwrap_or_default();
-                    if !items.iter().any(|item| item.url == field) {
-                        items.push(crate::youtube::PendingListen { url: field.to_string(), attempts: 0, next_at: 0 });
-                        crate::db::set_setting(tx, crate::youtube::LISTEN_SETTING, &serde_json::to_string(&items).map_err(|e| Error::Invalid(e.to_string()))?)?;
-                    }
+                    crate::reliability::enqueue(tx,"video",field)?;
                 } else if entity == "feedback" {
                     if field.is_empty() || field.len() > 128 {
                         return Err(Error::Invalid("invalid report id".into()));
@@ -897,4 +896,24 @@ fn serve_artifact(
         body,
     }
     .with_header("etag", etag))
+}
+
+fn pipeline_route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error> {
+    let path = request.path();
+    if request.method == "GET" && path.ends_with("/diagnostics") {
+        let mut body = { let conn = backend.db.lock()?; crate::reliability::diagnostics(&conn)? };
+        body["tools"] = crate::reliability::tool_versions();
+        return Ok(HttpResponse::json(body,200));
+    }
+    if request.method == "GET" && path.ends_with("/pipeline") {
+        let conn = backend.db.lock()?;
+        return Ok(HttpResponse::json(crate::reliability::status(&conn)?,200));
+    }
+    if request.method == "POST" && path.ends_with("/retry") {
+        let body = request.json_object()?;
+        let id = body["id"].as_str().ok_or_else(||Error::Invalid("id required".into()))?;
+        backend.db.with_transaction(|tx| crate::reliability::retry(tx,id))?;
+        return Ok(HttpResponse::json(json!({"state":"queued"}),202));
+    }
+    Err(Error::NotFound)
 }

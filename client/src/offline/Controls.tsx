@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { defaultDeviceName, resolveConflict, state, synchronize, syncError } from "./client";
+import { defaultDeviceName, resolveConflict, state, synchronize, syncError, network } from "./client";
 import { downloadError, prefetch, savePreferences } from "./downloads";
 import { signInAndSync } from "./signIn";
 import { allDownloads, updateState, type Download, type LocalState } from "./store";
+import { readDiagnostics, readMediaDiagnostics } from "./diagnostics";
 import { fmtTime } from "../lib";
 
 export function changeDescription(local: LocalState, _entity: string, field: string, value: unknown): string {
@@ -19,6 +20,25 @@ export async function exportSyncBackup(): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+export async function exportDiagnostics(): Promise<void> {
+  const local = await state();
+  let backend: unknown;
+  try { backend = await network("/pipeline/diagnostics"); }
+  catch { backend = { unavailable: true, lastStatus: local.snapshot?.pipeline }; }
+  const downloads = await allDownloads();
+  // Export only operational data; exclude the library, outbox contents, URLs, and raw diagnostic detail.
+  const data = { format: "pods-diagnostics-v1", backend, browser: {
+    lastSync: local.lastSync, pendingChanges: local.outbox.length,
+    downloads: downloads.map(d => ({ episode: d.episode, bytes: d.bytes, received: d.received, complete: d.complete })),
+    syncError: syncError(), downloadError: downloadError(),
+    pageEvents: readDiagnostics().map(({at,kind}) => ({at,kind})),
+    mediaEvents: (await readMediaDiagnostics()).map(({at,kind}) => ({at,kind})),
+  } };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+  const link = document.createElement("a"); link.href=url; link.download="pods-diagnostics.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+
 function counted(n: number, singular: string): string {
   return `${n} ${singular}${n === 1 ? "" : "s"}`;
 }
@@ -27,21 +47,23 @@ export function OfflineSettings() {
   const [local, setLocal] = useState<LocalState | null>(null);
   const [downloads, setDownloads] = useState<Download[]>([]);
   const [status, setStatus] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [action, setAction] = useState<"sync" | "sign-in" | "backup" | null>(null);
   useEffect(() => {
     let active = true;
-    const refresh = () => { void Promise.all([state(), allDownloads()]).then(([s, d]) => { if (active) { setLocal(s); setDownloads(d); } }).catch(() => {}); };
+    const refresh = () => { void Promise.all([state(), allDownloads()]).then(([s, d]) => { if (active) { setLocal(s); setDownloads(d); setLoadError(""); } }).catch(() => { if (active) setLoadError("Local library status could not be read. Retry without clearing browser data."); }); };
     refresh(); window.addEventListener("pods-offline-changed", refresh);
     return () => { active = false; window.removeEventListener("pods-offline-changed", refresh); };
-  }, []);
+  }, [refreshKey]);
   async function run(work: () => Promise<void>, name: "sync" | "sign-in" | "backup" | null = null, pending = "") {
     setBusy(true); setAction(name); setStatus(pending);
     try { await work(); setStatus("Done."); }
     catch (error) { setStatus(error instanceof Error ? error.message : "Mac unavailable."); }
     finally { setBusy(false); setAction(null); }
   }
-  if (!local) return <section className="settings-section"><p>Loading offline library…</p></section>;
+  if (!local) return <section className="settings-section"><p role={loadError ? "alert" : undefined}>{loadError || "Loading offline library…"}</p>{loadError && <button type="button" onClick={() => setRefreshKey(k => k+1)}>Retry local status</button>}</section>;
   return <section className="settings-section" aria-label="Offline library" aria-busy={busy}>
     <h2 className="section-title">Mac and downloads</h2>
     <p className="settings-detail">Connect this device and your Mac to Tailscale to synchronize. Downloads work while the Mac is unavailable.</p>
@@ -61,7 +83,27 @@ export function OfflineSettings() {
       onChange={event => void run(() => savePreferences({ ...local.preferences, limit: Number(event.target.value) * 1024 ** 3 }))} /></label>
     <p>{downloads.filter(d => d.complete).length} downloaded episodes · {(downloads.reduce((n, d) => n + d.bytes, 0) / 1024 ** 3).toFixed(2)} GiB reserved.</p>
     <p className="settings-detail">Keep Pods open to download automatically. Browser storage can be removed by iOS.</p>
-    {(status || syncError() || downloadError()) && <p role="status">{status || syncError() || downloadError()}</p>}
+    {loadError && <p role="alert">{loadError} <button type="button" onClick={() => setRefreshKey(k => k+1)}>Retry local status</button></p>}
+    {status && <p role="status">{status}</p>}
+    {syncError() && <p role="alert">Sync: {syncError()}</p>}
+    {downloadError() && <p role="alert">Download: {downloadError()}</p>}
+    <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(exportDiagnostics)}>Export diagnostics</button>
+    {local.snapshot?.pipeline && <section aria-label="Processing activity">
+      <h3>Processing activity</h3>
+      <p className="settings-detail">Status from {new Date(local.snapshot.pipeline.observedAt * 1000).toLocaleString()}. Sync to refresh.</p>
+      {local.snapshot.pipeline.workerError && <p role="alert">{local.snapshot.pipeline.workerError}</p>}
+      {local.snapshot.pipeline.items.map(item => <div key={item.id} className="settings-section">
+        <p><strong>{item.title}</strong> · {item.stalled ? "Worker stopped reporting progress" : item.statusLabel}</p>
+        {item.message && <p role={item.state === "needs_attention" ? "alert" : "status"}>{item.message}</p>}
+        {item.nextRetryAt != null && <p>Next retry: {new Date(item.nextRetryAt * 1000).toLocaleString()} · {item.attempts} failed attempts</p>}
+        {item.canRetry && <button type="button" className="settings-btn" disabled={busy} onClick={() => void run(async () => {
+          await network("/pipeline/retry", { method: "POST", body: JSON.stringify({id: item.id}) });
+          await synchronize();
+        }, null, "Requesting retry…")}>Retry {item.title}</button>}
+      </div>)}
+      {local.snapshot.pipeline.recent.filter(item => item.published).map(item => <p key={item.id}>{item.title} · Published</p>)}
+      {local.snapshot.pipeline.items.length === 0 && <p>Nothing waiting for processing.</p>}
+    </section>}
     {local.outbox.filter(o => o.conflict != null).map(operation => <div key={operation.id}>
       <p>{local.snapshot?.episodes.find(e => String(e.id) === operation.entity)?.title ?? operation.field}: this device and the shared library both changed this.</p>
       <p>{local.device_name ?? defaultDeviceName()}: {changeDescription(local, operation.entity, operation.field, local.outbox.filter(o => o.entity === operation.entity && o.field === operation.field).at(-1)?.value)}</p>

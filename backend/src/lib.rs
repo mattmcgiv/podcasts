@@ -47,3 +47,6 @@ pub use http::{HttpRequest, HttpResponse};
     note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
 )]
 pub mod ffi;
+
+pub mod reliability;
+pub mod child_process;

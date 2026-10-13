@@ -154,14 +154,15 @@ pub fn storage_status(backend: &Backend) -> Value {
 }
 
 pub fn step(backend: &Backend) -> Result<bool, Error> {
+    #[cfg(unix)] install_whisper_shutdown();
     if crate::voice::step(backend)? {
         return Ok(true);
     }
     if crate::feedback::step(backend)? {
         return Ok(true);
     }
-    prepare_youtube(backend);
-    drain_article_listen(backend);
+    canonicalize_youtube_subscriptions(backend);
+    crate::reliability::drain(backend)?;
     if backend
         .db
         .scalar_string(
@@ -201,16 +202,16 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         conn.query_row("SELECT e.id,e.audio_url,j.stage FROM browser_jobs j JOIN browser_episode_catalog e ON e.id=j.episode_id
             JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
             LEFT JOIN browser_publications b ON b.episode_id=e.id
-            WHERE j.next_retry_at<=? AND j.stage NOT IN ('blocked','review') AND (j.stage!='retry' OR j.attempts<?)
+            WHERE j.owner IS NULL AND j.next_retry_at<=? AND j.stage NOT IN ('blocked','review') AND (j.stage!='retry' OR j.attempts < CASE WHEN j.error_code IN ('dns','network','timeout','youtube','source_forbidden') THEN 12 ELSE 4 END)
             AND (b.episode_id IS NULL OR b.notes_json='[]' OR j.stage='queued')
             AND (p.is_subscribed=1 OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id)) AND s.played_at IS NULL AND s.archived_at IS NULL
-            ORDER BY j.priority DESC,CASE WHEN j.stage='retry' THEN 1 ELSE 0 END,e.published_at,e.id LIMIT 1",[crate::db::now_unix(), MAX_FAILED_ATTEMPTS],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?
+            ORDER BY j.priority DESC,CASE WHEN j.stage='retry' THEN 1 ELSE 0 END,e.published_at,e.id LIMIT 1",[crate::db::now_unix()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?
     };
     let Some((episode, url, _)) = candidate else {
         return retitle_one_published(backend);
     };
     if let Some(article_url) = crate::articles::url_from_source(&url) {
-        match process_article(backend, episode, article_url) {
+        match with_heartbeat(backend,episode, || process_article(backend, episode, article_url)) {
             Ok(()) => mark_ready(backend, episode)?,
             Err(error) => finish_failed_attempt(backend, episode, error)?,
         }
@@ -223,7 +224,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
         )?;
         return Ok(false);
     }
-    match process(backend, episode, &url) {
+    match with_heartbeat(backend,episode, || process(backend, episode, &url)) {
         Ok(()) => mark_ready(backend, episode)?,
         Err(error) => finish_failed_attempt(backend, episode, error)?,
     }
@@ -233,7 +234,9 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
 /// Shared by the podcast and article pipelines: busy errors defer without an
 /// attempt, everything else persists a failed attempt with backoff.
 fn finish_failed_attempt(backend: &Backend, episode: i64, error: Error) -> Result<(), Error> {
-    if crate::omlx_lock::is_busy_error(&error) {
+    if crate::reliability::error_code(&error.to_string()) == "storage_limit" {
+        persist_busy(backend,episode,"storage_limit",60)?;
+    } else if crate::omlx_lock::is_busy_error(&error) {
         persist_busy(
             backend,
             episode,
@@ -271,14 +274,13 @@ fn finish_failed_attempt(backend: &Backend, episode: i64, error: Error) -> Resul
             )?
             .unwrap_or(0);
         let next = attempts.saturating_add(1);
-        let outcome = if next >= MAX_FAILED_ATTEMPTS {
+        let code = crate::reliability::error_code(&error.to_string());
+        let outcome = if crate::reliability::permanent(code) || next >= crate::reliability::retry_limit(code) {
             "blocked"
         } else {
             "retry"
         };
-        let delay = 300_i64
-            .saturating_mul(1_i64 << attempts.clamp(0, 7))
-            .min(21600);
+        let delay = crate::reliability::backoff(attempts,&episode.to_string());
         persist_failed_attempt(
             backend,
             episode,
@@ -293,24 +295,26 @@ fn finish_failed_attempt(backend: &Backend, episode: i64, error: Error) -> Resul
 
 fn persist_busy(backend: &Backend, episode: i64, error: &str, delay: i64) -> Result<(), Error> {
     backend.db.execute(
-        "UPDATE browser_jobs SET error=?,next_retry_at=? WHERE episode_id=?",
+        "UPDATE browser_jobs SET error=?,next_retry_at=?,owner=NULL,updated_at=unixepoch() WHERE episode_id=?",
         params![error, crate::db::now_unix() + delay, episode],
     )?;
     Ok(())
 }
 
 fn stage(backend: &Backend, id: i64, name: &str) -> Result<(), Error> {
-    backend.db.execute(
-        "UPDATE browser_jobs SET stage=?,error=NULL,completed_units=NULL,total_units=NULL WHERE episode_id=?",
-        params![name, id],
-    )?;
-    Ok(())
+    backend.db.with_transaction(|tx| {
+        let previous: Option<String> = tx.query_row("SELECT stage FROM browser_jobs WHERE episode_id=?",[id],|r|r.get(0)).optional()?;
+        if let Some(previous) = previous.filter(|s|s!=name) { crate::reliability::event(tx,None,Some(id),&previous,"completed",0,None)?; }
+        tx.execute("UPDATE browser_jobs SET stage=?,error=NULL,error_code=NULL,completed_units=NULL,total_units=NULL,stage_started_at=unixepoch(),updated_at=unixepoch(),last_progress_at=unixepoch(),owner=? WHERE episode_id=?",params![name,std::process::id(),id])?;
+        crate::reliability::event(tx,None,Some(id),name,"started",0,None)?;
+        Ok(())
+    })
 }
 
 fn progress(backend: &Backend, id: i64, completed: u64, total: u64) -> Result<(), Error> {
     backend.db.execute(
-        "UPDATE browser_jobs SET completed_units=?,total_units=? WHERE episode_id=?",
-        params![completed.min(total) as i64, total as i64, id],
+        "UPDATE browser_jobs SET last_progress_at=CASE WHEN completed_units IS NULL OR completed_units!=? THEN unixepoch() ELSE last_progress_at END,completed_units=?,total_units=?,updated_at=unixepoch() WHERE episode_id=?",
+        params![completed.min(total) as i64, completed.min(total) as i64, total as i64, id],
     )?;
     Ok(())
 }
@@ -369,12 +373,14 @@ fn with_validation_stage<T>(
 fn mark_ready(backend: &Backend, episode: i64) -> Result<(), Error> {
     let next = crate::db::now_unix() + 300;
     backend.db.with_transaction(|tx| {
+        crate::reliability::event(tx,None,Some(episode),"publication","ready",tx.query_row("SELECT attempts FROM browser_jobs WHERE episode_id=?",[episode],|r|r.get(0))?,None)?;
+        tx.execute("DELETE FROM browser_missing_artifacts WHERE episode_id=?",[episode])?;
         tx.execute(
             "DELETE FROM browser_processing_notifications WHERE episode_id=?",
             [episode],
         )?;
         tx.execute(
-            "UPDATE browser_jobs SET stage='ready',error=NULL,completed_units=1,total_units=1,next_retry_at=? WHERE episode_id=?",
+            "UPDATE browser_jobs SET stage='ready',error=NULL,error_code=NULL,owner=NULL,updated_at=unixepoch(),completed_units=1,total_units=1,next_retry_at=? WHERE episode_id=?",
             params![next, episode],
         )?;
         Ok(())
@@ -389,7 +395,7 @@ fn persist_failed_attempt(
     outcome: &str,
     delay: i64,
 ) -> Result<(), Error> {
-    let category = notification_category(failed_stage);
+    let category = notification_category(failed_stage).or(Some("processing"));
     let message = category.map(notification_message);
     backend.db.with_transaction(|tx| {
         if let (Some(category), Some(message)) = (category, message) {
@@ -406,9 +412,10 @@ fn persist_failed_attempt(
             )?;
         }
         tx.execute(
-            "UPDATE browser_jobs SET stage=?,attempts=attempts+1,error=?,next_retry_at=?,completed_units=NULL,total_units=NULL WHERE episode_id=?",
-            params![outcome, error, crate::db::now_unix() + delay, episode],
+            "UPDATE browser_jobs SET stage=?,attempts=attempts+1,error=?,next_retry_at=?,completed_units=NULL,total_units=NULL,owner=NULL,updated_at=unixepoch(),error_code=? WHERE episode_id=?",
+            params![outcome, crate::reliability::safe_detail(error), crate::db::now_unix() + delay, crate::reliability::error_code(error), episode],
         )?;
+        crate::reliability::event(tx,None,Some(episode),failed_stage,outcome,tx.query_row("SELECT attempts FROM browser_jobs WHERE episode_id=?",[episode],|r|r.get(0))?,Some(crate::reliability::error_code(error)))?;
         Ok(())
     })
 }
@@ -468,9 +475,12 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             if !matches!(parsed.scheme(), "https" | "http") {
                 return Err(failure("unsupported audio URL"));
             }
-            download_source_with_progress(backend, url, source, |done, total| {
-                progress(backend, id, done, total)
-            })?;
+            if let Err(error) = download_source_with_progress(backend, url, source, |done, total| progress(backend, id, done, total)) {
+                if crate::reliability::error_code(&error.to_string()) != "source_forbidden" { return Err(error); }
+                let refreshed = backend.refresh_episode_source(id)?;
+                if refreshed == url { return Err(error); }
+                download_source_with_progress(backend, &refreshed, source, |done,total|progress(backend,id,done,total))?;
+            }
         }
     }
     let (source_hash, _) = ArtifactStore::hash_file(source).map_err(failure)?;
@@ -594,7 +604,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
     let timeline = retained_intervals(&segments, &labels, duration)?;
     let existing = stored_manifest(backend, id)?;
     let mut manifest = if let Some(manifest) =
-        existing.filter(|m| m.source_hash == source_hash && m.pipeline_version == run)
+        existing.filter(|m| m.source_hash == source_hash && m.pipeline_version == run && published_artifact_valid(backend,m))
     {
         manifest
     } else {
@@ -646,7 +656,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
             .artifacts
             .prepare_dest(&format!("published/{hash}.{extension}"))
             .map_err(failure)?;
-        if !dest.exists() {
+        if !ArtifactStore::hash_file(&dest).is_ok_and(|(existing,_)|existing==hash) {
             fs::rename(&rendered, &dest).map_err(failure)?;
         }
         let (width, height) = if video {
@@ -685,6 +695,7 @@ fn process(backend: &Backend, id: i64, url: &str) -> Result<(), Error> {
         manifest
     };
     if stored_notes_ready(backend, id)? {
+        backend.db.execute("UPDATE browser_publications SET manifest_json=? WHERE episode_id=?",params![serde_json::to_string(&manifest).map_err(failure)?,id])?;
         return Ok(());
     }
     stage(backend, id, "show_notes")?;
@@ -790,6 +801,7 @@ fn install_whisper_shutdown() {
 #[cfg(unix)]
 extern "C" fn whisper_shutdown(sig: libc::c_int) {
     kill_registered_whisper_group();
+    crate::child_process::shutdown();
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         libc::raise(sig);
@@ -867,7 +879,9 @@ fn run_whisper_child_with_progress(
             }
         }
         let _clear = ClearPgid(pgid);
+        let started = Instant::now();
         loop {
+            if started.elapsed() > Duration::from_secs(4*3600) { preempt_process_group(&mut child); return Err(failure("transcription timeout")); }
             if let Err(error) = report() {
                 preempt_process_group(&mut child);
                 return Err(error);
@@ -1809,13 +1823,8 @@ fn download_youtube(video_id: &str, dest: &Path) -> Result<(), Error> {
     let output = dest.with_extension("mp4");
     let mut args = crate::youtube::download_arguments(&output);
     args.push(format!("https://www.youtube.com/watch?v={video_id}"));
-    let status = Command::new(crate::youtube::ytdlp_bin())
-        .args(&args)
-        .status()
-        .map_err(failure)?;
-    if !status.success() || !output.is_file() {
-        return Err(failure("youtube download failed"));
-    }
+    crate::child_process::checked(Command::new(crate::youtube::ytdlp_bin()).args(&args),7200,"youtube download")?;
+    if !output.is_file() { return Err(failure("youtube download produced no media")); }
     fs::rename(&output, dest).map_err(failure)?;
     Ok(())
 }
@@ -1882,16 +1891,9 @@ fn timeline_is_identity(spans: &[Interval], duration: f64) -> bool {
 
 fn remux_video(source: &Path, dest: &Path) -> Result<(), Error> {
     let temp = dest.with_extension("partial.mp4");
-    let status = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-y", "-i"])
-        .arg(source)
-        .args(["-c", "copy", "-movflags", "+faststart"])
-        .arg(&temp)
-        .status()
-        .map_err(failure)?;
-    if !status.success() {
-        return Err(failure("video rendering failed"));
-    }
+    crate::child_process::checked(Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-y", "-i"]).arg(source)
+        .args(["-c", "copy", "-movflags", "+faststart"]).arg(&temp),7200,"video rendering")?;
     fs::rename(temp, dest).map_err(failure)
 }
 
@@ -1908,12 +1910,7 @@ fn render_video(
     let script = dest.with_extension("filters");
     fs::write(&script, &filters).map_err(failure)?;
     let temp = dest.with_extension("partial.mp4");
-    let status = ffmpeg_video_render_command(source, &script, &temp)
-        .status()
-        .map_err(failure)?;
-    if !status.success() {
-        return Err(failure("video rendering failed"));
-    }
+    crate::child_process::checked(&mut ffmpeg_video_render_command(source, &script, &temp),7200,"video rendering")?;
     fs::rename(temp, dest).map_err(failure)
 }
 
@@ -1950,11 +1947,6 @@ fn ffmpeg_video_render_command(source: &Path, script: &Path, temp: &Path) -> Com
         ])
         .arg(temp);
     command
-}
-
-fn prepare_youtube(backend: &Backend) {
-    canonicalize_youtube_subscriptions(backend);
-    drain_youtube_listen(backend);
 }
 
 fn canonicalize_youtube_subscriptions(backend: &Backend) {
@@ -2306,7 +2298,10 @@ fn run_synthesize_child(
             .process_group(0)
             .spawn()
             .map_err(failure)?;
+        register_whisper_pgid(child.id() as i32);
+        let started = Instant::now();
         loop {
+            if started.elapsed() > Duration::from_secs(4*3600) { preempt_process_group(&mut child); clear_whisper_pgid(child.id() as i32); return Err(failure("speech synthesis timeout")); }
             std::thread::sleep(Duration::from_secs(2));
             if child.try_wait().map_err(failure)?.is_some() {
                 break;
@@ -2322,7 +2317,7 @@ fn run_synthesize_child(
                         .count() as u64
                 })
                 .unwrap_or(0);
-            progress(backend, id, done.min(total as u64), total as u64)?;
+            if let Err(error)=progress(backend, id, done.min(total as u64), total as u64) { preempt_process_group(&mut child); clear_whisper_pgid(child.id() as i32); return Err(error); }
             let gates = (|| {
                 crate::pipeline_pause::require_not_paused()?;
                 crate::power_gate::require_external_power()?;
@@ -2331,9 +2326,11 @@ fn run_synthesize_child(
             })();
             if let Err(error) = gates {
                 preempt_process_group(&mut child);
+                clear_whisper_pgid(child.id() as i32);
                 return Err(error);
             }
         }
+        clear_whisper_pgid(child.id() as i32);
         let status = child.wait().map_err(failure)?;
         if !status.success() {
             return Err(failure("speech synthesis failed"));
@@ -2372,7 +2369,7 @@ fn run_extract_child(url: &str, html: &std::path::Path, dest: &std::path::Path) 
     let script =
         std::env::var("PODS_EXTRACT_SCRIPT").map_err(|_| failure("PODS_EXTRACT_SCRIPT is required"))?;
     let max = crate::articles::max_words();
-    let output = std::process::Command::new(&python)
+    let output = crate::child_process::output(std::process::Command::new(&python)
         .args([
             script.as_str(),
             "--html",
@@ -2384,8 +2381,7 @@ fn run_extract_child(url: &str, html: &std::path::Path, dest: &std::path::Path) 
             "--max-words",
             &max.to_string(),
         ])
-        .output()
-        .map_err(failure)?;
+        , Duration::from_secs(120))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr)
             .lines()
@@ -2400,95 +2396,6 @@ fn run_extract_child(url: &str, html: &std::path::Path, dest: &std::path::Path) 
     Ok(())
 }
 
-fn drain_article_listen(backend: &Backend) {
-    let Some(raw) = backend
-        .db
-        .scalar_string(
-            "SELECT value FROM settings WHERE key=?",
-            [crate::articles::LISTEN_SETTING],
-        )
-        .ok()
-        .flatten()
-    else {
-        return;
-    };
-    let mut items: Vec<crate::articles::PendingArticle> =
-        serde_json::from_str(&raw).unwrap_or_default();
-    let now = crate::db::now_unix();
-    let Some(index) = items.iter().position(|item| item.next_at <= now) else {
-        return;
-    };
-    let url = items[index].url.clone();
-    match backend.add_article(&url) {
-        Ok(_) => {
-            items.remove(index);
-        }
-        Err(_) => {
-            items[index].attempts += 1;
-            if items[index].attempts >= crate::articles::MAX_QUEUE_ATTEMPTS {
-                items.remove(index);
-            } else {
-                items[index].next_at = now + 60 * (1_i64 << items[index].attempts.min(6));
-            }
-        }
-    }
-    if items.is_empty() {
-        let _ = backend.db.execute(
-            "DELETE FROM settings WHERE key=?",
-            [crate::articles::LISTEN_SETTING],
-        );
-    } else if let Ok(value) = serde_json::to_string(&items) {
-        let _ = backend.db.execute(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![crate::articles::LISTEN_SETTING, value],
-        );
-    }
-}
-
-fn drain_youtube_listen(backend: &Backend) {
-    let Some(raw) = backend
-        .db
-        .scalar_string(
-            "SELECT value FROM settings WHERE key=?",
-            [crate::youtube::LISTEN_SETTING],
-        )
-        .ok()
-        .flatten()
-    else {
-        return;
-    };
-    let mut items: Vec<crate::youtube::PendingListen> =
-        serde_json::from_str(&raw).unwrap_or_default();
-    let now = crate::db::now_unix();
-    let Some(index) = items.iter().position(|item| item.next_at <= now) else {
-        return;
-    };
-    let url = items[index].url.clone();
-    match backend.add_youtube_video(&url) {
-        Ok(_) => {
-            items.remove(index);
-        }
-        Err(_) => {
-            items[index].attempts += 1;
-            if items[index].attempts >= 4 {
-                items.remove(index);
-            } else {
-                items[index].next_at = now + 60 * (1_i64 << items[index].attempts.min(6));
-            }
-        }
-    }
-    if items.is_empty() {
-        let _ = backend.db.execute(
-            "DELETE FROM settings WHERE key=?",
-            [crate::youtube::LISTEN_SETTING],
-        );
-    } else if let Ok(value) = serde_json::to_string(&items) {
-        let _ = backend.db.execute(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![crate::youtube::LISTEN_SETTING, value],
-        );
-    }
-}
 
 fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     let mut filters = String::new();
@@ -2506,12 +2413,7 @@ fn render(source: &Path, dest: &Path, spans: &[Interval]) -> Result<(), Error> {
     fs::write(&script, &filters).map_err(failure)?;
     let temp = dest.with_extension("partial.m4a");
     // FFmpeg 9 removed -filter_complex_script. Read the graph from the file.
-    let status = ffmpeg_render_command(source, &script, &temp)
-        .status()
-        .map_err(failure)?;
-    if !status.success() {
-        return Err(failure("audio rendering failed"));
-    }
+    crate::child_process::checked(&mut ffmpeg_render_command(source, &script, &temp),7200,"audio rendering")?;
     fs::rename(temp, dest).map_err(failure)
 }
 
@@ -4402,7 +4304,7 @@ mod download_tests {
     }
 
     #[test]
-    fn persist_failed_attempt_records_mapped_stages_and_skips_others() {
+    fn persist_failed_attempt_records_all_stages() {
         let (backend, _temp) = local_job_backend();
         backend
             .db
@@ -4460,12 +4362,12 @@ mod download_tests {
         .unwrap();
         persist_failed_attempt(&backend, 1, "queued", "ignored", "retry", 0).unwrap();
         persist_failed_attempt(&backend, 1, "retry", "ignored", "blocked", 0).unwrap();
-        assert_eq!(notification_rows(&backend).len(), 5);
+        assert_eq!(notification_rows(&backend).len(), 8);
         persist_failed_attempt(&backend, 1, "downloading", "err", "blocked", 0).unwrap();
         let newest = &notification_rows(&backend)[0];
         assert_eq!(newest.outcome, "blocked");
         assert_eq!(newest.failed_stage, "downloading");
-        assert_eq!(notification_rows(&backend).len(), 6);
+        assert_eq!(notification_rows(&backend).len(), 9);
     }
 
     #[test]
@@ -5406,10 +5308,13 @@ mod download_tests {
             &json!([{"segment_id":"s0","label":"content","evidence":"Hello there."}]),
         )
         .unwrap();
+        let published_bytes=b"artifact";
+        let published_hash=hex::encode(Sha256::digest(published_bytes));
+        backend.artifacts.install(&format!("published/{published_hash}.m4a"),published_bytes).unwrap();
         let manifest = Manifest {
             version: 1,
             episode_id: 1,
-            hash: "aa".repeat(32),
+            hash: published_hash,
             source_hash: hash.clone(),
             bytes: 8,
             duration: 1.0,
@@ -5611,4 +5516,32 @@ mod download_tests {
         .unwrap();
         (backend, temp)
     }
+}
+
+fn with_heartbeat<T>(backend: &Backend,id:i64,work:impl FnOnce()->Result<T,Error>) -> Result<T,Error> {
+    use std::sync::atomic::{AtomicBool,Ordering};
+    if backend.db.execute("UPDATE browser_jobs SET owner=?,updated_at=unixepoch() WHERE episode_id=? AND owner IS NULL",params![std::process::id(),id])? == 0 { return Err(Error::Conflict("job already claimed".into())); }
+    let stop=AtomicBool::new(false);
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> { fn drop(&mut self) { self.0.store(true,Ordering::SeqCst); } }
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut ticks = 0;
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(200));
+                ticks += 1;
+                if ticks % 25 != 0 { continue; }
+                if stop.load(Ordering::SeqCst) { break; }
+                if let Err(_error)=backend.db.execute("UPDATE browser_jobs SET updated_at=unixepoch() WHERE episode_id=? AND owner IS NOT NULL",[id]) { eprintln!("pipeline heartbeat write failed"); }
+            }
+        });
+        let _stop=Stop(&stop);
+        work()
+    })
+}
+
+fn published_artifact_valid(backend: &Backend, manifest: &Manifest) -> bool {
+    if manifest.hash.len()!=64 || !manifest.hash.bytes().all(|c|c.is_ascii_hexdigit()) { return false; }
+    let path=backend.artifacts.url(&format!("published/{}.{}",manifest.hash,crate::browser::media_extension(manifest)));
+    ArtifactStore::hash_file(&path).is_ok_and(|(hash,bytes)| hash==manifest.hash && bytes as u64==manifest.bytes)
 }

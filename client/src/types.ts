@@ -208,7 +208,8 @@ export type ProcessingFailureCategory =
   | "audio_download"
   | "speech_to_text"
   | "ad_classification"
-  | "show_notes";
+  | "show_notes"
+  | "processing";
 
 export type ProcessingFailureOutcome = "retry" | "blocked";
 

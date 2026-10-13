@@ -1,6 +1,6 @@
 # Pods reliability and error reporting plan
 
-Reduce failures and make every accepted request traceable through completion or an actionable failure. Implement the work below in order, in small independently useful changes. Planning baseline: 13 October 2026, commit `6b56ef5`. This document specifies proposed work; it does not claim implementation.
+Reduce failures and make every accepted request traceable through completion or an actionable failure. Implement the work below in order, in small independently useful changes. Planning baseline: 13 October 2026, commit `6b56ef5`. The implementation is tracked below; runtime and deployment evidence is recorded separately from test results.
 
 ## Evidence and scope
 
@@ -58,3 +58,13 @@ Ship each step incrementally. Use focused Rust tests and `cargo test --features 
 Install and restart changed Mac backends in the same implementation turn; replace menu builds in `/Applications`; deploy client changes through the documented Cloudflare Pages upload. Verify the running version and actual acceptance/status/retry/publication flow separately from test results. Check browser sync and downloaded playback without clearing site data. Commit and push each implementation increment. No additional approval committee, soak-time gate, or broad rewrite is required.
 
 Technical references: [SQLite transaction semantics](https://www.sqlite.org/lang_transaction.html) inform atomic state changes; [official yt-dlp options](https://github.com/yt-dlp/yt-dlp#usage-and-options) inform subprocess diagnostics, retries, and timeouts. Verify the installed yt-dlp version before adopting flags.
+
+## Implementation details
+
+Durable intake is in `backend/src/reliability.rs`. Existing settings queues migrate transactionally into `browser_intake`. Exhausted requests remain available for retry. Episode work uses the existing content-bound checkpoints, with heartbeat and progress timestamps, stage events, bounded diagnostics, and longer retries for network failures. Disk-space waits do not consume failure attempts. Forbidden podcast enclosures can be refreshed from the source feed before retrying.
+
+The same status projection serves the menu at `GET /api/internal/pipeline` and authenticated browsers at `GET /api/pipeline`, and is included in offline sync snapshots. Retry uses the corresponding `/retry` endpoint and a stable item ID. Internal routes accept loopback connections only and reject browser origins. The menu includes Retry, Copy details, and Show all unresolved issues. Browser Settings includes Processing activity and Export diagnostics; Listen links to unresolved activity even after legacy notifications are cleared. Status timestamps identify cached observations.
+
+`backend/src/child_process.rs` bounds captured output, deadlines, and process-group cleanup for YouTube and render tools. Transcription and synthesis retain their resource preemption and have four-hour ceilings. Startup reconciliation detects missing or truncated published media, preserves notes, and queues rebuilding; reused artifacts are verified by hash. No user library reset is required.
+
+Diagnostics export includes bounded stage events, durations, retry recoveries, failure causes, submission counts, build/pipeline/tool versions, last sync, pending-change count, and download progress. Browser event details and outbox content are omitted. Failure rates require observations after rollout; this implementation does not establish a measured reduction or schedule recurring reviews.

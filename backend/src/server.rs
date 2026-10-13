@@ -101,6 +101,9 @@ fn handle_conn(backend: &Backend, mut stream: TcpStream) -> std::io::Result<()> 
                 return Ok(());
             }
             ParseResult::Complete { method, target, headers, body } => {
+                if target.starts_with("/api/internal/") && !stream.peer_addr()?.ip().is_loopback() {
+                    return write_response(stream,crate::http::HttpResponse::error(crate::Error::Forbidden("local connection required".into())));
+                }
                 let mut request = HttpRequest::new(method, target);
                 request.headers = headers;
                 request.body = body;

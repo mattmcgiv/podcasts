@@ -137,7 +137,25 @@ SELECT j.* FROM browser_jobs j JOIN browser_episode_catalog e ON e.id=j.episode_
 JOIN podcasts p ON p.id=e.podcast_id LEFT JOIN episode_state s ON s.episode_id=e.id
 WHERE (p.is_subscribed=1 OR EXISTS(SELECT 1 FROM listen_episodes WHERE episode_id=e.id))
 AND s.played_at IS NULL AND s.archived_at IS NULL AND j.stage!='ready';
--- Four failed attempts is terminal. Matches local_worker::MAX_FAILED_ATTEMPTS.
-UPDATE browser_jobs SET stage='blocked' WHERE attempts>=4 AND stage IN ('review','retry');
-UPDATE browser_jobs SET stage='retry' WHERE stage='review' AND attempts<4;
-UPDATE browser_jobs SET error='automatic processing failed validation' WHERE error LIKE '%requires review%';
+CREATE TABLE IF NOT EXISTS browser_intake (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('video','article')),
+    source TEXT NOT NULL, episode_id INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','working','retry','blocked','accepted','cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    error_code TEXT, error TEXT, owner INTEGER, UNIQUE(kind,source)
+);
+CREATE INDEX IF NOT EXISTS browser_intake_runnable ON browser_intake(state,next_retry_at);
+CREATE TABLE IF NOT EXISTS browser_pipeline_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, submission_id TEXT, episode_id INTEGER,
+    stage TEXT NOT NULL, outcome TEXT NOT NULL, attempt INTEGER NOT NULL,
+    error_code TEXT, created_at INTEGER NOT NULL, pipeline_version TEXT NOT NULL, duration_seconds INTEGER
+);
+CREATE TRIGGER IF NOT EXISTS browser_pipeline_events_retain AFTER INSERT ON browser_pipeline_events
+BEGIN
+    DELETE FROM browser_pipeline_events WHERE id <= NEW.id - 2000;
+END;
+CREATE TABLE IF NOT EXISTS browser_missing_artifacts (
+    episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+    detected_at INTEGER NOT NULL
+);

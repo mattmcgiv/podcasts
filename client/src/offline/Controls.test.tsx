@@ -1,16 +1,17 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IDBFactory } from "fake-indexeddb";
-import { OfflineSettings, changeDescription, exportSyncBackup } from "./Controls";
+import { OfflineSettings, changeDescription, exportSyncBackup, exportDiagnostics } from "./Controls";
 import { emptyState, type Snapshot } from "./store";
 import * as client from "./client";
 import * as downloads from "./downloads";
 import * as store from "./store";
 import { Api } from "../api";
 import * as passkey from "../passkey";
+import * as diagnostics from "./diagnostics";
 import type { EpisodeDetail } from "../types";
 
-vi.mock("./client", () => ({ state: vi.fn(), defaultDeviceName: () => "Browser", resolveConflict: vi.fn(), synchronize: vi.fn(), syncError: vi.fn(), offlineEnabled: () => false }));
+vi.mock("./client", () => ({ state: vi.fn(), defaultDeviceName: () => "Browser", resolveConflict: vi.fn(), synchronize: vi.fn(), network: vi.fn(), syncError: vi.fn(), offlineEnabled: () => false }));
 vi.mock("./downloads", () => ({ downloadError: vi.fn(), prefetch: vi.fn(), savePreferences: vi.fn() }));
 vi.mock("./store", async original => ({ ...await original<typeof import("./store")>(), allDownloads: vi.fn() }));
 vi.mock("../passkey", () => ({ assertPasskey: vi.fn() }));
@@ -19,6 +20,7 @@ beforeEach(() => {
   vi.mocked(client.state).mockResolvedValue(emptyState());
   vi.mocked(store.allDownloads).mockResolvedValue([]);
   vi.mocked(client.synchronize).mockResolvedValue();
+  vi.mocked(client.network).mockResolvedValue({ status: "ok" });
   vi.mocked(client.resolveConflict).mockResolvedValue();
   vi.mocked(downloads.savePreferences).mockResolvedValue();
   vi.mocked(downloads.prefetch).mockResolvedValue();
@@ -204,4 +206,65 @@ it("retries or discards changes the Mac rejected", async () => {
   await waitFor(() => expect(screen.getByRole("button", { name: "Discard this change" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Discard this change" }));
   await waitFor(() => expect(client.resolveConflict).toHaveBeenCalledWith("e1", false));
+});
+
+it("recovers a failed local status read without clearing data", async () => {
+  vi.mocked(client.state).mockRejectedValueOnce(new Error("storage unavailable"));
+  render(<OfflineSettings />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Local library status could not be read");
+  fireEvent.click(screen.getByRole("button",{name:"Retry local status"}));
+  expect(await screen.findByRole("button",{name:"Sync now"})).toBeEnabled();
+});
+
+it("shows independent failures and persistent processing status with retry", async () => {
+  const local=emptyState();
+  local.snapshot={...processingSnapshot(1,0,1),pipeline:{observedAt:100,recent:[{id:"old",episodeId:2,title:"Recovered",published:true}],workerError:"Worker failed",items:[{
+    id:"intake-1",episodeId:0,title:"Submitted video",podcastTitle:"Listen",stage:"blocked",state:"needs_attention",statusLabel:"Needs attention",message:"The source could not be resolved; link retained.",attempts:12,nextRetryAt:200,updatedAt:100,canRetry:true,stalled:true,
+  }]}};
+  vi.mocked(client.state).mockResolvedValue(local);
+  vi.mocked(client.syncError).mockReturnValue("Mac unavailable");
+  vi.mocked(downloads.downloadError).mockReturnValue("Storage full");
+  render(<OfflineSettings />);
+  const retry=await screen.findByRole("button",{name:"Retry Submitted video"});
+  expect(screen.getByText("Sync: Mac unavailable")).toBeInTheDocument();
+  expect(screen.getByText("Download: Storage full")).toBeInTheDocument();
+  expect(screen.getByText(/Recovered · Published/)).toBeInTheDocument();
+  expect(screen.getByText(/Worker stopped reporting progress/)).toBeInTheDocument();
+  fireEvent.click(retry);
+  await waitFor(()=>expect(client.network).toHaveBeenCalledWith("/pipeline/retry",{method:"POST",body:JSON.stringify({id:"intake-1"})}));
+  await waitFor(()=>expect(client.synchronize).toHaveBeenCalled());
+  await waitFor(()=>expect(retry).toBeEnabled());
+  vi.mocked(client.network).mockRejectedValueOnce(new Error("Mac unavailable"));
+  fireEvent.click(retry);
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Mac unavailable"));
+});
+
+it("exports operational diagnostics online and falls back to the saved status offline", async () => {
+  const create=vi.fn((_blob:Blob)=>"blob:diagnostics");
+  Object.defineProperty(URL,"createObjectURL",{configurable:true,value:create});
+  Object.defineProperty(URL,"revokeObjectURL",{configurable:true,value:vi.fn()});
+  vi.spyOn(HTMLAnchorElement.prototype,"click").mockImplementation(()=>{});
+  vi.spyOn(diagnostics,"readDiagnostics").mockReturnValue([{at:1,kind:"playback-error",detail:"private URL"}]);
+  vi.spyOn(diagnostics,"readMediaDiagnostics").mockResolvedValue([{at:2,kind:"media-error",detail:"private URL"}]);
+  vi.mocked(store.allDownloads).mockResolvedValue([{hash:"hash",episode:1,bytes:100,received:50,complete:false,touched:0}]);
+  const local=emptyState(); local.outbox=[{id:"secret",sequence:1,entity:"feedback",field:"private",value:"private content",base_revision:0}];
+  vi.mocked(client.state).mockResolvedValue(local);
+  await exportDiagnostics();
+  let body=await create.mock.calls[0][0].text();
+  expect(body).toContain("pods-diagnostics-v1"); expect(body).not.toContain("private content");
+  vi.mocked(client.network).mockRejectedValueOnce(new Error("offline"));
+  await exportDiagnostics(); body=await create.mock.calls[1][0].text(); expect(body).toContain('"unavailable": true');
+  render(<OfflineSettings />); fireEvent.click(await screen.findByRole("button",{name:"Export diagnostics"}));
+  await waitFor(()=>expect(create).toHaveBeenCalledTimes(3));
+});
+
+it("renders queued and retrying processing items with empty and stale activity", async () => {
+  const local=emptyState();
+  local.snapshot={...processingSnapshot(1,1,0),pipeline:{observedAt:100,recent:[],items:[{
+    id:"job",episodeId:1,title:"Working",podcastTitle:"Show",stage:"retry",state:"retry_scheduled",statusLabel:"Retry scheduled",message:"Network failed",attempts:1,nextRetryAt:200,updatedAt:100,canRetry:true,
+  },{id:"queued",episodeId:0,title:"Queued",podcastTitle:"Listen",stage:"queued",state:"queued",statusLabel:"Queued for processing",message:null,attempts:0,nextRetryAt:null,updatedAt:100,canRetry:false}]}};
+  vi.mocked(client.state).mockResolvedValue(local); const view=render(<OfflineSettings />);
+  expect(await screen.findByText("Working",{selector:"strong"})).toBeInTheDocument(); expect(screen.getByText(/Queued for processing/)).toBeInTheDocument();
+  view.unmount(); local.snapshot.pipeline!.items=[]; render(<OfflineSettings />);
+  expect(await screen.findByText("Nothing waiting for processing.")).toBeInTheDocument();
 });

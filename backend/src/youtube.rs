@@ -410,13 +410,7 @@ fn flat_channel_fields(output: &str) -> (Option<String>, Option<String>) {
 }
 
 fn ytdlp_output(args: &[String]) -> Result<String, Error> {
-    let output = Command::new(ytdlp_bin())
-        .args(args)
-        .output()
-        .map_err(|_| Error::Upstream("yt-dlp failed to start".into()))?;
-    if !output.status.success() {
-        return Err(Error::Upstream("yt-dlp could not read that YouTube URL".into()));
-    }
+    let output = crate::child_process::checked(Command::new(ytdlp_bin()).args(args),120,"yt-dlp lookup")?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 

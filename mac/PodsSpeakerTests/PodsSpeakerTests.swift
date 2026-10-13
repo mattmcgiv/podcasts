@@ -151,40 +151,13 @@ final class PodsSpeakerTests: XCTestCase {
         )
     }
 
-    func testPipelineRepositoryReadsSnapshotWithoutChangingDatabase() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pipeline-\(UUID().uuidString).sqlite")
-        defer { try? FileManager.default.removeItem(at: url) }
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(url.path, &database), SQLITE_OK)
-        let fixture = """
-            CREATE TABLE podcasts(id INTEGER, title TEXT);
-            CREATE TABLE episodes(id INTEGER, podcast_id INTEGER, title TEXT, published_at INTEGER);
-            CREATE TABLE browser_jobs(episode_id INTEGER, stage TEXT, error TEXT, priority INTEGER);
-            CREATE VIEW browser_pending_jobs AS SELECT * FROM browser_jobs WHERE stage!='ready';
-            INSERT INTO podcasts VALUES(1,'Show');
-            INSERT INTO episodes VALUES(1,1,'Active',1),(2,1,'Blocked',2),(3,1,'Done',3);
-            INSERT INTO browser_jobs VALUES(1,'transcribing','memory_busy',0),(2,'blocked','invalid audio',0),(3,'ready',NULL,0);
-            """
-        XCTAssertEqual(sqlite3_exec(database, fixture, nil, nil, nil), SQLITE_OK)
-        sqlite3_close(database)
-        let before = try Data(contentsOf: url)
-        let items = try PipelineRepository(databaseURL: url).snapshot()
-        XCTAssertEqual(items.map(\.title), ["Active", "Blocked"])
-        XCTAssertTrue(items[0].isWaiting)
-        XCTAssertEqual(items[1].attentionLabel, "invalid audio")
-        XCTAssertNil(items[0].progress)
-        XCTAssertEqual(try Data(contentsOf: url), before)
-        XCTAssertEqual(sqlite3_open(url.path, &database), SQLITE_OK)
-        XCTAssertEqual(sqlite3_exec(database, "ALTER TABLE browser_jobs ADD COLUMN completed_units INTEGER; ALTER TABLE browser_jobs ADD COLUMN total_units INTEGER; UPDATE browser_jobs SET completed_units=180000,total_units=240000 WHERE episode_id=1;", nil, nil, nil), SQLITE_OK)
-        sqlite3_close(database)
-        let migrated = try PipelineRepository(databaseURL: url).snapshot()
-        XCTAssertEqual(migrated[0].progress, 0.75)
-    }
-
-    func testPipelineRepositoryDoesNotCreateMissingDatabase() {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("missing-\(UUID().uuidString).sqlite")
-        XCTAssertThrowsError(try PipelineRepository(databaseURL: url).snapshot())
-        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    func testSharedStatusDecodesIntakeAndKeepsPauseInQueue() throws {
+        let data = Data(#"{"observedAt":100,"workerError":null,"items":[{"id":"submission","episodeId":0,"title":"Submitted video","podcastTitle":"Listen","stage":"blocked","state":"needs_attention","statusLabel":"Needs attention","blockingReason":null,"lastErrorMessage":"Lookup failed; link retained","completedUnits":null,"totalUnits":null,"canRetry":true},{"id":"episode:7","episodeId":7,"title":"Paused","podcastTitle":"Show","stage":"show_notes","state":"waiting","statusLabel":"Writing show notes","lastErrorMessage":"pipeline_paused","canRetry":false}]}"#.utf8)
+        let snapshot = try JSONDecoder().decode(PipelineSnapshot.self,from:data)
+        XCTAssertTrue(snapshot.items[0].needsAttention)
+        XCTAssertEqual(snapshot.items[0].canRetry,true)
+        XCTAssertEqual(snapshot.items[0].stageLabel,"Needs attention")
+        XCTAssertTrue(snapshot.items[1].isWaiting)
     }
 
     func testAttentionPagingShowsFiveItemsAndClampsPastTheLastPage() {
@@ -346,7 +319,7 @@ final class PodsSpeakerTests: XCTestCase {
             PipelineLibraryLink.preview(.channel),
             "Subscribe to this channel. The two newest videos will be prepared."
         )
-        XCTAssertEqual(PipelineLibraryLink.confirmation(.video), "Added that video to Listen.")
+        XCTAssertEqual(PipelineLibraryLink.confirmation(.video), "Queued for processing. Follow its status in Pipeline.")
         XCTAssertEqual(PipelineLibraryLink.confirmation(.podcast), "Subscribed.")
     }
 
@@ -360,7 +333,7 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertEqual(PipelineLibraryKind(rawValue: "article"), .article)
         XCTAssertEqual(
             PipelineLibraryLink.confirmation(.article),
-            "Added that article to Listen. It will be read aloud after processing."
+            "Queued for processing. Follow its status in Pipeline."
         )
         let fetching = PipelineEpisode(
             id: "1", episodeId: 1, title: "Story", podcastTitle: "Articles", stage: "fetching",
@@ -377,40 +350,4 @@ final class PodsSpeakerTests: XCTestCase {
         XCTAssertEqual(synthesizing.progress, 0.5)
     }
 
-    func testPendingYouTubeListenAppearsInTheQueueBeforeAJobExists() throws {
-        let episodes = PipelineListenQueue.episodes(
-            from: #"[{"url":"https://www.youtube.com/watch?v=O4G5neJScvU","attempts":0,"next_at":0}]"#,
-            now: 100
-        )
-        XCTAssertEqual(episodes.map(\.title), ["https://www.youtube.com/watch?v=O4G5neJScvU"])
-        XCTAssertEqual(episodes.map(\.podcastTitle), ["YouTube"])
-        XCTAssertEqual(episodes.map(\.stageLabel), ["Waiting to download"])
-        XCTAssertTrue(episodes[0].isWaiting)
-        let delayed = PipelineListenQueue.episodes(
-            from: #"[{"url":"https://youtu.be/abcdefghijk","attempts":1,"next_at":200}]"#,
-            now: 100
-        )
-        XCTAssertEqual(delayed.map(\.stageLabel), ["Waiting to retry"])
-
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pipeline-listen-\(UUID().uuidString).sqlite")
-        defer { try? FileManager.default.removeItem(at: url) }
-        var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(url.path, &database), SQLITE_OK)
-        let fixture = """
-            CREATE TABLE podcasts(id INTEGER, title TEXT);
-            CREATE TABLE episodes(id INTEGER, podcast_id INTEGER, title TEXT, published_at INTEGER);
-            CREATE TABLE browser_jobs(episode_id INTEGER, stage TEXT, error TEXT, priority INTEGER);
-            CREATE VIEW browser_pending_jobs AS SELECT * FROM browser_jobs WHERE stage!='ready';
-            CREATE TABLE settings(key TEXT, value TEXT);
-            INSERT INTO podcasts VALUES(1,'Show');
-            INSERT INTO episodes VALUES(1,1,'Active',1);
-            INSERT INTO browser_jobs VALUES(1,'show_notes',NULL,0);
-            INSERT INTO settings VALUES('browser_youtube_listen','[{\"url\":\"https://www.youtube.com/watch?v=O4G5neJScvU\",\"attempts\":0,\"next_at\":0}]');
-            """
-        XCTAssertEqual(sqlite3_exec(database, fixture, nil, nil, nil), SQLITE_OK)
-        sqlite3_close(database)
-        let items = try PipelineRepository(databaseURL: url).snapshot()
-        XCTAssertEqual(items.map(\.title), ["Active", "https://www.youtube.com/watch?v=O4G5neJScvU"])
-        XCTAssertTrue(items[1].isWaiting)
-    }
 }

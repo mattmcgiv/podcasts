@@ -1644,12 +1644,12 @@ fn pipeline_menu_ingests_a_channel_a_video_and_a_podcast_without_a_session() {
     let queued: String = backend
         .db
         .scalar_string(
-            "SELECT value FROM settings WHERE key='browser_youtube_listen'",
+            "SELECT source FROM browser_intake WHERE kind='video'",
             [],
         )
         .unwrap()
         .unwrap();
-    assert!(queued.contains("https://youtu.be/abcdefghijk"));
+    assert!(queued.contains("https://www.youtube.com/watch?v=abcdefghijk"));
 
     let podcast = backend.handle(library_request("https://feeds.example/show.xml"));
     assert_eq!(podcast.status_code, 201, "{}", String::from_utf8_lossy(&podcast.body));
@@ -1713,7 +1713,7 @@ fn pipeline_menu_queues_article_html_and_still_subscribes_feeds() {
     assert_eq!(article_body["kind"], "article");
     let queued: String = backend
         .db
-        .scalar_string("SELECT value FROM settings WHERE key='browser_article_listen'", [])
+        .scalar_string("SELECT source FROM browser_intake WHERE kind='article'", [])
         .unwrap()
         .unwrap();
     assert!(queued.contains("https://example.com/story"));
@@ -2111,7 +2111,7 @@ fn article_over_word_cap_fails_fast() {
         .unwrap()
         .unwrap();
     assert_eq!(job_int(&backend, "attempts", episode), 1);
-    assert!(job_string(&backend, "error", episode).contains("exceeds 12000 words"));
+    assert!(job_string(&backend, "error", episode).contains("word limit"));
 }
 
 fn feedback_payload(id: &str, sequence: i64, report: &str, value: Value) -> Value {

@@ -199,23 +199,7 @@ impl SynthesizeManifest {
 }
 
 pub fn enqueue(db: &crate::db::Database, url: &str) -> Result<(), Error> {
-    let queued = db
-        .scalar_string("SELECT value FROM settings WHERE key=?", [LISTEN_SETTING])?
-        .unwrap_or_else(|| "[]".into());
-    let mut items: Vec<PendingArticle> = serde_json::from_str(&queued).unwrap_or_default();
-    if !items.iter().any(|item| item.url == url) {
-        items.push(PendingArticle {
-            url: url.to_string(),
-            attempts: 0,
-            next_at: 0,
-        });
-        let value = serde_json::to_string(&items).map_err(|e| Error::Invalid(e.to_string()))?;
-        db.execute(
-            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [LISTEN_SETTING, &value],
-        )?;
-    }
-    Ok(())
+    db.with_transaction(|tx| { crate::reliability::enqueue(tx,"article",url)?; Ok(()) })
 }
 
 #[cfg(test)]
@@ -355,13 +339,7 @@ mod tests {
         enqueue(&db, "https://example.com/a").unwrap();
         enqueue(&db, "https://example.com/a").unwrap();
         enqueue(&db, "https://example.com/b").unwrap();
-        let raw = db
-            .scalar_string("SELECT value FROM settings WHERE key=?", [LISTEN_SETTING])
-            .unwrap()
-            .unwrap();
-        let items: Vec<PendingArticle> = serde_json::from_str(&raw).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].attempts, 0);
-        assert_eq!(items[0].next_at, 0);
+        assert_eq!(db.scalar_i64("SELECT COUNT(*) FROM browser_intake",[]).unwrap(),Some(2));
+        assert_eq!(db.scalar_i64("SELECT SUM(attempts+next_retry_at) FROM browser_intake",[]).unwrap(),Some(0));
     }
 }

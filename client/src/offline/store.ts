@@ -9,12 +9,23 @@ export interface ArtifactManifest {
   width?: number;
   height?: number;
 }
+export interface PipelineItem {
+  id: string; episodeId: number; title: string; podcastTitle: string;
+  stage: string; state: string; statusLabel: string; message: string | null;
+  attempts: number; nextRetryAt: number | null; updatedAt: number; canRetry: boolean;
+  completedUnits?: number | null; totalUnits?: number | null; stalled?: boolean;
+}
+export interface PipelineStatus {
+  observedAt: number; items: PipelineItem[]; workerError?: string | null;
+  recent: { id: string; episodeId: number; title: string; published: boolean }[];
+}
 export interface Snapshot {
   version: number; cursor: number; replace: boolean; episodes: EpisodeDetail[]; shows: Show[];
   settings: Record<string, unknown>; versions: Record<string, number>;
   writers?: Record<string, { device: string; updated_at: number }>;
   refresh_status?: RefreshStatus;
   processing?: { pending: number; failed?: number; blocked?: number; storage: { used: number; limit: number; free: number; blocked: boolean } };
+  pipeline?: PipelineStatus;
   notifications?: ProcessingNotification[];
   feedback?: FeedbackStatus[];
 }

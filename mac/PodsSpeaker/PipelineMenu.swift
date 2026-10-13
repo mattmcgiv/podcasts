@@ -13,14 +13,22 @@ struct PipelineEpisode: Decodable, Identifiable {
     let completedUnits: Int?
     let totalUnits: Int?
 
-    var needsAttention: Bool { ["failed", "blocked", "review"].contains(stage) || blockingReason != nil }
-    var isWaiting: Bool { ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy", "power_unplugged", "power_status_unavailable", "pipeline_paused"].contains(lastErrorMessage ?? "") }
+    var state: String? = nil
+    var statusLabel: String? = nil
+    var nextRetryAt: Int? = nil
+    var canRetry: Bool? = nil
+    var updatedAt: Int? = nil
+    var stalled: Bool? = nil
+
+    var needsAttention: Bool { state == "needs_attention" || ["failed", "blocked", "review"].contains(stage) || blockingReason != nil }
+    var isWaiting: Bool { state == "queued" || state == "waiting" || state == "retry_scheduled" || ["queued", "downloaded", "retry"].contains(stage) || ["memory_busy", "omlx_busy", "power_unplugged", "power_status_unavailable", "pipeline_paused"].contains(lastErrorMessage ?? "") }
     var progress: Double? {
         guard let completedUnits, let totalUnits, totalUnits > 0,
               completedUnits >= 0, completedUnits <= totalUnits else { return nil }
         return Double(completedUnits) / Double(totalUnits)
     }
     var stageLabel: String {
+        if let statusLabel { return statusLabel }
         switch stage {
         case "queued": return "Waiting to download"
         case "downloading": return "Downloading audio"
@@ -41,6 +49,8 @@ struct PipelineEpisode: Decodable, Identifiable {
     }
 
     func displayStage(power: PipelinePower) -> String {
+        if stalled == true { return "Worker stopped reporting progress" }
+        if let nextRetryAt, stage == "retry" { return "Retry at \(Date(timeIntervalSince1970: Double(nextRetryAt)).formatted(date: .omitted, time: .shortened))" }
         if lastErrorMessage == "memory_busy" { return "\(stageLabel) · paused for memory" }
         if lastErrorMessage == "omlx_busy" { return "\(stageLabel) · waiting for local AI" }
         if lastErrorMessage == "pipeline_paused" { return "\(stageLabel) · paused" }
@@ -288,94 +298,29 @@ enum PipelineTroubleshoot {
     }
 }
 
-struct PipelineRepository {
-    var databaseURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".local/share/pods/data/pods.sqlite")
-
-    func snapshot() throws -> [PipelineEpisode] {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK else {
-            sqlite3_close(database)
-            throw CocoaError(.fileReadUnknown)
-        }
-        defer { sqlite3_close(database) }
-        sqlite3_busy_timeout(database, 100)
-        var columns: OpaquePointer?
-        var hasProgress = false
-        if sqlite3_prepare_v2(database, "SELECT completed_units,total_units FROM browser_pending_jobs LIMIT 0", -1, &columns, nil) == SQLITE_OK {
-            hasProgress = true
-        }
-        sqlite3_finalize(columns)
-        let sql = """
-            SELECT j.episode_id, e.title, p.title, j.stage, j.error, \(hasProgress ? "j.completed_units,j.total_units" : "NULL,NULL")
-            FROM browser_pending_jobs j JOIN episodes e ON e.id=j.episode_id
-            JOIN podcasts p ON p.id=e.podcast_id
-            ORDER BY j.priority DESC, e.published_at, e.id
-            """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { throw CocoaError(.fileReadCorruptFile) }
-        defer { sqlite3_finalize(statement) }
-        func string(_ column: Int32) -> String? {
-            guard let value = sqlite3_column_text(statement, column) else { return nil }
-            return String(cString: value)
-        }
-        var items: [PipelineEpisode] = []
-        while true {
-            let result = sqlite3_step(statement)
-            if result == SQLITE_DONE { break }
-            guard result == SQLITE_ROW else { throw CocoaError(.fileReadUnknown) }
-            let episodeID = Int(sqlite3_column_int64(statement, 0))
-            items.append(PipelineEpisode(id: String(episodeID), episodeId: episodeID,
-                title: string(1) ?? "Untitled episode", podcastTitle: string(2) ?? "Podcast",
-                stage: string(3) ?? "queued", blockingReason: nil, lastErrorMessage: string(4),
-                completedUnits: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 5)),
-                totalUnits: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 6))))
-        }
-        items.append(contentsOf: Self.pendingListens(database))
-        return items
-    }
-
-    private static func pendingListens(_ database: OpaquePointer?) -> [PipelineEpisode] {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "SELECT value FROM settings WHERE key='browser_youtube_listen'", -1, &statement, nil) == SQLITE_OK else {
-            return []
-        }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else { return [] }
-        return PipelineListenQueue.episodes(from: String(cString: value))
-    }
+struct PipelineSnapshot: Decodable {
+    let items: [PipelineEpisode]
+    let observedAt: Int
+    let workerError: String?
 }
 
-enum PipelineListenQueue {
-    struct Item: Decodable {
-        let url: String
-        let attempts: Int
-        let nextAt: Int
-
-        enum CodingKeys: String, CodingKey {
-            case url
-            case attempts
-            case nextAt = "next_at"
-        }
+enum PipelineClient {
+    static let endpoint = "http://127.0.0.1:18180/api/internal/pipeline"
+    static func snapshot() async throws -> PipelineSnapshot {
+        var request = URLRequest(url: URL(string: endpoint)!)
+        request.timeoutInterval = 5
+        let (data,response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw CocoaError(.fileReadUnknown) }
+        return try JSONDecoder().decode(PipelineSnapshot.self,from: data)
     }
-
-    static func episodes(from json: String, now: Int = Int(Date().timeIntervalSince1970)) -> [PipelineEpisode] {
-        guard let data = json.data(using: .utf8),
-              let items = try? JSONDecoder().decode([Item].self, from: data) else { return [] }
-        return items.enumerated().map { index, item in
-            let waiting = item.attempts == 0 || item.nextAt <= now
-            return PipelineEpisode(
-                id: "listen:\(item.url)",
-                episodeId: -(index + 1),
-                title: item.url,
-                podcastTitle: "YouTube",
-                stage: waiting ? "queued" : "retry",
-                blockingReason: nil,
-                lastErrorMessage: nil,
-                completedUnits: nil,
-                totalUnits: nil
-            )
-        }
+    static func retry(_ id: String) async throws {
+        var request = URLRequest(url: URL(string: endpoint + "/retry")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json",forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["id":id])
+        let (_,response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 202 else { throw CocoaError(.fileWriteUnknown) }
     }
 }
 
@@ -386,6 +331,7 @@ final class PipelineMonitor: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var unavailable = false
     @Published private(set) var refreshing = false
+    @Published private(set) var workerError: String?
 
     func refresh() async {
         guard !refreshing else { return }
@@ -394,10 +340,11 @@ final class PipelineMonitor: ObservableObject {
         let power = await Task.detached(priority: .utility) { PipelinePower.sample() }.value
         if !Task.isCancelled { self.power = power }
         do {
-            let snapshot = try await Task.detached(priority: .utility) { try PipelineRepository().snapshot() }.value
+            let snapshot = try await PipelineClient.snapshot()
             guard !Task.isCancelled else { return }
-            items = snapshot
-            lastUpdated = Date()
+            items = snapshot.items
+            workerError = snapshot.workerError
+            lastUpdated = Date(timeIntervalSince1970: Double(snapshot.observedAt))
             unavailable = false
         } catch {
             if !Task.isCancelled { unavailable = true }
@@ -426,10 +373,11 @@ struct PipelineMenu: View {
     @StateObject private var pause = PipelinePauseController()
     @State private var dismissedAttentionIDs = PipelineAttentionDismissals.load()
     @State private var attentionPage = 0
+    @State private var showDismissed = false
     @State private var troubleshootError: String?
     private var presentation: PipelinePresentation { PipelinePresentation(items: monitor.items) }
     private var attention: [PipelineEpisode] {
-        PipelineAttentionDismissals.visibleAttention(in: monitor.items, dismissedEpisodeIDs: dismissedAttentionIDs)
+        showDismissed ? presentation.stuck : PipelineAttentionDismissals.visibleAttention(in: monitor.items, dismissedEpisodeIDs: dismissedAttentionIDs)
     }
 
     var body: some View {
@@ -443,6 +391,8 @@ struct PipelineMenu: View {
                     .font(.system(size: 11)).foregroundStyle(PipelineTheme.danger)
                     .padding(.bottom, 10)
             }
+            if let error = monitor.workerError { Text(error).font(.system(size: 11)).foregroundStyle(PipelineTheme.danger) }
+            if presentation.stuck.count > attention.count { Button("Show all unresolved issues") { showDismissed = true }.buttonStyle(.plain).padding(.bottom,8) }
             sectionHeading("PROCESSING")
             rule.padding(.top, 9)
             if presentation.processing.isEmpty {
@@ -475,7 +425,8 @@ struct PipelineMenu: View {
                     page: $attentionPage,
                     error: troubleshootError,
                     onDismiss: dismiss,
-                    onTroubleshoot: troubleshoot
+                    onTroubleshoot: troubleshoot,
+                    onRetry: retry
                 )
                 .padding(.top, 10)
             }
@@ -534,6 +485,13 @@ struct PipelineMenu: View {
         PipelineAttentionDismissals.save(dismissedAttentionIDs)
     }
 
+    private func retry(_ episode: PipelineEpisode) {
+        Task {
+            do { try await PipelineClient.retry(episode.id); await monitor.refresh(); troubleshootError = nil }
+            catch { troubleshootError = "Retry was not accepted. Refresh the status and try again." }
+        }
+    }
+
     private func troubleshoot(_ episode: PipelineEpisode) {
         do {
             try PipelineTroubleshoot.open(for: episode)
@@ -569,9 +527,9 @@ enum PipelineLibraryLink {
     static func confirmation(_ kind: PipelineLibraryKind) -> String {
         switch kind {
         case .channel: return "Subscribed. The two newest videos will be prepared."
-        case .video: return "Added that video to Listen."
+        case .video: return "Queued for processing. Follow its status in Pipeline."
         case .podcast: return "Subscribed."
-        case .article: return "Added that article to Listen. It will be read aloud after processing."
+        case .article: return "Queued for processing. Follow its status in Pipeline."
         case .invalid: return refusal
         }
     }
@@ -798,6 +756,7 @@ private struct PipelineAttentionList: View {
     let error: String?
     let onDismiss: (PipelineEpisode) -> Void
     let onTroubleshoot: (PipelineEpisode) -> Void
+    let onRetry: (PipelineEpisode) -> Void
 
     private var pageCount: Int { PipelineAttentionPaging.pageCount(itemCount: items.count) }
     private var visible: [PipelineEpisode] { PipelineAttentionPaging.slice(items, page: page) }
@@ -816,7 +775,7 @@ private struct PipelineAttentionList: View {
                 if index > 0 {
                     Rectangle().fill(PipelineTheme.danger.opacity(0.18)).frame(height: 1)
                 }
-                PipelineAttentionRow(episode: episode, onDismiss: { onDismiss(episode) }, onTroubleshoot: { onTroubleshoot(episode) })
+                PipelineAttentionRow(episode: episode, onDismiss: { onDismiss(episode) }, onTroubleshoot: { onTroubleshoot(episode) }, onRetry: { onRetry(episode) })
             }
             if pageCount > 1 {
                 HStack(spacing: 12) {
@@ -855,6 +814,7 @@ private struct PipelineAttentionRow: View {
     let episode: PipelineEpisode
     let onDismiss: () -> Void
     let onTroubleshoot: () -> Void
+    let onRetry: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -868,6 +828,8 @@ private struct PipelineAttentionRow: View {
                 .lineLimit(2)
                 .help("\(episode.title)\n\(episode.attentionLabel)")
             HStack(spacing: 10) {
+                if episode.canRetry == true { Button("Retry",action: onRetry).buttonStyle(.plain) }
+                Button("Copy details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString("\(episode.title)\nID: \(episode.id)\n\(episode.stageLabel)\n\(episode.attentionLabel)",forType: .string) }.buttonStyle(.plain)
                 Button(action: onTroubleshoot) {
                     Text("Troubleshoot (AI)")
                         .font(.system(size: 11, weight: .semibold))
@@ -887,7 +849,7 @@ private struct PipelineAttentionRow: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss attention for \(episode.title)")
-                .help("Permanently dismiss this issue from the pipeline menu")
+                .help("Hide this notice. Show all unresolved issues to see it again.")
             }
         }
         .padding(.vertical, 8)

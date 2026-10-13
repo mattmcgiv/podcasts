@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { emptyState } from "../offline/store";
 import type { ProcessingNotification } from "../types";
 import * as client from "../offline/client";
@@ -139,3 +139,24 @@ it("keeps entries visible and offers retry if saving the dismissal fails", async
   expect(screen.getByRole("listitem")).toHaveTextContent("Alpha Hour");
   expect(screen.getByRole("button", { name: "Clear all" })).toBeEnabled();
 });
+
+it("keeps unresolved intake visible on Listen after notification dismissal", async () => {
+  const local=emptyState();
+  local.notificationsClearedThrough=999;
+  local.snapshot={version:1,cursor:1,replace:true,episodes:[],shows:[],settings:{},versions:{},pipeline:{observedAt:100,recent:[],items:[{
+    id:"intake",episodeId:0,title:"Video",podcastTitle:"Listen",stage:"blocked",state:"needs_attention",statusLabel:"Needs attention",message:"Lookup failed",attempts:12,nextRetryAt:null,updatedAt:100,canRetry:true,
+  }]}};
+  vi.mocked(client.state).mockResolvedValue(local);
+  const view=render(<ProcessingNotifications />);
+  fireEvent.click(await screen.findByRole("button",{name:"Open processing activity"}));
+  expect(window.location.hash).toBe("#/settings");
+  local.snapshot.pipeline!.items=[]; window.dispatchEvent(new Event("pods-offline-changed"));
+  await waitFor(()=>expect(screen.queryByRole("button",{name:"Open processing activity"})).not.toBeInTheDocument());
+  local.snapshot.pipeline!.workerError="Worker unavailable"; window.dispatchEvent(new Event("pods-offline-changed"));
+  expect(await screen.findByText("Worker unavailable")).toBeInTheDocument();
+  view.unmount();render(<NotificationsView />);
+  fireEvent.click(await screen.findByRole("button",{name:"View processing activity and retry options"}));
+  expect(window.location.hash).toBe("#/settings");
+});
+
+it("labels failures from rendering and article stages", () => { expect(failureAreaLabel("processing")).toBe("Processing"); });

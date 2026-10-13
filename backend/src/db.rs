@@ -15,6 +15,7 @@ impl Database {
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
+        migrate_pipeline_tracking(&conn)?;
         migrate_browser_operation_identity(&conn)?;
         migrate_browser_feedback_pipeline(&conn)?;
         Ok(Self {
@@ -29,6 +30,7 @@ impl Database {
         migrate_audio_metadata_columns(&conn)?;
         conn.execute_batch(include_str!("browser_schema.sql"))?;
         migrate_browser_progress(&conn)?;
+        migrate_pipeline_tracking(&conn)?;
         migrate_browser_operation_identity(&conn)?;
         migrate_browser_feedback_pipeline(&conn)?;
         Ok(Self {
@@ -276,5 +278,16 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), Erro
         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;
+    Ok(())
+}
+
+fn migrate_pipeline_tracking(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (name, definition) in [("updated_at","INTEGER NOT NULL DEFAULT 0"),("stage_started_at","INTEGER NOT NULL DEFAULT 0"),("owner","INTEGER"),("error_code","TEXT"),("last_progress_at","INTEGER NOT NULL DEFAULT 0")] {
+        let exists: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('browser_jobs') WHERE name=?",[name],|r|r.get(0))?;
+        if exists == 0 { conn.execute(&format!("ALTER TABLE browser_jobs ADD COLUMN {name} {definition}"),[])?; }
+    }
+    conn.execute("UPDATE browser_jobs SET stage='blocked' WHERE stage IN ('retry','review') AND attempts >= CASE WHEN error_code IN ('dns','network','timeout','youtube','source_forbidden') THEN 12 ELSE 4 END",[])?;
+    conn.execute("UPDATE browser_jobs SET stage='retry' WHERE stage='review'",[])?;
+    conn.execute("UPDATE browser_jobs SET error='automatic processing failed validation' WHERE error LIKE '%requires review%'",[])?;
     Ok(())
 }

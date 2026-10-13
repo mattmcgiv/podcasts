@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { navigate } from "../router";
 import { clearNotifications, state } from "../offline/client";
+import type { PipelineStatus } from "../offline/store";
 import { visibleNotifications } from "../offline/store";
 import type { ProcessingFailureCategory, ProcessingFailureOutcome, ProcessingNotification } from "../types";
 
@@ -16,6 +17,8 @@ export function failureAreaLabel(category: ProcessingFailureCategory): string {
       return "Ad classification";
     case "show_notes":
       return "Show notes";
+    case "processing":
+      return "Processing";
   }
 }
 
@@ -41,7 +44,8 @@ function newestFirst(items: ProcessingNotification[]): ProcessingNotification[] 
   return items.slice().sort((a, b) => b.id - a.id);
 }
 
-function useCachedNotifications(): ProcessingNotification[] | null {
+function useCachedNotifications() {
+  const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [items, setItems] = useState<ProcessingNotification[] | null>(null);
   useEffect(() => {
     let active = true;
@@ -50,7 +54,7 @@ function useCachedNotifications(): ProcessingNotification[] | null {
       const current = ++generation;
       void state()
         .then((local) => {
-          if (active && current === generation) setItems(newestFirst(visibleNotifications(local)));
+          if (active && current === generation) { setItems(newestFirst(visibleNotifications(local))); setPipeline(local.snapshot?.pipeline ?? null); }
         })
         .catch(() => {
           if (active && current === generation) setItems([]);
@@ -63,11 +67,19 @@ function useCachedNotifications(): ProcessingNotification[] | null {
       window.removeEventListener("pods-offline-changed", refresh);
     };
   }, []);
-  return items;
+  return { items, pipeline };
 }
 
 export function ProcessingNotifications() {
-  const items = useCachedNotifications();
+  const { items, pipeline } = useCachedNotifications();
+  if (pipeline) {
+    const issues = pipeline.items.filter(item => item.state === "needs_attention" || item.state === "retry_scheduled" || item.stalled);
+    if (!issues.length && !pipeline.workerError) return null;
+    return <button type="button" className="notification-stack" aria-label="Open processing activity" onClick={() => navigate("#/settings")}>
+      <span className="notification-bar"><span className="notification-bar-title">{pipeline.workerError || `${issues.length} processing ${issues.length === 1 ? "item needs" : "items need"} attention`}</span>
+        <span className="notification-bar-meta">Your work is retained. Open activity for the reason and retry options.</span></span>
+    </button>;
+  }
   if (items == null || items.length === 0) return null;
   const visible = items.slice(0, COMPACT_NOTIFICATION_LIMIT);
   const label = items.length === 1
@@ -88,7 +100,8 @@ export function ProcessingNotifications() {
 }
 
 export function NotificationsView() {
-  const items = useCachedNotifications() ?? [];
+  const cached = useCachedNotifications();
+  const items = cached.items ?? [];
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   async function clearAll() {
@@ -118,6 +131,7 @@ export function NotificationsView() {
         )}
       </header>
       {error && <p role="alert">{error}</p>}
+      {cached.pipeline && <button type="button" className="settings-btn" onClick={() => navigate("#/settings")}>View processing activity and retry options</button>}
       {items.length === 0 ? (
         <p className="muted">No processing failures.</p>
       ) : (
