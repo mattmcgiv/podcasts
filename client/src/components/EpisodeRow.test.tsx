@@ -1,11 +1,19 @@
-import { act, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { downloadEpisode, downloadErrorFor } from "../offline/downloads";
 import { setDownloadProgress } from "../offline/progress";
 import { episode } from "../test/mockApi";
 import { EpisodeRow } from "./EpisodeRow";
 
+vi.mock("../offline/downloads", () => ({
+  downloadEpisode: vi.fn(() => Promise.resolve()),
+  downloadErrorFor: vi.fn(() => null),
+}));
+
 afterEach(() => {
   delete window.PODS_LOCAL_CLIENT;
+  vi.mocked(downloadErrorFor).mockReturnValue(null);
+  vi.mocked(downloadEpisode).mockClear();
 });
 
 function renderRow(local: boolean) {
@@ -123,6 +131,45 @@ describe("EpisodeRow client download progress", () => {
     expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "50");
     act(() => setDownloadProgress({ episode: 2, received: 8, total: 8 }));
     expect(screen.getByText("Downloading 0%")).toBeInTheDocument();
+  });
+
+  it("shows why a partial download stopped and retries it from the row", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    vi.mocked(downloadErrorFor).mockReturnValue("Download stalled. Check the connection, then retry.");
+    render(
+      <EpisodeRow
+        item={episode({
+          id: 5,
+          title: "Stuck",
+          downloaded: false,
+          download_received: 1_000_000,
+          download_total: 10_000_000,
+          ad_removal_state: "ad-free",
+          ad_removal_stage: "ready",
+          ad_removal_action: "retry",
+        })}
+        onPlay={() => {}}
+        actionLabel="Mark played"
+        onAction={() => {}}
+      />,
+    );
+    expect(screen.getByText("Download paused · 10%")).toBeInTheDocument();
+    expect(screen.getByText("Download stalled. Check the connection, then retry.")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuetext", "Download paused · 10%");
+    expect(screen.queryByRole("button", { name: "Retry ad-free preparation" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry download" }));
+    expect(downloadEpisode).toHaveBeenCalledWith(5);
+    await act(async () => {});
+    // A live transfer for this episode clears the paused state.
+    act(() => setDownloadProgress({ episode: 5, received: 5_000_000, total: 10_000_000 }));
+    expect(screen.getByText("Downloading 50%")).toBeInTheDocument();
+    expect(screen.queryByText(/stalled/)).not.toBeInTheDocument();
+    // A later offline-state change re-reads the recorded failure.
+    act(() => setDownloadProgress(null));
+    vi.mocked(downloadErrorFor).mockReturnValue(null);
+    act(() => { window.dispatchEvent(new Event("pods-offline-changed")); });
+    expect(screen.getByText("Downloading 10%")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry download" })).not.toBeInTheDocument();
   });
 });
 

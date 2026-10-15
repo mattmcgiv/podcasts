@@ -5,6 +5,7 @@ import { adStageLabel, fmtDate, fmtRemaining, progressFraction } from "../lib";
 import type { AdRemovalBlockingReason, AdRemovalStage, EpisodeItem } from "../types";
 import { Artwork } from "./Artwork";
 import { offlineEnabled } from "../offline/client";
+import { downloadEpisode, downloadErrorFor } from "../offline/downloads";
 import { currentDownloadProgress, onDownloadProgress } from "../offline/progress";
 
 interface Props {
@@ -34,17 +35,32 @@ interface LocalAdStatus {
   action: EpisodeItem["ad_removal_action"];
 }
 
-function useDownloadFraction(item: EpisodeItem): number | null {
+interface DownloadStatus {
+  fraction: number | null;
+  /** True while this episode's bytes are actively arriving. */
+  live: boolean;
+  /** The recorded failure that stopped a partial download, when no transfer is running. */
+  error: string | null;
+}
+
+function useDownloadStatus(item: EpisodeItem): DownloadStatus {
   const [live, setLive] = useState(currentDownloadProgress);
+  const [, setRevision] = useState(0);
   useEffect(() => onDownloadProgress(setLive), []);
-  if (item.downloaded) return null;
+  useEffect(() => {
+    const bump = () => setRevision(value => value + 1);
+    window.addEventListener("pods-offline-changed", bump);
+    return () => window.removeEventListener("pods-offline-changed", bump);
+  }, []);
+  if (item.downloaded) return { fraction: null, live: false, error: null };
   if (live?.episode === item.id && live.total > 0) {
-    return Math.min(1, Math.max(0, live.received / live.total));
+    return { fraction: Math.min(1, Math.max(0, live.received / live.total)), live: true, error: null };
   }
   if (item.download_total && item.download_total > 0) {
-    return Math.min(1, Math.max(0, (item.download_received ?? 0) / item.download_total));
+    const fraction = Math.min(1, Math.max(0, (item.download_received ?? 0) / item.download_total));
+    return { fraction, live: false, error: downloadErrorFor(item.id) };
   }
-  return null;
+  return { fraction: null, live: false, error: null };
 }
 
 function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
@@ -73,8 +89,10 @@ export function EpisodeRow({
   playRequiresAdFree = false,
 }: Props) {
   const progress = progressFraction(item);
-  const downloadFraction = useDownloadFraction(item);
-  const downloading = downloadFraction != null;
+  const download = useDownloadStatus(item);
+  const downloading = download.fraction != null;
+  const downloadPaused = downloading && !download.live && download.error != null;
+  const [downloadRetrying, setDownloadRetrying] = useState(false);
   const [adBusy, setAdBusy] = useState(false);
   const [adError, setAdError] = useState<string | null>(null);
   // Local fallback overlay for non-Listen owners (no onAdRemovalStage). It is
@@ -99,13 +117,25 @@ export function EpisodeRow({
   const effectiveAction = localAd ? localAd.action : item.ad_removal_action;
   const playLocked = playRequiresAdFree && effectiveState !== "ad-free";
   const playDisabled = playLocked || (offlineEnabled() && !item.downloaded);
-  const downloadPercent = downloading ? Math.round(downloadFraction * 100) : 0;
+  const downloadPercent = download.fraction != null ? Math.round(download.fraction * 100) : 0;
+  const downloadLabel = downloadPaused ? `Download paused · ${downloadPercent}%` : `Downloading ${downloadPercent}%`;
   const adWindowProgress =
     effectiveStage === "classifying" &&
     item.ad_removal_total_windows != null &&
     item.ad_removal_total_windows > 0
       ? Math.min(1, (item.ad_removal_completed_windows ?? 0) / item.ad_removal_total_windows)
       : null;
+
+  async function retryDownload() {
+    setDownloadRetrying(true);
+    try {
+      await downloadEpisode(item.id);
+    } catch {
+      // The row shows the failure recorded for this episode.
+    } finally {
+      setDownloadRetrying(false);
+    }
+  }
 
   async function runAdRemovalAction() {
     const action = effectiveAction;
@@ -143,7 +173,7 @@ export function EpisodeRow({
       <button
         className="row-main"
         disabled={playDisabled}
-        title={playLocked ? "Waiting for ad removal" : downloading ? "Downloading" : undefined}
+        title={playLocked ? "Waiting for ad removal" : downloadPaused ? "Download paused" : downloading ? "Downloading" : undefined}
         onClick={() => {
           if (playDisabled) return;
           onPlay(item);
@@ -162,7 +192,7 @@ export function EpisodeRow({
           </span>
           {downloading ? (
             <>
-              <span className="download-state">Downloading {downloadPercent}%</span>
+              <span className={`download-state${downloadPaused ? " is-paused" : ""}`}>{downloadLabel}</span>
               <span
                 className="download-progress"
                 role="progressbar"
@@ -170,10 +200,11 @@ export function EpisodeRow({
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={downloadPercent}
-                aria-valuetext={`Downloading ${downloadPercent}%`}
+                aria-valuetext={downloadLabel}
               >
                 <span style={{ width: `${downloadPercent === 0 ? 0 : Math.max(4, downloadPercent)}%` }} />
               </span>
+              {downloadPaused && <span className="download-error">{download.error}</span>}
             </>
           ) : (
             <>
@@ -205,7 +236,19 @@ export function EpisodeRow({
           )}
         </span>
       </button>
-      {effectiveAction && (
+      {downloadPaused && (
+        <button
+          type="button"
+          className="ad-removal-action ad-removal-retry download-retry"
+          aria-label="Retry download"
+          title="Retry download"
+          disabled={downloadRetrying}
+          onClick={() => void retryDownload()}
+        >
+          {downloadRetrying ? "…" : "Retry"}
+        </button>
+      )}
+      {effectiveAction && !downloadPaused && (
         <button
           type="button"
           className={`ad-removal-action${effectiveAction === "retry" ? " ad-removal-retry" : ""}`}

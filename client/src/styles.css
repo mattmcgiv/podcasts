@@ -508,7 +508,9 @@ input {
 }
 
 .ad-removal-state.is-failed,
-.ad-removal-error {
+.ad-removal-error,
+.download-state.is-paused,
+.download-error {
   color: var(--danger, #ff7b72);
 }
 
@@ -569,7 +571,8 @@ input {
   .download-progress > span { transition: none; }
 }
 
-.ad-removal-error {
+.ad-removal-error,
+.download-error {
   font-size: 11px;
   line-height: 1.25;
 }

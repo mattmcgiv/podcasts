@@ -5,12 +5,45 @@ import { currentDownloadProgress, setDownloadProgress } from "./progress";
 import * as store from "./store";
 import type { ArtifactManifest, Download, LocalState, Preferences } from "./store";
 
+/** A chunk transfer is abandoned once no bytes have arrived for this long. A slow link that keeps delivering keeps going. */
+let chunkStallMs = 20_000;
+/** Waits before re-requesting one chunk after a dropped or stalled transfer. */
+let chunkRetryDelays = [1_000, 3_000];
+
+/** `device` failures (no Mac, no storage, page hidden) stop the queue; `episode` failures skip one episode. */
+export class DownloadError extends Error {
+  constructor(message: string, readonly scope: "episode" | "device") {
+    super(message);
+    this.name = "DownloadError";
+  }
+}
+
+/** A dropped connection or a stalled body. Retried before it becomes a device-scope failure. */
+class TransientError extends Error {}
+
+const STALLED = "Download stalled. Check the connection, then retry.";
+const UNREACHABLE = "Mac unavailable. Check Tailscale, then retry.";
+const MAC_ERROR = "Mac unavailable. Reconnect to resume.";
+
 let activeHash: string | null = null;
-let running: Promise<void> | null = null;
+let tail: Promise<void> | null = null;
+const pending = new Map<number, Promise<void>>();
 let error: string | null = null;
+const errors = new Map<number, string>();
 export const downloadError = () => error;
+/** The failure recorded for one episode's download, cleared when a new attempt starts. */
+export const downloadErrorFor = (id: number): string | null => errors.get(id) ?? null;
 export function protectPlayingArtifact(hash: string | null): void { activeHash = hash; }
 const changed = () => { emitEpisodesChanged(); window.dispatchEvent(new Event("pods-offline-changed")); };
+
+/** Test-only: shorten the stall window and retry delays. No-op in production builds. */
+export function configureDownloadRetriesForTests(delays: number[], stallMs = chunkStallMs): void {
+  if (import.meta.env.PROD) return;
+  chunkRetryDelays = delays;
+  chunkStallMs = stallMs;
+  errors.clear();
+  error = null;
+}
 
 export async function savePreferences(preferences: Preferences): Promise<void> {
   if (!Number.isFinite(preferences.limit) || preferences.limit < 100 * 1024 ** 2 || !Number.isInteger(preferences.count) || preferences.count < 0 || preferences.count > 1000) throw new Error("Invalid download limits.");
@@ -36,6 +69,7 @@ export async function cleanupPlayedDownload(id: number): Promise<void> {
   if (episode?.manifest?.hash) hashes.add(episode.manifest.hash);
   for (const hash of hashes) if (hash !== activeHash) await store.deleteDownload(hash);
   if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+  errors.delete(id);
   if (hashes.size) changed();
 }
 
@@ -62,20 +96,41 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
     await store.deleteDownload(download.hash);
     used -= download.bytes;
   }
-  if (used + manifest.bytes > s.preferences.limit) throw new Error("Download limit reached. Increase the storage limit.");
+  if (used + manifest.bytes > s.preferences.limit) throw new DownloadError("Download limit reached. Increase the storage limit.", "device");
   const estimate = await navigator.storage?.estimate?.();
-  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < manifest.bytes + 20 * 1024 ** 2) throw new Error("Browser storage is full. Increase the storage limit or free space on this device.");
+  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < manifest.bytes + 20 * 1024 ** 2) throw new DownloadError("Browser storage is full. Increase the storage limit or free space on this device.", "device");
 }
 
+/**
+ * Transfers run one at a time. A second request for an episode that is already running or
+ * queued shares that attempt instead of starting another pass over the same chunks.
+ */
 export function downloadEpisode(id: number): Promise<void> {
-  if (running) return running.then(() => downloadEpisode(id));
-  running = download(id).catch(caught => {
-    error = caught instanceof Error ? caught.message : "Download interrupted.";
-    logDiagnostic("download-error", `episode_id=${id} error=${error}`);
-    throw caught;
-  })
-    .finally(() => { running = null; setDownloadProgress(null); changed(); });
-  return running;
+  const queued = pending.get(id);
+  if (queued) return queued;
+  errors.delete(id);
+  const previous = tail ?? Promise.resolve();
+  const task = previous
+    .then(() => download(id), caught => {
+      // Nothing behind a device-wide failure can succeed right now; episode failures only skip one episode.
+      if (caught instanceof DownloadError && caught.scope === "device") throw caught;
+      return download(id);
+    })
+    .catch(caught => {
+      error = caught instanceof Error ? caught.message : "Download interrupted.";
+      errors.set(id, error);
+      logDiagnostic("download-error", `episode_id=${id} error=${error}`);
+      throw caught;
+    })
+    .finally(() => {
+      pending.delete(id);
+      if (tail === task) tail = null;
+      if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+      changed();
+    });
+  pending.set(id, task);
+  tail = task;
+  return task;
 }
 
 async function persistDownload(manifest: ArtifactManifest, id: number, received: number, complete: boolean): Promise<void> {
@@ -86,48 +141,111 @@ async function persistDownload(manifest: ArtifactManifest, id: number, received:
   else setDownloadProgress({ episode: id, received, total: manifest.bytes });
 }
 
+async function abandon(manifest: ArtifactManifest, id: number): Promise<void> {
+  await store.deleteDownload(manifest.hash);
+  if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+}
+
 async function download(id: number): Promise<void> {
   const s = await state();
   if (!downloadEligible(id, s)) return;
   const manifest = s.snapshot?.episodes.find(e => e.id === id)?.manifest;
-  if (!manifest) throw new Error("Processed episode unavailable.");
-  if (manifest.chunk_size !== 1024 ** 2 || manifest.chunks.length !== Math.ceil(manifest.bytes / manifest.chunk_size)) throw new Error("Invalid audio manifest.");
+  if (!manifest) throw new DownloadError("Processed episode unavailable.", "episode");
+  if (manifest.chunk_size !== 1024 ** 2 || manifest.chunks.length !== Math.ceil(manifest.bytes / manifest.chunk_size)) throw new DownloadError("Invalid audio manifest.", "episode");
+  const existing = await store.readRecord<Download>("downloads", manifest.hash);
+  if (existing?.complete) return;
   await makeRoom(manifest);
   await store.writeRecord("meta", `manifest:${manifest.hash}`, manifest);
-  await persistDownload(manifest, id, 0, false);
+  // A resumed download keeps showing the bytes it already holds while stored chunks are re-verified.
+  let shown = Math.min(existing?.received ?? 0, manifest.bytes);
+  await persistDownload(manifest, id, shown, false);
   changed();
   let received = 0;
   for (let index = 0; index < manifest.chunks.length; index++) {
-    if (!downloadEligible(id, await state())) {
-      await store.deleteDownload(manifest.hash);
-      if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
-      return;
-    }
-    if (document.visibilityState === "hidden") throw new Error("Download paused. Open Pods to resume.");
+    if (!downloadEligible(id, await state())) return abandon(manifest, id);
+    if (document.visibilityState === "hidden") throw new DownloadError("Download paused. Open Pods to resume.", "device");
     const key = `${manifest.hash}:${index}`;
     const cached = await store.readRecord<ArrayBuffer>("chunks", key);
     if (cached && await verifyChunk(cached, manifest.chunks[index])) {
       received += cached.byteLength;
-      await persistDownload(manifest, id, received, false);
+      if (received > shown) { shown = received; await persistDownload(manifest, id, shown, false); }
       continue;
     }
     const start = index * manifest.chunk_size, end = Math.min(manifest.bytes, start + manifest.chunk_size) - 1;
-    const response = await fetch(`${backendBase()}/api/artifacts/${manifest.hash}`, {
-      credentials: "include", headers: { Range: `bytes=${start}-${end}`, "If-Range": `"${manifest.hash}"` }, signal: AbortSignal.timeout(15000) });
-    if (response.status !== 206 || response.headers.get("content-range") !== `bytes ${start}-${end}/${manifest.bytes}`) throw new Error("Mac unavailable or audio changed. Reconnect to resume.");
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength !== end - start + 1 || !await verifyChunk(bytes, manifest.chunks[index])) throw new Error("Audio verification failed. Retry the download.");
+    const bytes = await fetchChunk(manifest, start, end);
+    if (bytes.byteLength !== end - start + 1 || !await verifyChunk(bytes, manifest.chunks[index])) throw new DownloadError("Audio verification failed. Retry the download.", "episode");
     await store.writeRecord("chunks", key, bytes);
     received += bytes.byteLength;
+    shown = received;
     await persistDownload(manifest, id, received, false);
   }
-  if (!downloadEligible(id, await state())) {
-    await store.deleteDownload(manifest.hash);
-    if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
-    return;
-  }
+  if (!downloadEligible(id, await state())) return abandon(manifest, id);
   await persistDownload(manifest, id, manifest.bytes, true);
   error = null;
+}
+
+/** One chunk, retried through dropped connections and stalls while the page stays visible. */
+async function fetchChunk(manifest: ArtifactManifest, start: number, end: number): Promise<ArrayBuffer> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchRange(manifest, start, end);
+    } catch (caught) {
+      if (!(caught instanceof TransientError)) throw caught;
+      const delay = chunkRetryDelays[attempt];
+      if (delay == null || document.visibilityState === "hidden") throw new DownloadError(caught.message, "device");
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function fetchRange(manifest: ArtifactManifest, start: number, end: number): Promise<ArrayBuffer> {
+  const controller = new AbortController();
+  let stallTimer = 0;
+  let stallReject: (reason: Error) => void = () => {};
+  const stalled = new Promise<never>((_, reject) => { stallReject = reject; });
+  stalled.catch(() => { /* Only raced against reads. */ });
+  const arm = () => {
+    window.clearTimeout(stallTimer);
+    stallTimer = window.setTimeout(() => { controller.abort(); stallReject(new TransientError(STALLED)); }, chunkStallMs);
+  };
+  arm();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    let response: Response;
+    try {
+      response = await Promise.race([fetch(`${backendBase()}/api/artifacts/${manifest.hash}`, {
+        credentials: "include", headers: { Range: `bytes=${start}-${end}`, "If-Range": `"${manifest.hash}"` }, signal: controller.signal }), stalled]);
+    } catch (caught) {
+      throw caught instanceof TransientError ? caught : new TransientError(UNREACHABLE);
+    }
+    if (response.status >= 500) throw new TransientError(MAC_ERROR);
+    if (response.status !== 206 || response.headers.get("content-range") !== `bytes ${start}-${end}/${manifest.bytes}`) {
+      throw new DownloadError("Mac unavailable or audio changed. Reconnect to resume.", response.status === 401 || response.status === 403 ? "device" : "episode");
+    }
+    arm();
+    const expected = end - start + 1;
+    reader = response.body?.getReader();
+    if (!reader) return await response.arrayBuffer();
+    const buffer = new Uint8Array(expected);
+    let offset = 0;
+    for (;;) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try {
+        next = await Promise.race([reader.read(), stalled]);
+      } catch (caught) {
+        throw caught instanceof TransientError ? caught : new TransientError(UNREACHABLE);
+      }
+      if (next.done) break;
+      arm();
+      if (offset + next.value.byteLength > expected) throw new DownloadError("Audio verification failed. Retry the download.", "episode");
+      buffer.set(next.value, offset);
+      offset += next.value.byteLength;
+    }
+    return buffer.buffer.slice(0, offset);
+  } finally {
+    window.clearTimeout(stallTimer);
+    void reader?.cancel().catch(() => {});
+  }
 }
 
 export async function verifyChunk(bytes: ArrayBuffer, expected: string): Promise<boolean> {
@@ -149,6 +267,10 @@ export async function prefetch(): Promise<void> {
     if (planned > s.preferences.limit) break;
     const downloaded = episode.manifest && await store.readRecord<Download>("downloads", episode.manifest.hash);
     if (downloaded?.complete) continue;
-    try { await downloadEpisode(episode.id); } catch { break; }
+    try { await downloadEpisode(episode.id); }
+    catch (caught) {
+      // One broken episode no longer blocks the rest of the queue; a device-wide failure still does.
+      if (!(caught instanceof DownloadError) || caught.scope === "device") break;
+    }
   }
 }

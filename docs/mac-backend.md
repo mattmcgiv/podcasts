@@ -125,6 +125,9 @@ The default automatic download queue contains the oldest fifty unplayed episodes
 The file currently playing is protected from eviction.
 Eviction removes played episodes first, then the most recent unplayed episodes.
 Downloads pause while the app is hidden. Verified 1 MiB chunks remain available for the next attempt.
+A resumed download keeps its stored byte count on screen while it re-verifies those chunks; it does not restart from 0%.
+A chunk request is retried twice after a dropped connection, a Mac error, or 20 seconds without data. A slow link that keeps delivering is not cut off.
+After the retries fail, the row shows "Download paused" with the reason and a Retry button. The next sync also retries. One failed episode no longer blocks the rest of the download queue; only a device-wide failure (no Mac, no storage, hidden page) stops it.
 Only complete downloads can play. The service worker supports byte ranges. It does not load the whole episode into memory.
 
 Playback positions, played state, subscriptions, and app settings enter a durable local queue before synchronization.

@@ -5,7 +5,7 @@ import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writ
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
-import { cleanupPlayedDownload, downloadEpisode, downloadError, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
+import { cleanupPlayedDownload, configureDownloadRetriesForTests, DownloadError, downloadEpisode, downloadError, downloadErrorFor, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
 import { readDiagnostics, readMediaDiagnostics } from "./diagnostics";
@@ -31,6 +31,7 @@ beforeEach(() => {
   window.PODS_API_BASE = "https://sync.pods.mcgiv.dev:8443";
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   protectPlayingArtifact(null);
+  configureDownloadRetriesForTests([0, 0], 5000);
 });
 afterEach(async () => {
   await synchronize().catch(() => {});
@@ -629,11 +630,123 @@ describe("verified downloads and local Range playback", () => {
     });
     const first = downloadEpisode(1);
     const second = downloadEpisode(1);
+    expect(second).toBe(first); // Overlapping prefetch passes share one transfer instead of re-verifying every chunk.
     await vi.waitFor(() => expect(currentDownloadProgress()?.episode).toBe(1));
     finishFetch(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
     await first;
     await second;
     expect((await allDownloads())[0].complete).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/artifacts/"))).toHaveLength(1);
+  });
+  async function digestOf(bytes: ArrayBuffer): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
+  }
+  const artifactCalls = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/artifacts/"));
+  it("resumes a partial download from its stored bytes without restarting the shown progress", async () => {
+    const first = new Uint8Array(1024 ** 2).fill(1).buffer;
+    const second = new TextEncoder().encode("abcdefgh").buffer;
+    const total = first.byteLength + second.byteLength;
+    const chunks = [await digestOf(first), await digestOf(second)];
+    await seed();
+    await updateState(s => { s.snapshot!.episodes[0].manifest = { ...manifest, bytes: total, chunks }; });
+    await writeRecord("chunks", `${hash}:0`, first);
+    await writeRecord("downloads", hash, { hash, episode: 1, bytes: total, received: first.byteLength, complete: false, touched: 0 });
+    const seen: DownloadProgress[] = [];
+    const stop = onDownloadProgress(next => { if (next) seen.push(next); });
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const range = new Headers(init?.headers).get("Range");
+      expect(range).toBe(`bytes=${first.byteLength}-${total - 1}`);
+      return new Response(second, { status: 206, headers: { "Content-Range": `bytes ${first.byteLength}-${total - 1}/${total}` } });
+    });
+    await downloadEpisode(1);
+    stop();
+    expect(artifactCalls()).toHaveLength(1);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(Math.min(...seen.map(p => p.received))).toBe(first.byteLength);
+    expect(await readRecord("downloads", hash)).toMatchObject({ complete: true, received: total });
+  });
+  it("retries a dropped chunk, then records the failure for the episode", async () => {
+    const bytes = await prepareAudio();
+    let calls = 0;
+    vi.mocked(fetch).mockImplementation(async () => {
+      if (++calls < 3) throw new TypeError("Failed to fetch");
+      return new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } });
+    });
+    await downloadEpisode(1);
+    expect(artifactCalls()).toHaveLength(3);
+    expect(downloadErrorFor(1)).toBeNull();
+    expect((await allDownloads())[0].complete).toBe(true);
+    await deleteDownload(hash);
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+    const failure = await downloadEpisode(1).then(() => null, caught => caught as DownloadError);
+    expect(failure).toBeInstanceOf(DownloadError);
+    expect(failure?.scope).toBe("device");
+    expect(failure?.message).toContain("Mac unavailable");
+    expect(artifactCalls()).toHaveLength(6);
+    expect(downloadErrorFor(1)).toContain("Mac unavailable");
+    expect((await allDownloads())[0]).toMatchObject({ complete: false, received: 0 });
+    vi.mocked(fetch).mockResolvedValue(new Response("", { status: 503 }));
+    await expect(downloadEpisode(1)).rejects.toThrow("Reconnect to resume");
+    expect(artifactCalls()).toHaveLength(9);
+  });
+  it("gives up on a stalled request or body once the stall window passes", async () => {
+    await prepareAudio();
+    configureDownloadRetriesForTests([0], 30);
+    vi.mocked(fetch).mockImplementation(() => new Promise(() => {}));
+    await expect(downloadEpisode(1)).rejects.toThrow("stalled");
+    expect(artifactCalls()).toHaveLength(2);
+    vi.mocked(fetch).mockImplementation(async () => new Response(new ReadableStream({ start() {} }), { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await expect(downloadEpisode(1)).rejects.toThrow("stalled");
+    expect(artifactCalls()).toHaveLength(4);
+    expect(downloadErrorFor(1)).toContain("stalled");
+    vi.mocked(fetch).mockRejectedValue(new Error("Mac unavailable")); // afterEach's sync must not hang on a stalled mock.
+  });
+  it("does not wait to retry once the page is hidden", async () => {
+    await prepareAudio();
+    vi.mocked(fetch).mockImplementation(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      throw new TypeError("Failed to fetch");
+    });
+    await expect(downloadEpisode(1)).rejects.toThrow("Mac unavailable");
+    expect(artifactCalls()).toHaveLength(1);
+  });
+  it("rejects bodies that overrun or come back empty", async () => {
+    await prepareAudio();
+    vi.mocked(fetch).mockResolvedValue(new Response("abcdefghi", { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await expect(downloadEpisode(1)).rejects.toThrow("verification");
+    vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await expect(downloadEpisode(1)).rejects.toThrow("verification");
+    expect(artifactCalls()).toHaveLength(2);
+  });
+  it("skips one broken episode in the queue but stops on a device-wide failure", async () => {
+    const bytes = await prepareAudio();
+    const digestHex = await digestOf(bytes);
+    await updateState(s => { s.snapshot!.episodes[1].manifest!.chunks = [digestHex]; });
+    vi.mocked(fetch).mockImplementation(async url => new Response(String(url).includes(hash) ? "corrupt!" : bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await prefetch();
+    expect((await allDownloads()).map(d => [d.episode, d.complete])).toEqual([[1, false], [2, true]]);
+    expect(downloadErrorFor(1)).toContain("verification");
+    expect(downloadErrorFor(2)).toBeNull();
+    await deleteDownload(hash); await deleteDownload("b".repeat(64));
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+    await prefetch();
+    expect(artifactCalls().filter(([url]) => String(url).includes("b".repeat(64)))).toHaveLength(1);
+    expect(artifactCalls().filter(([url]) => String(url).includes(hash))).toHaveLength(4);
+    expect(downloadErrorFor(1)).toContain("Mac unavailable");
+    expect(downloadErrorFor(2)).toBeNull();
+    await cleanupPlayedDownload(1);
+    expect(downloadErrorFor(1)).toBeNull();
+  });
+  it("queues a second episode behind a device failure without another transfer", async () => {
+    await prepareAudio();
+    vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+    const first = downloadEpisode(1);
+    const second = downloadEpisode(2);
+    await expect(first).rejects.toThrow("Mac unavailable");
+    await expect(second).rejects.toThrow("Mac unavailable");
+    expect(artifactCalls()).toHaveLength(3);
+    expect(downloadErrorFor(2)).toContain("Mac unavailable");
   });
   it("rejects episodes with a malformed manifest", async () => {
     await seed();
