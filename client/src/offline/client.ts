@@ -3,7 +3,7 @@ import { applyThemePreference, currentThemePreference, THEME_PREFERENCE_KEY } fr
 import { logDiagnostic, readDiagnostics } from "./diagnostics";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import type { EpisodeDetail, FeedbackStatus, ProcessingNotification, RefreshStatus, Settings } from "../types";
-import { cleanupPlayedDownload, prefetch, sweepStaleDownloads } from "./downloads";
+import { automaticDownloadPlan, cleanupPlayedDownload, requestAutomaticDownloads, sweepStaleDownloads } from "./downloads";
 import { currentDownloadProgress } from "./progress";
 import { allDownloads, readRecord, updateState, type ArtifactManifest, type Download, type LocalState, type Operation, type Snapshot } from "./store";
 
@@ -330,9 +330,16 @@ function isProcessingNotification(value: unknown): value is ProcessingNotificati
 
 export function validateSnapshot(snapshot: Snapshot): void {
   if (snapshot.version !== 1 || !snapshot.replace || !Array.isArray(snapshot.episodes) || !Array.isArray(snapshot.shows)) throw new Error("Unsupported Mac library format.");
+  const ids = new Set<number>();
   if (snapshot.episodes.some(e => {
     const extension = e.manifest?.media === "video" ? "mp4" : "m4a";
-    return e.ad_removal_state !== "ad-free" || !e.manifest || !/^[a-f0-9]{64}$/.test(e.manifest.hash)
+    const duplicate = ids.has(e.id); ids.add(e.id);
+    return duplicate || !Number.isSafeInteger(e.id) || e.id <= 0
+      || e.ad_removal_state !== "ad-free" || !e.manifest || e.manifest.episode_id !== e.id
+      || e.manifest.version !== 1 || !Number.isSafeInteger(e.manifest.bytes) || e.manifest.bytes <= 0
+      || e.manifest.chunk_size !== 1024 ** 2 || !Array.isArray(e.manifest.chunks)
+      || e.manifest.chunks.length !== Math.ceil(e.manifest.bytes / e.manifest.chunk_size)
+      || e.manifest.chunks.some(hash => !/^[a-f0-9]{64}$/.test(hash)) || !/^[a-f0-9]{64}$/.test(e.manifest.hash)
       || e.audio_url !== `/_media/${e.manifest.hash}.${extension}`;
   })) throw new Error("Mac supplied an unpublished episode.");
   if (snapshot.notifications === undefined && snapshot.feedback === undefined) return;
@@ -419,7 +426,8 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
   const s = await state();
   const snapshot = s.snapshot ? applyOverlay(s.snapshot, s.outbox) : { episodes: [], shows: [], settings: {}, processing: undefined, refresh_status: undefined };
   const downloads = await allDownloads();
-  const episodes = snapshot.episodes.map(e => withClientDownload({ ...e, position_revision: s.outbox.find(o => o.entity === String(e.id) && o.field === "position")?.base_revision ?? s.snapshot?.versions[`${e.id}:position`] ?? 0 }, downloads));
+  const queued = new Set(automaticDownloadPlan(s, downloads).ids);
+  const episodes = snapshot.episodes.map(e => withClientDownload({ ...e, download_queued: queued.has(e.id), position_revision: s.outbox.find(o => o.entity === String(e.id) && o.field === "position")?.base_revision ?? s.snapshot?.versions[`${e.id}:position`] ?? 0 }, downloads));
   const url = new URL(path, "https://pods.invalid");
   const route = url.pathname;
   const method = init.method ?? "GET";
@@ -438,12 +446,13 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
       if (markedPlayed) {
         window.dispatchEvent(new CustomEvent("pods-close-episode", { detail: { id: episode.id } }));
         try { await cleanupPlayedDownload(episode.id); } catch { /* Sweep on bootstrap/prefetch/sync. */ }
+        requestAutomaticDownloads();
       } else {
         // Unplayed restarts from the beginning. A finished episode's playhead sits at its end.
         if (episode.position_secs > 0 && episode.manifest) {
           await enqueue(String(episode.id), "position", { seconds: 0, artifact_hash: episode.manifest.hash, original_seconds: 0 });
         }
-        void prefetch().catch(() => {});
+        requestAutomaticDownloads();
       }
     }
     else if (match[2] === "position") {

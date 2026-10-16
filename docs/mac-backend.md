@@ -30,6 +30,14 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
+### October 16 full download lifecycle review
+
+See [download reliability review](download-reliability-review.md) for the client/server audit, reproduced failures and automated regressions. The final client passes 534 tests and the existing TypeScript/coverage checks; the server passes 624 tests with the required `passkey` feature. An isolated browser upgrade preserved existing downloads, rejected an old version-2 database writer, automatically refilled after played/limit changes, and kept the preceding episode playable in both tabs. All four screenshot episodes checked on the Mac matched their manifest sizes and complete/chunk hashes.
+
+The new shell activates after its files finish installing; refresh loads it even if another tab remains open. IndexedDB version 3 preserves existing data and prevents old eviction code from writing. A rollback build must retain database version 3 or later. Queued rows now say “Waiting to download,” and the automatic queue responds immediately to space/count changes.
+
+Cloudflare reported Success. Public HTML, `sw.js`, and `assets/main-B5vCUQ_J.js` matched the final build byte-for-byte. The Mac service was installed/restarted as release `20261016-154718`; its binary matched the release build and auth-status returned 200. Server implementation was unchanged; its new regression covers neighboring artifact transfers. Physical iPhone activation remains unobserved.
+
 ### October 16 completed-download retention repair
 
 Two client regressions were reproduced before the fix: automatic downloads could evict a completed manual download to make room, and an in-flight list read could swallow the completion refresh. Unplayed downloads are now retained, automatic passes share one queue and budget against all saved files, and a refresh arriving during a read is replayed afterward. A storage-limit notice explains why an automatic item is skipped.
@@ -142,7 +150,7 @@ Broader automatic monitoring remains appropriate.
 ## Offline behavior
 
 Listen lists all published unplayed episodes, including episodes not downloaded yet. Undownloaded rows offer a Download button and remain unavailable for playback until complete.
-The default automatic download queue considers the oldest fifty unplayed episodes, within a 2 GiB limit. An episode that exceeds the remaining budget is skipped so later smaller episodes can still download.
+The default automatic download queue fills up to fifty unplayed episodes, oldest first, within a 2 GiB limit. An episode that exceeds the remaining budget is skipped without consuming a queue slot, so later smaller episodes can still download. Marking played or changing the limits starts refill immediately; queued rows say "Waiting to download" instead of requiring a Download tap.
 The file currently playing is protected from eviction.
 Only played or archived downloads can be reclaimed. Unplayed downloads are retained, including manual downloads outside the automatic selection. Automatic transfers reserve space against all retained downloads and skip episodes that do not fit; a storage-limit notice explains how to make room.
 Downloads pause while the app is hidden. Verified 1 MiB chunks remain available for the next attempt.

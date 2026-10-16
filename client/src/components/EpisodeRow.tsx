@@ -90,6 +90,7 @@ export function EpisodeRow({
 }: Props) {
   const progress = progressFraction(item);
   const download = useDownloadStatus(item);
+  const queued = item.download_queued && !item.downloaded && !download.error && !download.live;
   const downloading = download.fraction != null;
   const downloadPaused = downloading && !download.live;
   const needsDownload = offlineEnabled() && !item.downloaded && item.played_at == null && item.ad_removal_state === "ad-free";
@@ -119,7 +120,7 @@ export function EpisodeRow({
   const playLocked = playRequiresAdFree && effectiveState !== "ad-free";
   const playDisabled = playLocked || (offlineEnabled() && !item.downloaded);
   const downloadPercent = download.fraction != null ? Math.round(download.fraction * 100) : 0;
-  const downloadLabel = downloadPaused ? `Download paused · ${downloadPercent}%` : `Downloading ${downloadPercent}%`;
+  const downloadLabel = queued ? "Waiting to download" : downloadPaused ? `Download paused · ${downloadPercent}%` : `Downloading ${downloadPercent}%`;
   const adWindowProgress =
     effectiveStage === "classifying" &&
     item.ad_removal_total_windows != null &&
@@ -213,7 +214,7 @@ export function EpisodeRow({
                 className={`ad-removal-state is-${effectiveState}`}
                 style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
               >
-                {needsDownload ? "Not downloaded" : adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
+                {needsDownload ? (queued ? "Waiting to download" : "Not downloaded") : adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
               </span>
               {adWindowProgress != null && (
                 <span
@@ -238,7 +239,7 @@ export function EpisodeRow({
           )}
         </span>
       </button>
-      {(downloadPaused || (needsDownload && !downloading)) && (
+      {!queued && (downloadPaused || (needsDownload && !downloading)) && (
         <button
           type="button"
           className="ad-removal-action ad-removal-retry download-retry"

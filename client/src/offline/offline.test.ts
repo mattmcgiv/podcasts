@@ -946,6 +946,7 @@ describe("automatic Listen downloads", () => {
     await seedComplete(1, hash, true);
     await seedComplete(2, other, true);
     await writeRecord("meta", "unrelated", { keep: true });
+    await updateState(s => { s.snapshot!.episodes[0].played_at = 1; });
     await cleanupPlayedDownload(1);
     await cleanupPlayedDownload(1);
     expect(await allDownloads()).toEqual([expect.objectContaining({ hash: other, episode: 2 })]);
@@ -1155,7 +1156,7 @@ describe("offline storage failures", () => {
 
   it("rejects instead of hanging when the stored database is newer than this build", async () => {
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open("pods-offline-v1", 3);
+      const request = indexedDB.open("pods-offline-v1", 4);
       request.onsuccess = () => { request.result.close(); resolve(); };
       request.onerror = () => reject(request.error);
     });

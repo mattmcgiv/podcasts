@@ -1032,6 +1032,50 @@ fn cors_and_authenticated_artifact_range_contract() {
     );
 }
 
+#[test]
+fn downloading_neighboring_publications_never_changes_their_library_state() {
+    use sha2::{Digest, Sha256};
+    let (backend, _temp, first) = fixture();
+    let bytes = vec![42u8; pods_backend::browser::CHUNK_SIZE + 17];
+    let second = Manifest {
+        episode_id: 2,
+        hash: hex::encode(Sha256::digest(&bytes)),
+        bytes: bytes.len() as u64,
+        chunks: bytes.chunks(pods_backend::browser::CHUNK_SIZE)
+            .map(|chunk| hex::encode(Sha256::digest(chunk))).collect(),
+        ..first.clone()
+    };
+    backend.artifacts.install(&format!("published/{}.m4a", second.hash), &bytes).unwrap();
+    backend.db.execute("INSERT INTO browser_publications VALUES(?,?,'[{\"id\":\"n0\",\"title\":\"Intro\"}]',0)",
+        rusqlite::params![2, json!(second).to_string()]).unwrap();
+    let before = snapshot(&backend).unwrap();
+    for publication in [&second, &first, &second] {
+        let mut downloaded = Vec::new();
+        for (index, digest) in publication.chunks.iter().enumerate() {
+            let start = index as u64 * publication.chunk_size as u64;
+            let end = (start + publication.chunk_size as u64).min(publication.bytes) - 1;
+            let response = backend.handle(HttpRequest::new("GET", format!("/api/artifacts/{}", publication.hash))
+                .with_header("range", format!("bytes={start}-{end}"))
+                .with_header("if-range", format!("\"{}\"", publication.hash)));
+            assert_eq!(response.status_code, 206);
+            assert_eq!(response.headers["Content-Range"], format!("bytes {start}-{end}/{}", publication.bytes));
+            assert_eq!(response.headers["etag"], format!("\"{}\"", publication.hash));
+            assert_eq!(hex::encode(Sha256::digest(&response.body)), *digest);
+            downloaded.extend_from_slice(&response.body);
+        }
+        assert_eq!(hex::encode(Sha256::digest(&downloaded)), publication.hash);
+        let after = snapshot(&backend).unwrap();
+        assert_eq!(after["episodes"], before["episodes"]);
+        assert_eq!(after["versions"], before["versions"]);
+    }
+    // A played change has exactly one target; requesting the next artifact is read-only.
+    apply_actions(&backend, action("played-one", 1, "played", json!(true), 0)).unwrap();
+    let after = snapshot(&backend).unwrap();
+    assert!(after["episodes"][0]["played_at"].is_number());
+    assert!(after["episodes"][1]["played_at"].is_null());
+    assert_eq!(after["episodes"][1]["manifest"], before["episodes"][1]["manifest"]);
+}
+
 fn device_row(backend: &Backend, client: &str) -> Option<(String, i64, i64, i64)> {
     backend
         .db

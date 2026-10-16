@@ -10,7 +10,9 @@ worker.addEventListener("install", event => {
     const paths: string[] = await fetch("/offline-assets.json", { cache: "no-store" }).then(r => r.json());
     const cache = await caches.open(SHELL);
     await cache.addAll(paths);
-    // Activate on the next app launch, without replacing code beneath active playback.
+    // An older open tab must not pin broken download code indefinitely. Existing
+    // pages keep their JS/playback; their next reload receives this complete shell.
+    await worker.skipWaiting();
   })());
 });
 worker.addEventListener("activate", event => {

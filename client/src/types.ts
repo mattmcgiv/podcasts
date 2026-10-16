@@ -19,6 +19,7 @@ export interface EpisodeItem {
   position_revision?: number;
   manifest?: import("./offline/store").ArtifactManifest;
   downloaded?: boolean;
+  download_queued?: boolean;
   /** Bytes stored so far for an in-progress client download. */
   download_received?: number;
   /** Total audio bytes for an in-progress client download. */

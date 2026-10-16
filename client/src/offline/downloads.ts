@@ -26,9 +26,15 @@ const UNREACHABLE = "Mac unavailable. Check Tailscale, then retry.";
 const MAC_ERROR = "Mac unavailable. Reconnect to resume.";
 
 let activeHash: string | null = null;
+let releasePlaying: (() => void) | null = null;
+let playingGeneration = 0;
 let tail: Promise<void> | null = null;
 let automaticPass: Promise<void> | null = null;
+let automaticAgain = false;
+export const DOWNLOAD_QUEUE_EVENT = "pods-download-queue";
+export const requestAutomaticDownloads = () => window.dispatchEvent(new Event(DOWNLOAD_QUEUE_EVENT));
 let queueNotice: string | null = null;
+let channel: BroadcastChannel | null = null;
 export const downloadQueueNotice = () => queueNotice;
 const pending = new Map<number, Promise<void>>();
 let error: string | null = null;
@@ -36,8 +42,26 @@ const errors = new Map<number, string>();
 export const downloadError = () => error;
 /** The failure recorded for one episode's download, cleared when a new attempt starts. */
 export const downloadErrorFor = (id: number): string | null => errors.get(id) ?? null;
-export function protectPlayingArtifact(hash: string | null): void { activeHash = hash; }
-const changed = () => { emitEpisodesChanged(); window.dispatchEvent(new Event("pods-offline-changed")); };
+export function protectPlayingArtifact(hash: string | null): void {
+  const generation = ++playingGeneration;
+  releasePlaying?.(); releasePlaying = null;
+  activeHash = hash;
+  if (hash && navigator.locks) void navigator.locks.request(`pods-playing:${hash}`, { mode: "shared" }, () => {
+    if (generation !== playingGeneration) return;
+    return new Promise<void>(resolve => { releasePlaying = resolve; });
+  }).catch(() => {});
+}
+const changed = (broadcast = true) => {
+  emitEpisodesChanged(); window.dispatchEvent(new Event("pods-offline-changed"));
+  if (broadcast) channel?.postMessage("changed");
+};
+
+export function listenForDownloadChanges(): () => void {
+  if (typeof BroadcastChannel === "undefined") return () => {};
+  channel = new BroadcastChannel("pods-downloads");
+  channel.onmessage = () => { changed(false); requestAutomaticDownloads(); };
+  return () => { channel?.close(); channel = null; };
+}
 
 /** Test-only: shorten the stall window and retry delays. No-op in production builds. */
 export function configureDownloadRetriesForTests(delays: number[], stallMs = chunkStallMs): void {
@@ -53,6 +77,7 @@ export async function savePreferences(preferences: Preferences): Promise<void> {
   if (!Number.isFinite(preferences.limit) || preferences.limit < 100 * 1024 ** 2 || !Number.isInteger(preferences.count) || preferences.count < 0 || preferences.count > 1000) throw new Error("Invalid download limits.");
   await store.updateState(s => { s.preferences = { limit: preferences.limit, count: preferences.count }; });
   changed();
+  requestAutomaticDownloads();
 }
 
 function downloadEligible(id: number, s: LocalState): boolean {
@@ -71,10 +96,26 @@ export async function cleanupPlayedDownload(id: number): Promise<void> {
   const episode = (s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes.find(e => e.id === id) : undefined)
     ?? s.snapshot?.episodes.find(e => e.id === id);
   if (episode?.manifest?.hash) hashes.add(episode.manifest.hash);
-  for (const hash of hashes) if (hash !== activeHash) await store.deleteDownload(hash);
-  if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
+  let removed = false;
+  for (const hash of hashes) if (hash !== activeHash) {
+    const remove = async () => {
+      const deleted = await store.deleteDownload(hash, latest => {
+        const episodes = latest.snapshot ? applyOverlay(latest.snapshot, latest.outbox).episodes : [];
+        const owner = episodes.find(e => e.id === id);
+        // A stale sweep or shared content must not erase an unplayed download.
+        return owner != null && (owner.played_at != null || owner.archived_at != null)
+          && !episodes.some(e => e.manifest?.hash === hash && e.played_at == null && e.archived_at == null);
+      });
+      removed ||= deleted;
+    };
+    // Playback may be in a different tab. Skip reclamation while it holds this
+    // artifact; never wait for a whole episode to finish before servicing the queue.
+    if (navigator.locks) await navigator.locks.request(`pods-playing:${hash}`, { ifAvailable: true }, lock => lock ? remove() : undefined);
+    else await remove();
+  }
+  if (removed && currentDownloadProgress()?.episode === id) setDownloadProgress(null);
   errors.delete(id);
-  if (hashes.size) changed();
+  if (removed) changed();
 }
 
 export async function sweepStaleDownloads(): Promise<void> {
@@ -88,24 +129,7 @@ export async function sweepStaleDownloads(): Promise<void> {
 async function makeRoom(manifest: ArtifactManifest): Promise<void> {
   const s = await state();
   const downloads = await store.allDownloads();
-  let used = downloads.filter(d => d.hash !== manifest.hash).reduce((total, d) => total + d.bytes, 0);
-  const current = s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes : [];
-  // Never evict an unplayed download to fetch another one: the next automatic
-  // pass would fetch the evicted episode again and evict this one in return.
-  const candidates = downloads.filter(d => {
-    const episode = current.find(e => e.id === d.episode);
-    return d.hash !== activeHash && d.hash !== manifest.hash
-      && episode != null && (episode.played_at != null || episode.archived_at != null);
-  });
-  candidates.sort((a, b) => {
-    const ae = current.find(e => e.id === a.episode), be = current.find(e => e.id === b.episode);
-    return Number(be?.played_at != null) - Number(ae?.played_at != null) || (be?.published_at ?? Infinity) - (ae?.published_at ?? Infinity);
-  });
-  for (const download of candidates) {
-    if (used + manifest.bytes <= s.preferences.limit) break;
-    await store.deleteDownload(download.hash);
-    used -= download.bytes;
-  }
+  const used = downloads.filter(d => d.hash !== manifest.hash).reduce((total, d) => total + d.bytes, 0);
   if (used + manifest.bytes > s.preferences.limit) throw new DownloadError("Download limit reached. Increase the storage limit.", "device");
   const estimate = await navigator.storage?.estimate?.();
   const existing = downloads.find(d => d.hash === manifest.hash);
@@ -123,10 +147,10 @@ export function downloadEpisode(id: number): Promise<void> {
   errors.delete(id);
   const previous = tail ?? Promise.resolve();
   const task = previous
-    .then(() => download(id), caught => {
+    .then(() => exclusiveDownload(id), caught => {
       // Nothing behind a device-wide failure can succeed right now; episode failures only skip one episode.
       if (caught instanceof DownloadError && caught.scope === "device") throw caught;
-      return download(id);
+      return exclusiveDownload(id);
     })
     .catch(caught => {
       error = caught instanceof Error ? caught.message : "Download interrupted.";
@@ -145,6 +169,13 @@ export function downloadEpisode(id: number): Promise<void> {
   return task;
 }
 
+// All tabs for this origin share one transfer/budget decision. The in-page
+// queue remains the fallback for older browsers without Web Locks.
+async function exclusiveDownload(id: number): Promise<void> {
+  if (navigator.locks) await navigator.locks.request("pods-download", () => download(id));
+  else await download(id);
+}
+
 async function persistDownload(manifest: ArtifactManifest, id: number, received: number, complete: boolean): Promise<void> {
   await store.writeRecord("downloads", manifest.hash, {
     hash: manifest.hash, episode: id, bytes: manifest.bytes, received, complete, touched: Date.now(),
@@ -154,7 +185,11 @@ async function persistDownload(manifest: ArtifactManifest, id: number, received:
 }
 
 async function abandon(manifest: ArtifactManifest, id: number): Promise<void> {
-  await store.deleteDownload(manifest.hash);
+  await store.deleteDownload(manifest.hash, (latest, record) => {
+    const episodes = latest.snapshot ? applyOverlay(latest.snapshot, latest.outbox).episodes : [];
+    return record?.episode === id && !record.complete
+      && !episodes.some(e => e.manifest?.hash === manifest.hash && e.played_at == null && e.archived_at == null);
+  });
   if (currentDownloadProgress()?.episode === id) setDownloadProgress(null);
 }
 
@@ -166,6 +201,7 @@ async function download(id: number): Promise<void> {
   if (manifest.chunk_size !== 1024 ** 2 || manifest.chunks.length !== Math.ceil(manifest.bytes / manifest.chunk_size)) throw new DownloadError("Invalid audio manifest.", "episode");
   const existing = await store.readRecord<Download>("downloads", manifest.hash);
   if (existing?.complete) return;
+  await sweepStaleDownloads();
   await makeRoom(manifest);
   await store.writeRecord("meta", `manifest:${manifest.hash}`, manifest);
   // A resumed download keeps showing the bytes it already holds while stored chunks are re-verified.
@@ -265,36 +301,54 @@ export async function verifyChunk(bytes: ArrayBuffer, expected: string): Promise
   return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("") === expected;
 }
 
+/** The same plan drives the downloader and the rows waiting for it. Completed
+ * and partial files reserve space once; oversized entries do not consume a slot. */
+export function automaticDownloadPlan(s: LocalState, downloads: Download[]): { ids: number[]; limited: boolean } {
+  const library = s.snapshot ? applyOverlay(s.snapshot, s.outbox) : null;
+  const last = Number(library?.settings.last_listened ?? 0);
+  const episodes = (library?.episodes ?? []).filter(e => e.played_at == null && e.archived_at == null && e.manifest)
+    .sort((a, b) => Number(b.id === last) - Number(a.id === last) || a.published_at - b.published_at || a.id - b.id);
+  let used = downloads.reduce((n, d) => n + d.bytes, 0), selected = 0, limited = false;
+  const ids: number[] = [];
+  for (const episode of episodes) {
+    if (selected >= s.preferences.count) break;
+    const manifest = episode.manifest!;
+    const saved = downloads.find(d => d.hash === manifest.hash);
+    if (saved?.complete) { selected++; continue; }
+    const extra = manifest.bytes - (saved?.bytes ?? 0);
+    if (used + extra > s.preferences.limit) { limited = true; continue; }
+    used += extra;
+    selected++;
+    ids.push(episode.id);
+  }
+  return { ids, limited };
+}
+
 export function prefetch(): Promise<void> {
+  automaticAgain = true;
   if (automaticPass) return automaticPass;
-  automaticPass = runPrefetch().finally(() => { automaticPass = null; });
+  automaticPass = (async () => {
+    do { automaticAgain = false; await runPrefetch(); } while (automaticAgain);
+  })().finally(() => { automaticPass = null; });
   return automaticPass;
 }
 
 async function runPrefetch(): Promise<void> {
   try { await sweepStaleDownloads(); } catch { /* A later bootstrap/sync pass retries. */ }
   if (document.visibilityState === "hidden") return;
-  const s = await state();
-  const episodes = (s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes : []).filter(e => e.played_at == null && e.archived_at == null);
-  let limited = false;
-  const last = Number((s.snapshot ? applyOverlay(s.snapshot, s.outbox).settings.last_listened : 0));
-  const queue = episodes.slice().sort((a, b) => Number(b.id === last) - Number(a.id === last)).slice(0, s.preferences.count);
-  for (const episode of queue) {
-    if (!downloadEligible(episode.id, await state())) continue;
-    // Budget against what is actually retained, including manual and partial
-    // downloads outside this automatic selection. Partial files reserve their full size.
-    const downloads = await store.allDownloads();
-    const downloaded = downloads.find(d => d.hash === episode.manifest?.hash);
-    const used = downloads.filter(d => d.hash !== episode.manifest?.hash).reduce((n, d) => n + d.bytes, 0);
-    const bytes = episode.manifest?.bytes ?? 0;
-    if (used + bytes > (await state()).preferences.limit) { limited = true; continue; }
-    if (downloaded?.complete) continue;
-    try { await downloadEpisode(episode.id); }
+  const attempted = new Set<number>();
+  for (;;) {
+    // Re-plan after every transfer: marks, storage settings and publications can
+    // all change while a large episode is arriving.
+    const plan = automaticDownloadPlan(await state(), await store.allDownloads());
+    const nextNotice = plan.limited ? "Automatic downloads reached the storage limit. Saved episodes are kept. Increase the storage limit in Settings or mark episodes played to make room." : null;
+    if (queueNotice !== nextNotice) { queueNotice = nextNotice; changed(); }
+    const id = plan.ids.find(id => !attempted.has(id));
+    if (id == null) return;
+    attempted.add(id);
+    try { await downloadEpisode(id); }
     catch (caught) {
-      // One broken episode no longer blocks the rest of the queue; a device-wide failure still does.
-      if (!(caught instanceof DownloadError) || caught.scope === "device") break;
+      if (!(caught instanceof DownloadError) || caught.scope === "device") return;
     }
   }
-  const nextNotice = limited ? "Automatic downloads reached the storage limit. Saved episodes are kept. Increase the storage limit in Settings or mark episodes played to make room." : null;
-  if (queueNotice !== nextNotice) { queueNotice = nextNotice; changed(); }
 }

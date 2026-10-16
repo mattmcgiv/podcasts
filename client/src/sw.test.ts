@@ -3,6 +3,7 @@ import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { localMedia } from "./offline/media";
 vi.mock("./offline/media", () => ({ localMedia: vi.fn() }));
 let listeners: Record<string, (event: never) => void>;
+const skipWaiting = vi.fn();
 let cache: { addAll: ReturnType<typeof vi.fn>; match: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn>; keys: ReturnType<typeof vi.fn>; delete: ReturnType<typeof vi.fn> };
 beforeEach(async () => {
   vi.resetModules(); listeners = {};
@@ -10,6 +11,8 @@ beforeEach(async () => {
   vi.stubGlobal("addEventListener", vi.fn((name, callback) => { listeners[name] = callback; }));
   vi.stubGlobal("caches", { open: vi.fn().mockResolvedValue(cache), keys: vi.fn().mockResolvedValue(["pods-shell-old", "pods-artwork-v1"]), delete: vi.fn().mockResolvedValue(true) });
   vi.stubGlobal("clients", { claim: vi.fn().mockResolvedValue(undefined) });
+  skipWaiting.mockReset().mockResolvedValue(undefined);
+  vi.stubGlobal("skipWaiting", skipWaiting);
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(["/index.html"]))));
   await import("./sw");
 });
@@ -61,9 +64,17 @@ it("installs a complete shell and removes only obsolete shell caches", async () 
   let work: Promise<void> | undefined;
   listeners.install({ waitUntil: (promise: Promise<void>) => { work = promise; } } as never); await work;
   expect(cache.addAll).toHaveBeenCalledWith(["/index.html"]);
+  expect(skipWaiting).toHaveBeenCalledOnce();
   listeners.activate({ waitUntil: (promise: Promise<void>) => { work = promise; } } as never); await work;
   expect(caches.delete).toHaveBeenCalledWith("pods-shell-old");
   expect(caches.delete).not.toHaveBeenCalledWith("pods-artwork-v1");
+});
+it("does not activate an update whose offline files failed to install", async () => {
+  cache.addAll.mockRejectedValue(new Error("offline"));
+  let work: Promise<void> | undefined;
+  listeners.install({ waitUntil: (promise: Promise<void>) => { work = promise; } } as never);
+  await expect(work).rejects.toThrow("offline");
+  expect(skipWaiting).not.toHaveBeenCalled();
 });
 it("routes local media and navigations without caching API mutations", async () => {
   vi.mocked(localMedia).mockResolvedValue(new Response("audio"));

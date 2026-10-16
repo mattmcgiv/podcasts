@@ -63,7 +63,9 @@ export function visibleNotifications(state: LocalState): ProcessingNotification[
   return snapshotNotifications(state.snapshot).filter(item => item.id > (Math.max(state.notificationsClearedThrough ?? 0, Number(state.snapshot?.settings.notifications_cleared_through ?? 0), ...state.outbox.filter(o => o.entity === "settings" && o.field === "notifications_cleared_through").map(o => Number(o.value)))));
 }
 
-const DATABASE_VERSION = 2;
+// Preserve all stores/data, but fence old open tabs that still run the eviction
+// code. Their explicit version-2 opens fail instead of deleting saved episodes.
+const DATABASE_VERSION = 3;
 
 export function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -75,7 +77,10 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
     };
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
   });
 }
 
@@ -143,14 +148,25 @@ export async function allDownloads(): Promise<Download[]> {
   });
 }
 
-export async function deleteDownload(hash: string): Promise<void> {
+export async function deleteDownload(hash: string, eligible?: (state: LocalState, download: Download | undefined) => boolean): Promise<boolean> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(["downloads", "chunks", "meta"], "readwrite");
-    tx.objectStore("downloads").delete(hash);
-    tx.objectStore("chunks").delete(IDBKeyRange.bound(`${hash}:`, `${hash}:\uffff`));
-    tx.objectStore("meta").delete(`manifest:${hash}`);
-    tx.oncomplete = () => { db.close(); resolve(); };
+    let removed = false;
+    const remove = () => {
+      tx.objectStore("downloads").delete(hash);
+      tx.objectStore("chunks").delete(IDBKeyRange.bound(`${hash}:`, `${hash}:\uffff`));
+      tx.objectStore("meta").delete(`manifest:${hash}`);
+      removed = true;
+    };
+    if (eligible) {
+      // Eligibility and deletion must see the same state, even when another tab
+      // unmarks an episode while a sweep is waiting for IndexedDB.
+      const state = tx.objectStore("meta").get("state");
+      const download = tx.objectStore("downloads").get(hash);
+      download.onsuccess = () => { if (eligible(normalizeState(state.result), download.result)) remove(); };
+    } else remove();
+    tx.oncomplete = () => { db.close(); resolve(removed); };
     tx.onabort = tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
