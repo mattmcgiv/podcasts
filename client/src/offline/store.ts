@@ -34,7 +34,7 @@ export interface Operation {
   changed_at?: number;
   base_revision: number; conflict?: number; sent?: boolean; error?: string;
 }
-export interface Preferences { limit: number; count: number }
+export interface Preferences { limit: number; count: number; automatic?: boolean }
 export interface LocalState {
   lastChangeAt?: number;
   device_name?: string; client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
@@ -86,18 +86,21 @@ export function openDatabase(): Promise<IDBDatabase> {
 
 export function emptyState(): LocalState {
   return { client_id: crypto.randomUUID(), sequence: 0, snapshot: null, outbox: [],
-    preferences: { limit: 2 * 1024 ** 3, count: 50 }, lastSync: null, automaticEpisodesV2: true, sharedPreferencesV1: true };
+    preferences: { limit: 2 * 1024 ** 3, count: 50, automatic: true }, lastSync: null, automaticEpisodesV2: true, sharedPreferencesV1: true };
 }
 
 /** Drop obsolete fields such as `pins` without touching library data. */
 export function normalizeState(raw: LocalState | undefined | null): LocalState {
   const state = raw ?? emptyState();
   const preferences = state.preferences ?? emptyState().preferences;
-  state.preferences = { limit: preferences.limit, count: preferences.count };
+  state.preferences = { limit: preferences.limit, count: preferences.count, automatic: preferences.automatic };
   if (!state.automaticEpisodesV2) {
     if (state.preferences.count === 10) state.preferences.count = 50;
     state.automaticEpisodesV2 = true;
   }
+  // Older clients did not record whether limits were edited. Upgrade only the
+  // exact legacy defaults; retain every non-default/custom or disabled queue.
+  state.preferences.automatic ??= state.preferences.limit === 2 * 1024 ** 3 && state.preferences.count === 50;
   return state;
 }
 

@@ -115,6 +115,7 @@ it("shows Syncing while a tap waits on the Mac", async () => {
 
 it("synchronizes, changes limits, signs in, and resolves both conflict choices", async () => {
   const s = emptyState(); s.lastSync = 10000;
+  s.preferences.automatic = false;
   s.outbox = [{ id: "a", sequence: 1, entity: "1", field: "played", value: true, base_revision: 0, conflict: 1 }];
   vi.mocked(client.state).mockResolvedValue(s);
   vi.mocked(store.allDownloads).mockResolvedValue([{ hash: "hash", episode: 1, bytes: 100, complete: true, touched: 0 }]);
@@ -143,6 +144,22 @@ it("synchronizes, changes limits, signs in, and resolves both conflict choices",
   await waitFor(() => expect(screen.getByRole("button", { name: "Sync now" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Sync now" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Offline"));
+});
+
+it("defaults to all unplayed episodes and retains custom limits when switching modes", async () => {
+  const local = emptyState();
+  vi.mocked(client.state).mockResolvedValue(local);
+  render(<OfflineSettings />);
+  expect(await screen.findByRole("checkbox", { name: "Download all unplayed episodes" })).toBeChecked();
+  expect(screen.queryByLabelText("Storage limit (GiB)")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Download all unplayed episodes" }));
+  await waitFor(() => expect(downloads.savePreferences).toHaveBeenCalledWith({ ...local.preferences, automatic: false }));
+  local.preferences.automatic = false;
+  vi.mocked(client.state).mockResolvedValue(structuredClone(local));
+  window.dispatchEvent(new Event("pods-offline-changed"));
+  expect(await screen.findByLabelText("Storage limit (GiB)")).toHaveValue(2);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Download all unplayed episodes" }));
+  await waitFor(() => expect(downloads.savePreferences).toHaveBeenCalledWith({ ...local.preferences, automatic: true }));
 });
 
 it("renames the device and falls back to the default name when cleared", async () => {

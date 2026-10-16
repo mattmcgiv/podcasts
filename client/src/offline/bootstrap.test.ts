@@ -6,19 +6,20 @@ import * as voice from "../voice";
 vi.mock("./client", () => ({ backendBase: () => "https://sync.pods.mcgiv.dev:8443", offlineEnabled: vi.fn(), synchronize: vi.fn() }));
 vi.mock("./downloads", () => ({ DOWNLOAD_QUEUE_EVENT: "pods-download-queue", listenForDownloadChanges: () => () => {}, prefetch: vi.fn(), sweepStaleDownloads: vi.fn() }));
 vi.mock("../voice", () => ({ flushVoiceDrafts: vi.fn().mockResolvedValue(undefined) }));
+let stop: (() => void) | undefined;
 beforeEach(() => {
   vi.useFakeTimers(); vi.mocked(client.offlineEnabled).mockReturnValue(true);
   vi.mocked(client.synchronize).mockResolvedValue(); vi.mocked(downloads.prefetch).mockResolvedValue();
   vi.mocked(downloads.sweepStaleDownloads).mockResolvedValue();
 });
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { stop?.(); stop = undefined; vi.clearAllMocks(); vi.useRealTimers(); vi.restoreAllMocks(); });
 it("registers a module worker and synchronizes on reconnect/foreground", async () => {
   const register = vi.fn().mockResolvedValue({});
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
   const persist = vi.fn().mockResolvedValue(true);
   Object.defineProperty(navigator, "storage", { configurable: true, value: { persist } });
-  await bootstrapOffline();
-  expect(register).toHaveBeenCalledWith("/sw.js", { type: "module" });
+  stop = await bootstrapOffline();
+  expect(register).toHaveBeenCalledWith("/sw.js", { type: "module", updateViaCache: "none" });
   await vi.waitFor(() => expect(downloads.prefetch).toHaveBeenCalled());
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
   const count = vi.mocked(client.synchronize).mock.calls.length;
@@ -31,7 +32,7 @@ it("registers a module worker and synchronizes on reconnect/foreground", async (
   expect(client.synchronize).toHaveBeenCalledTimes(count + 5);
 });
 it("skips deprecated native mode and fails clearly without service worker support", async () => {
-  vi.mocked(client.offlineEnabled).mockReturnValue(false); await bootstrapOffline();
+  vi.mocked(client.offlineEnabled).mockReturnValue(false); stop = await bootstrapOffline();
   vi.mocked(client.offlineEnabled).mockReturnValue(true);
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: undefined });
   await expect(bootstrapOffline()).rejects.toThrow("cannot store");
@@ -42,7 +43,7 @@ it("retries on a failed sync instead of waiting for the minute interval", async 
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
   const persist = vi.fn().mockResolvedValue(true);
   Object.defineProperty(navigator, "storage", { configurable: true, value: { persist } });
-  await bootstrapOffline();
+  stop = await bootstrapOffline();
   const initial = vi.mocked(client.synchronize).mock.calls.length;
   vi.mocked(client.synchronize).mockRejectedValue(new Error("Mac unavailable"));
   window.dispatchEvent(new Event("online"));
@@ -66,7 +67,7 @@ it("stops retrying once the Mac answers and shrugs off background failures", asy
   const register = vi.fn().mockResolvedValue({});
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
   Object.defineProperty(navigator, "storage", { configurable: true, value: {} });
-  await bootstrapOffline();
+  stop = await bootstrapOffline();
   await vi.waitFor(() => expect(downloads.prefetch).toHaveBeenCalled());
   const initial = vi.mocked(client.synchronize).mock.calls.length;
   vi.mocked(client.synchronize).mockRejectedValueOnce(new Error("Mac unavailable"));
@@ -91,7 +92,7 @@ it("backs off while the Mac stays down instead of retrying every five seconds", 
   const register = vi.fn().mockResolvedValue({});
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register, ready: Promise.resolve({}) } });
   Object.defineProperty(navigator, "storage", { configurable: true, value: { persist: vi.fn().mockResolvedValue(true) } });
-  await bootstrapOffline();
+  stop = await bootstrapOffline();
   vi.mocked(client.synchronize).mockRejectedValue(new Error("Mac unavailable"));
   window.dispatchEvent(new Event("online"));
   await vi.advanceTimersByTimeAsync(5000);
@@ -100,4 +101,17 @@ it("backs off while the Mac stays down instead of retrying every five seconds", 
   expect(vi.mocked(client.synchronize).mock.calls.length).toBe(afterFirstRetry);
   await vi.advanceTimersByTimeAsync(10000);
   expect(vi.mocked(client.synchronize).mock.calls.length).toBeGreaterThan(afterFirstRetry);
+});
+
+it("starts downloads without waiting for a stalled metadata sync or installed-shell update", async () => {
+  const register = vi.fn(() => new Promise(() => {}));
+  Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: {}, register, ready: Promise.resolve({}) } });
+  vi.mocked(client.synchronize).mockImplementation(() => new Promise(() => {}));
+  stop = await bootstrapOffline();
+  expect(downloads.prefetch).toHaveBeenCalledOnce();
+  window.dispatchEvent(new Event("online"));
+  expect(downloads.prefetch).toHaveBeenCalledTimes(2);
+  stop?.(); stop = undefined;
+  window.dispatchEvent(new Event("online"));
+  expect(downloads.prefetch).toHaveBeenCalledTimes(2);
 });

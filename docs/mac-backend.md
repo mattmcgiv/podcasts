@@ -30,6 +30,12 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
+### October 16 automatic download defaults and startup
+
+The old 2 GiB / 50 episode defaults excluded much of the current unplayed library. New installs and exact legacy default settings now enable **Download all unplayed episodes**, bounded by actual browser storage. Non-default/custom limits and disabled queues are preserved; the setting can restore custom limits without deleting saved audio. Cached downloads start independently of metadata sync and installed-shell update success. Navigations try fresh HTML, with a three-second bound and offline cache fallback. See the follow-up in [download reliability review](download-reliability-review.md).
+
+`dev/check.sh` passed 540 tests, TypeScript and all 47 per-file coverage checks. A browser upgrade went from 50 completed episodes and 11 Download buttons to all 61 completed, with exactly one transfer per artifact, zero Download buttons, and the first/last audio ranges readable. Cloudflare reported Success; public HTML, `sw.js`, and `assets/main-C-ftjNBp.js` matched the build byte-for-byte. Browser-harness still failed with macOS `Operation not permitted` for Chrome's `DevToolsActivePort`; the same local Chrome deployment was completed through the working extension connection. No backend implementation changed or reinstall was needed. Physical iPhone activation remains unverified; existing cached pages must load the new app before the new setting appears.
+
 ### October 16 full download lifecycle review
 
 See [download reliability review](download-reliability-review.md) for the client/server audit, reproduced failures and automated regressions. The final client passes 534 tests and the existing TypeScript/coverage checks; the server passes 624 tests with the required `passkey` feature. An isolated browser upgrade preserved existing downloads, rejected an old version-2 database writer, automatically refilled after played/limit changes, and kept the preceding episode playable in both tabs. All four screenshot episodes checked on the Mac matched their manifest sizes and complete/chunk hashes.

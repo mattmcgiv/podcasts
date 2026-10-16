@@ -46,6 +46,14 @@ worker.addEventListener("fetch", event => {
     return;
   }
   if (url.origin === worker.location.origin) event.respondWith((async () => {
+    if (event.request.mode === "navigate") {
+      // A reload must load the current app, not a previous shell while its
+      // replacement installs. Keep the complete installed shell for offline use.
+      try {
+        const response = await fetch(event.request, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+        if (response.ok) return new Response(response.body, { status: response.status, statusText: response.statusText, headers: response.headers });
+      } catch { /* Offline/slow network: fall back to the installed shell. */ }
+    }
     const cache = await caches.open(SHELL);
     const saved = await cache.match(event.request.mode === "navigate" ? "/index.html" : event.request);
     // Pages redirects /index.html to /. Navigation requests reject a cached

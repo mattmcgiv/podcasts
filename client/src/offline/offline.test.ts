@@ -469,7 +469,7 @@ describe("synchronization", () => {
     const saved=await state();
     expect(saved.outbox.map(o=>o.field)).toEqual(["position","theme","notifications_cleared_through"]);
     expect(saved.outbox[1].value).toBe("dark");
-    expect(saved.preferences).toEqual({limit:2*1024**3,count:50});
+    expect(saved.preferences).toEqual({limit:2*1024**3,count:50,automatic:true});
     await synchronize(false).catch(() => {});
     expect((await state()).outbox).toEqual(saved.outbox);
     window.localStorage.removeItem("pods-theme-preference");
@@ -584,7 +584,7 @@ describe("verified downloads and local Range playback", () => {
     await prepareAudio(); await downloadEpisode(1);
     expect(await readRecord("meta", `manifest:${hash}`)).toBeTruthy();
     protectPlayingArtifact(hash);
-    await updateState(s => { s.preferences.limit = 10; });
+    await updateState(s => { s.preferences.automatic = false; s.preferences.limit = 10; });
     await expect(downloadEpisode(2)).rejects.toThrow("Increase the storage limit");
     expect((await allDownloads())[0].hash).toBe(hash);
     protectPlayingArtifact(null);
@@ -627,7 +627,7 @@ describe("verified downloads and local Range playback", () => {
     const bytes = await prepareAudio();
     const digest = await digestOf(bytes);
     await updateState(s => {
-      s.preferences.limit = 16;
+      s.preferences.automatic = false; s.preferences.limit = 16;
       s.snapshot!.episodes[0].manifest!.bytes = 100;
       s.snapshot!.episodes[1].manifest!.chunks = [digest];
     });
@@ -653,7 +653,7 @@ describe("verified downloads and local Range playback", () => {
     expect(await response.arrayBuffer()).toEqual(bytes);
     expect(artifactCalls()).toHaveLength(1);
     expect(downloadQueueNotice()).toContain("storage limit");
-    await updateState(s => { s.preferences.limit = 16; });
+    await updateState(s => { s.preferences.automatic = false; s.preferences.limit = 16; });
     await prefetch();
     expect((await allDownloads()).filter(d => d.complete)).toHaveLength(2);
     expect(downloadQueueNotice()).toBeNull();
@@ -683,7 +683,7 @@ describe("verified downloads and local Range playback", () => {
     await writeRecord("downloads", "c".repeat(64), { hash: "c".repeat(64), episode: 7, bytes: 100, received: 100, complete: true, touched: 0 });
     await writeRecord("downloads", "d".repeat(64), { hash: "d".repeat(64), episode: 8, bytes: 100, received: 100, complete: true, touched: 0 });
     await updateState(s => {
-      s.preferences.limit = 10;
+      s.preferences.automatic = false; s.preferences.limit = 10;
       s.snapshot!.episodes.push({ ...s.snapshot!.episodes[0], id: 7, played_at: 1 }, { ...s.snapshot!.episodes[0], id: 8, archived_at: 1 });
     });
     await downloadEpisode(1);
@@ -859,7 +859,7 @@ describe("verified downloads and local Range playback", () => {
   });
   it("stops the automatic queue once the plan exceeds the limit", async () => {
     await prepareAudio();
-    await updateState(s => { s.preferences.limit = 10; s.preferences.count = 2; });
+    await updateState(s => { s.preferences.automatic = false; s.preferences.limit = 10; s.preferences.count = 2; });
     await prefetch();
     expect((await allDownloads()).map(d => d.episode)).toEqual([1]);
   });
@@ -895,7 +895,7 @@ describe("automatic Listen downloads", () => {
     const raw = await readRecord<LocalState>("meta", "state");
     await writeRecord("meta", "state", { ...raw, preferences: { ...raw!.preferences, pins: [1, 2] } });
     const loaded = await state();
-    expect(loaded.preferences).toEqual({ limit: 2 * 1024 ** 3, count: 50 });
+    expect(loaded.preferences).toEqual({ limit: 2 * 1024 ** 3, count: 50, automatic: true });
     expect(loaded.preferences).not.toHaveProperty("pins");
     expect(loaded.snapshot?.episodes).toHaveLength(2);
     expect(loaded.outbox).toHaveLength(1);

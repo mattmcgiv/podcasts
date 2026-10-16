@@ -1,12 +1,20 @@
 import { flushVoiceDrafts } from "../voice";
 import { backendBase, offlineEnabled, synchronize } from "./client";
 import { DOWNLOAD_QUEUE_EVENT, listenForDownloadChanges, prefetch, sweepStaleDownloads } from "./downloads";
+import { logDiagnostic } from "./diagnostics";
+
+declare const __PODS_BUILD_ID__: string;
 
 export async function bootstrapOffline(): Promise<(() => void) | undefined> {
   if (!offlineEnabled()) return;
   window.PODS_API_BASE = backendBase();
   if (!navigator.serviceWorker) throw new Error("This browser cannot store offline playback.");
-  await navigator.serviceWorker.register("/sw.js", { type: "module" });
+  logDiagnostic("app-build", __PODS_BUILD_ID__);
+  // Updating the app shell must not disable downloads when a worker already
+  // controls this page (for example, Pages is offline but the Mac is reachable).
+  const registration = navigator.serviceWorker.register("/sw.js", { type: "module", updateViaCache: "none" });
+  if (navigator.serviceWorker.controller) void registration.catch(() => logDiagnostic("shell-update", "Using the installed offline shell; update unavailable."));
+  else await registration;
   await new Promise<void>((resolve, reject) => {
     const timeout = window.setTimeout(() => reject(new Error("Offline installation did not finish. Reload Pods while connected.")), 30000);
     void navigator.serviceWorker.ready.then(() => { window.clearTimeout(timeout); resolve(); }, reject);
@@ -23,6 +31,9 @@ export async function bootstrapOffline(): Promise<(() => void) | undefined> {
       void sweepStaleDownloads().catch(() => {});
       return;
     }
+    // Cached, verified manifests can download independently of metadata sync.
+    // A slow probe, rejected action or failed snapshot must not gate the queue.
+    download();
     void synchronize()
       .then(() => {
         if (!active) return;

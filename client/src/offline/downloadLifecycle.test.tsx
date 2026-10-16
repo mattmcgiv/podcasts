@@ -6,7 +6,7 @@ import { RecentView } from "../views/RecentView";
 import { allDownloads, readRecord, updateState, type Snapshot } from "./store";
 import * as store from "./store";
 import { localRequest, state, synchronize, validateSnapshot } from "./client";
-import { configureDownloadRetriesForTests, downloadEpisode, prefetch, sweepStaleDownloads, DOWNLOAD_QUEUE_EVENT, listenForDownloadChanges, protectPlayingArtifact } from "./downloads";
+import { configureDownloadRetriesForTests, downloadEpisode, prefetch, sweepStaleDownloads, DOWNLOAD_QUEUE_EVENT, listenForDownloadChanges, protectPlayingArtifact, automaticDownloadPlan } from "./downloads";
 import { localMedia } from "./media";
 import { bootstrapOffline } from "./bootstrap";
 import { savePreferences } from "./downloads";
@@ -69,6 +69,46 @@ it("automatically refills after marking played and changing limits without a foc
   await savePreferences({ limit: 100 * 1024 ** 2, count: 2 });
   await waitFor(async () => { await expectSaved(3); });
   await expectSaved(2);
+});
+
+it("migrates legacy defaults to the whole library beyond 2 GiB and 50 episodes without changing custom limits", async () => {
+  const original = await state();
+  for (const preferences of [{ limit: 2 * 1024 ** 3, count: 50 }, { limit: 2 * 1024 ** 3, count: 10 }]) {
+    const legacy = { ...original, preferences, automaticEpisodesV2: false };
+    legacy.snapshot = { ...library, episodes: Array.from({ length: 61 }, (_, index) => ({
+      ...library.episodes[0], id: index + 1, manifest: { ...library.episodes[0].manifest!, episode_id: index + 1, hash: String(index).padStart(64, "0"), bytes: 100 * 1024 ** 2 },
+    })) };
+    await store.writeRecord("meta", "state", legacy);
+    const migrated = await state();
+    expect(migrated.preferences.automatic).toBe(true);
+    expect(automaticDownloadPlan(migrated, []).ids).toHaveLength(61);
+    expect((await localRequest<{ items: { download_queued: boolean }[] }>("/recent")).items.every(e => e.download_queued)).toBe(true);
+  }
+  for (const preferences of [{ limit: 1024 ** 3, count: 50 }, { limit: 2 * 1024 ** 3, count: 0 }, { limit: 2 * 1024 ** 3, count: 7 }, { limit: 2 * 1024 ** 3, count: 50, automatic: false }]) {
+    await store.writeRecord("meta", "state", { ...original, preferences });
+    expect((await state()).preferences).toEqual({ ...preferences, automatic: false });
+  }
+});
+
+it("downloads the whole automatic queue while preserving saved bytes, but still respects actual browser space", async () => {
+  await updateState(s => { s.preferences = { limit: 8, count: 1, automatic: true }; });
+  vi.stubGlobal("navigator", { storage: { estimate: async () => ({ quota: 20 * 1024 ** 2 + 24, usage: 0 }) } });
+  await prefetch();
+  for (const id of [1, 2, 3]) await expectSaved(id);
+  await store.deleteDownload(library.episodes[2].manifest!.hash);
+  vi.stubGlobal("navigator", { storage: { estimate: async () => ({ quota: 20 * 1024 ** 2 + 24, usage: 20 }) } });
+  await prefetch();
+  for (const id of [1, 2]) await expectSaved(id);
+  expect(await readRecord("downloads", library.episodes[2].manifest!.hash)).toBeUndefined();
+});
+
+it("starts cached downloads when metadata sync fails and a shell update is unavailable", async () => {
+  const original = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation(async (...args) => String(args[0]).endsWith("/api/sync")
+    ? new Response("unavailable", { status: 503 }) : original(...args));
+  vi.stubGlobal("navigator", { serviceWorker: { controller: {}, register: async () => { throw new Error("Pages unavailable"); }, ready: Promise.resolve({}) } });
+  stop = await bootstrapOffline();
+  await waitFor(async () => { for (const id of [1, 2, 3]) await expectSaved(id); });
 });
 
 it("replans when publications arrive while an automatic transfer is running", async () => {

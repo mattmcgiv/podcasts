@@ -28,7 +28,7 @@ export async function exportDiagnostics(): Promise<void> {
   const downloads = await allDownloads();
   // Export only operational data; exclude the library, outbox contents, URLs, and raw diagnostic detail.
   const data = { format: "pods-diagnostics-v1", backend, browser: {
-    lastSync: local.lastSync, pendingChanges: local.outbox.length,
+    lastSync: local.lastSync, pendingChanges: local.outbox.length, preferences: local.preferences,
     downloads: downloads.map(d => ({ episode: d.episode, bytes: d.bytes, received: d.received, complete: d.complete })),
     syncError: syncError(), downloadError: downloadError(),
     pageEvents: readDiagnostics().map(({at,kind}) => ({at,kind})),
@@ -77,10 +77,13 @@ export function OfflineSettings() {
       <button type="button" className={`settings-btn primary${action === "sign-in" ? " is-busy" : ""}`} disabled={busy} aria-busy={action === "sign-in"} onClick={() => void run(signInAndSync, "sign-in", "Signing in…")}>{action === "sign-in" ? "Signing in…" : "Sign in to Mac"}</button>
       <button type="button" className={`settings-btn${action === "backup" ? " is-busy" : ""}`} disabled={busy} aria-busy={action === "backup"} onClick={() => void run(exportSyncBackup, "backup", "Exporting…")}>{action === "backup" ? "Exporting…" : "Export state backup"}</button>
     </div>
+    <label><input type="checkbox" checked={local.preferences.automatic ?? false} onChange={event => void run(() => savePreferences({ ...local.preferences, automatic: event.target.checked }))} /> Download all unplayed episodes</label>
+    {local.preferences.automatic ? <p className="settings-detail">Downloads automatically as browser space allows. Played episodes free space for new downloads.</p> : <>
     <label>Automatic episodes <input aria-label="Automatic episodes" type="number" min="0" max="1000" value={local.preferences.count}
       onChange={event => void run(() => savePreferences({ ...local.preferences, count: Number(event.target.value) }))} /></label>
     <label>Storage limit (GiB) <input aria-label="Storage limit (GiB)" type="number" min="0.1" step="0.1" value={local.preferences.limit / 1024 ** 3}
       onChange={event => void run(() => savePreferences({ ...local.preferences, limit: Number(event.target.value) * 1024 ** 3 }))} /></label>
+    </>}
     <p>{downloads.filter(d => d.complete).length} downloaded episodes · {(downloads.reduce((n, d) => n + d.bytes, 0) / 1024 ** 3).toFixed(2)} GiB reserved.</p>
     <p className="settings-detail">Keep Pods open to download automatically. Browser storage can be removed by iOS.</p>
     {loadError && <p role="alert">{loadError} <button type="button" onClick={() => setRefreshKey(k => k+1)}>Retry local status</button></p>}

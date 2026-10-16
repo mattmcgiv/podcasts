@@ -34,6 +34,7 @@ let automaticAgain = false;
 export const DOWNLOAD_QUEUE_EVENT = "pods-download-queue";
 export const requestAutomaticDownloads = () => window.dispatchEvent(new Event(DOWNLOAD_QUEUE_EVENT));
 let queueNotice: string | null = null;
+let lastPlanDiagnostic: string | null = null;
 let channel: BroadcastChannel | null = null;
 export const downloadQueueNotice = () => queueNotice;
 const pending = new Map<number, Promise<void>>();
@@ -71,11 +72,12 @@ export function configureDownloadRetriesForTests(delays: number[], stallMs = chu
   errors.clear();
   error = null;
   queueNotice = null;
+  lastPlanDiagnostic = null;
 }
 
 export async function savePreferences(preferences: Preferences): Promise<void> {
   if (!Number.isFinite(preferences.limit) || preferences.limit < 100 * 1024 ** 2 || !Number.isInteger(preferences.count) || preferences.count < 0 || preferences.count > 1000) throw new Error("Invalid download limits.");
-  await store.updateState(s => { s.preferences = { limit: preferences.limit, count: preferences.count }; });
+  await store.updateState(s => { s.preferences = { limit: preferences.limit, count: preferences.count, automatic: preferences.automatic ?? false }; });
   changed();
   requestAutomaticDownloads();
 }
@@ -130,11 +132,11 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
   const s = await state();
   const downloads = await store.allDownloads();
   const used = downloads.filter(d => d.hash !== manifest.hash).reduce((total, d) => total + d.bytes, 0);
-  if (used + manifest.bytes > s.preferences.limit) throw new DownloadError("Download limit reached. Increase the storage limit.", "device");
+  if (!s.preferences.automatic && used + manifest.bytes > s.preferences.limit) throw new DownloadError("Download limit reached. Increase the storage limit.", "device");
   const estimate = await navigator.storage?.estimate?.();
   const existing = downloads.find(d => d.hash === manifest.hash);
   const remaining = manifest.bytes - Math.min(existing?.received ?? 0, manifest.bytes);
-  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < remaining + 20 * 1024 ** 2) throw new DownloadError("Browser storage is full. Increase the storage limit or free space on this device.", "device");
+  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < remaining + 20 * 1024 ** 2) throw new DownloadError("Browser storage is full. Mark episodes played or free space on this device to resume automatic downloads.", "device");
 }
 
 /**
@@ -311,12 +313,12 @@ export function automaticDownloadPlan(s: LocalState, downloads: Download[]): { i
   let used = downloads.reduce((n, d) => n + d.bytes, 0), selected = 0, limited = false;
   const ids: number[] = [];
   for (const episode of episodes) {
-    if (selected >= s.preferences.count) break;
+    if (!s.preferences.automatic && selected >= s.preferences.count) break;
     const manifest = episode.manifest!;
     const saved = downloads.find(d => d.hash === manifest.hash);
     if (saved?.complete) { selected++; continue; }
     const extra = manifest.bytes - (saved?.bytes ?? 0);
-    if (used + extra > s.preferences.limit) { limited = true; continue; }
+    if (!s.preferences.automatic && used + extra > s.preferences.limit) { limited = true; continue; }
     used += extra;
     selected++;
     ids.push(episode.id);
@@ -340,15 +342,22 @@ async function runPrefetch(): Promise<void> {
   for (;;) {
     // Re-plan after every transfer: marks, storage settings and publications can
     // all change while a large episode is arriving.
-    const plan = automaticDownloadPlan(await state(), await store.allDownloads());
-    const nextNotice = plan.limited ? "Automatic downloads reached the storage limit. Saved episodes are kept. Increase the storage limit in Settings or mark episodes played to make room." : null;
-    if (queueNotice !== nextNotice) { queueNotice = nextNotice; changed(); }
+    const local = await state(), downloads = await store.allDownloads();
+    const plan = automaticDownloadPlan(local, downloads);
+    const detail = `automatic=${Boolean(local.preferences.automatic)} count=${local.preferences.count} limit=${local.preferences.limit} saved=${downloads.filter(d => d.complete).length} reserved=${downloads.reduce((n, d) => n + d.bytes, 0)} queued=${plan.ids.length} storage_limited=${plan.limited}`;
+    if (detail !== lastPlanDiagnostic) { logDiagnostic("download-queue", detail); lastPlanDiagnostic = detail; }
+    const nextNotice = plan.limited ? "Automatic downloads reached the storage limit. Saved episodes are kept. Enable Download all unplayed episodes in Settings or mark episodes played to make room." : null;
+    if (queueNotice !== nextNotice) { queueNotice = nextNotice; changed(false); }
     const id = plan.ids.find(id => !attempted.has(id));
     if (id == null) return;
     attempted.add(id);
     try { await downloadEpisode(id); }
     catch (caught) {
-      if (!(caught instanceof DownloadError) || caught.scope === "device") return;
+      if (!(caught instanceof DownloadError) || caught.scope === "device") {
+        queueNotice = caught instanceof Error ? caught.message : "Automatic downloads paused. Keep Pods open to retry.";
+        changed(false);
+        return;
+      }
     }
   }
 }

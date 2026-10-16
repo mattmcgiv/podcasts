@@ -82,6 +82,7 @@ it("routes local media and navigations without caching API mutations", async () 
   expect(await fetchEvent(`${location.origin}/api/sync`)).toBeUndefined();
   expect(await fetchEvent(`${location.origin}/write`, { method: "POST" })).toBeUndefined();
   cache.match.mockResolvedValue(new Response("shell"));
+  vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Offline"));
   expect(await (await fetchEvent(`${location.origin}/#/recent`, { mode: "navigate" }))?.text()).toBe("shell");
   expect(cache.match).toHaveBeenCalledWith("/index.html");
   cache.match.mockResolvedValue(undefined);
@@ -119,10 +120,21 @@ it("normalizes a redirected Pages shell for offline navigation", async () => {
   const redirected = new Response("cached shell", { headers: { "Content-Type": "text/html" } });
   Object.defineProperty(redirected, "redirected", { value: true });
   cache.match.mockResolvedValue(redirected);
+  vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Offline"));
   vi.mocked(fetch).mockRejectedValue(new Error("offline"));
   const response = await fetchEvent(`${location.origin}/`, { mode: "navigate" });
   expect(response?.redirected).toBe(false);
   expect(response?.status).toBe(200);
   expect(response?.headers.get("Content-Type")).toBe("text/html");
   expect(await response?.text()).toBe("cached shell");
+});
+
+it("loads the current app on the first navigation and falls back to a complete cached shell on network failure", async () => {
+  cache.match.mockResolvedValue(new Response("old shell"));
+  vi.mocked(fetch).mockResolvedValueOnce(new Response("new shell", { headers: { "Content-Type": "text/html" } }));
+  expect(await (await fetchEvent(`${location.origin}/`, { mode: "navigate" }))?.text()).toBe("new shell");
+  expect(cache.match).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenLastCalledWith(expect.anything(), { cache: "no-store", signal: expect.any(AbortSignal) });
+  vi.mocked(fetch).mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+  expect(await (await fetchEvent(`${location.origin}/`, { mode: "navigate" }))?.text()).toBe("old shell");
 });

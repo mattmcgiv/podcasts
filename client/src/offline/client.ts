@@ -60,7 +60,7 @@ function friendlySyncError(message: string): string {
 export async function state(): Promise<LocalState> {
   const raw = await readRecord<LocalState>("meta", "state");
   if (!raw) return await updateState(() => {});
-  if ((raw.preferences && "pins" in raw.preferences) || !raw.automaticEpisodesV2) return await updateState(() => {});
+  if ((raw.preferences && "pins" in raw.preferences) || !raw.automaticEpisodesV2 || raw.preferences?.automatic == null) return await updateState(() => {});
   return raw;
 }
 /** Dismiss only the entries displayed when Clear all was tapped, even if a sync races it. */
