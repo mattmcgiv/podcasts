@@ -575,6 +575,7 @@ fn action_core(action: &Value) -> Value {
         "field": action.get("field").cloned().unwrap_or(Value::Null),
         "value": action.get("value").cloned().unwrap_or(Value::Null),
         "base_revision": action.get("base_revision").cloned().unwrap_or(Value::Null),
+        "changed_at": action.get("changed_at").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -663,7 +664,23 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
             let field = action["field"].as_str().ok_or_else(||Error::Invalid("field required".into()))?;
             let base = action["base_revision"].as_i64().ok_or_else(||Error::Invalid("base_revision required".into()))?;
             let revision: i64 = tx.query_row("SELECT revision FROM browser_field_versions WHERE entity=? AND field=?",params![entity,field],|r|r.get(0)).optional()?.unwrap_or(0);
+            let changed_at = match action.get("changed_at") {
+                None => None,
+                Some(value) => Some(value.as_i64().filter(|at| (1..=9_007_199_254_740_991).contains(at))
+                    .ok_or_else(|| Error::Invalid("invalid change timestamp".into()))?),
+            };
             let mut stale = revision != base;
+            let mut superseded = false;
+            if let Some(at) = changed_at {
+                let previous: Option<(i64, String)> = tx.query_row(
+                    "SELECT changed_at,operation_id FROM browser_field_changes WHERE entity=? AND field=?",
+                    params![entity,field], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+                let previous = previous.unwrap_or((tx.query_row(
+                    "SELECT updated_at*1000 FROM browser_field_writers WHERE entity=? AND field=?",
+                    params![entity,field], |r| r.get(0)).optional()?.unwrap_or(0), String::new()));
+                superseded = (at, id) <= (previous.0, previous.1.as_str());
+                stale = superseded;
+            }
             // Equal edits are acknowledgements, not fresh writes. Watermarks commute by max.
             let mut identical = false;
             if entity == "settings" {
@@ -673,6 +690,7 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                     if let Some(value) = action["value"].as_i64().filter(|v|*v>=0) {
                         identical = value <= settings[field].as_i64().unwrap_or(0);
                         stale = false;
+                        superseded = false;
                     }
                 }
             } else if entity == "subscription" {
@@ -696,7 +714,7 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                     }
                 }
             }
-            if identical { stale = false; }
+            if identical && !superseded { stale = false; }
             if !stale && !identical {
                 let value = &action["value"];
                 if entity == "settings" {
@@ -801,7 +819,14 @@ pub fn apply_actions(backend: &Backend, payload: Value) -> Result<Value, Error> 
                     }
                 }
             }
-            let result = if stale {
+            // Even an equal value advances the event clock: a delayed intermediate edit must not win.
+            if !stale {
+                let at = changed_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                tx.execute("INSERT INTO browser_field_changes VALUES(?,?,?,?) ON CONFLICT(entity,field) DO UPDATE SET changed_at=excluded.changed_at,operation_id=excluded.operation_id WHERE (excluded.changed_at,excluded.operation_id)>(browser_field_changes.changed_at,browser_field_changes.operation_id)",params![entity,field,at,id])?;
+            }
+            let result = if superseded {
+                json!({"id":id,"status":"superseded","revision":revision})
+            } else if stale {
                 json!({"id":id,"status":"conflict","revision":revision})
             } else if identical {
                 json!({"id":id,"status":"applied","revision":revision})

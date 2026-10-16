@@ -307,7 +307,7 @@ describe("synchronization", () => {
     await expect(synchronize()).rejects.toThrow();
     expect((await state()).snapshot?.episodes[0].audio_url).toContain("/_media/");
   });
-  it("acknowledges ordered changes, rebases subsequent changes, and retains conflicts", async () => {
+  it("acknowledges ordered changes, rebases subsequent changes, and automatically accepts shared values for legacy conflicts", async () => {
     await seed();
     await updateState(s => {
       s.outbox = [
@@ -327,11 +327,43 @@ describe("synchronization", () => {
     const promise = synchronize(); expect(synchronize()).toBe(promise);
     await promise;
     expect(posted).toEqual(["op1", "op3"]);
-    expect((await state()).outbox).toHaveLength(1);
-    expect((await state()).outbox[0].conflict).toBe(1);
-    await resolveConflict("op3", false);
+    expect((await state()).snapshot?.episodes[1].played_at).toBeNull();
     expect((await state()).outbox).toHaveLength(0);
     expect((await state()).lastSync).not.toBeNull();
+  });
+  it("drains existing conflicts and accepts newer shared values even during push-only sync", async () => {
+    await seed();
+    await updateState(s => { s.outbox = [{ id: "legacy", sequence: 1, entity: "settings", field: "speed", value: 2, base_revision: 0, conflict: 4 }]; });
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify(snapshot())));
+    await synchronize(false);
+    expect((await state()).outbox).toEqual([]);
+    expect((await state()).snapshot?.settings.speed).toBe(1);
+    await updateState(s => { s.outbox = [{ id: "late", sequence: 2, entity: "settings", field: "speed", value: 2, base_revision: 0, changed_at: 100 }]; });
+    vi.mocked(fetch).mockImplementation(async url => new Response(JSON.stringify(String(url).endsWith("/sync/actions")
+      ? { results: [{ id: "late", status: "superseded", revision: 4 }] } : snapshot())));
+    await synchronize(false);
+    expect((await state()).outbox).toEqual([]);
+    expect((await state()).snapshot?.settings.speed).toBe(1);
+  });
+  it("timestamps edits once and keeps their timestamps and identities across lost responses", async () => {
+    await seed();
+    await enqueue("settings", "speed", 1.5);
+    await synchronize(false).catch(() => {});
+    const first = (await state()).outbox[0];
+    expect(first.changed_at).toBeGreaterThan(0);
+    const posted: unknown[] = [];
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/sync/actions")) { posted.push(JSON.parse(String(init?.body)).actions[0]); throw new Error("lost reply"); }
+      return new Response(JSON.stringify(snapshot()));
+    });
+    await synchronize(false).catch(() => {});
+    await synchronize(false).catch(() => {});
+    expect(posted).toHaveLength(2);
+    expect(posted[0]).toEqual(posted[1]);
+    expect(posted[0]).toMatchObject({ id: first.id, changed_at: first.changed_at });
+    await enqueue("settings", "speed", 2);
+    await synchronize(false).catch(() => {});
+    expect((await state()).outbox.at(-1)!.changed_at).toBeGreaterThan(first.changed_at!);
   });
   it("sends only unsent latest edits and retains a rejected 409 item", async () => {
     await seed();

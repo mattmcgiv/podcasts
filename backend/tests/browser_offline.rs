@@ -2211,3 +2211,52 @@ fn snapshot_includes_feedback_statuses() {
         &json!([{"id":"r1","kind":"bug","status":"done","created_at":10}])
     );
 }
+
+#[test]
+fn timestamped_changes_converge_regardless_of_delivery_order_and_retry() {
+    for reverse in [false, true] {
+        let (backend, _temp, _) = fixture();
+        let make = |id: &str, time: i64, value: &str| {
+            let mut p = action(id, 1, "theme", json!(value), 0);
+            p["client_id"] = json!(id);
+            p["actions"][0]["entity"] = json!("settings");
+            p["actions"][0]["changed_at"] = json!(time);
+            p
+        };
+        let old = make("old", 100, "dark");
+        let new = make("new", 200, "light");
+        let order = if reverse { [new.clone(), old.clone()] } else { [old.clone(), new.clone()] };
+        for p in order { apply_actions(&backend, p).unwrap(); }
+        assert_eq!(snapshot(&backend).unwrap()["settings"]["theme"], "light");
+        // A lost response cannot turn a retry into a new write.
+        apply_actions(&backend, old.clone()).unwrap();
+        assert_eq!(snapshot(&backend).unwrap()["settings"]["theme"], "light");
+        let mut collision = old;
+        collision["actions"][0]["changed_at"] = json!(300);
+        assert!(apply_actions(&backend, collision).is_err());
+        // Deterministic tie: operation ID, independent of arrival order.
+        apply_actions(&backend, make("z-tie", 200, "system")).unwrap();
+        let result = apply_actions(&backend, make("a-tie", 200, "dark")).unwrap();
+        assert_eq!(result["results"][0]["status"], "superseded");
+        assert_eq!(snapshot(&backend).unwrap()["settings"]["theme"], "system");
+        // Equal-value changes must advance the event timestamp too.
+        apply_actions(&backend, make("same", 400, "system")).unwrap();
+        assert_eq!(apply_actions(&backend, make("late", 300, "dark")).unwrap()["results"][0]["status"], "superseded");
+        assert_eq!(snapshot(&backend).unwrap()["settings"]["theme"], "system");
+    }
+}
+
+#[test]
+fn newer_rewind_wins_and_invalid_timestamps_fail() {
+    let (backend, _temp, manifest) = fixture();
+    let mut old = action("forward", 1, "position", json!({"seconds":6,"artifact_hash":manifest.hash}), 0);
+    old["actions"][0]["changed_at"] = json!(100);
+    apply_actions(&backend, old).unwrap();
+    let mut rewind = action("rewind", 2, "position", json!({"seconds":2,"artifact_hash":manifest.hash}), 0);
+    rewind["actions"][0]["changed_at"] = json!(200);
+    assert_eq!(apply_actions(&backend, rewind).unwrap()["results"][0]["status"], "applied");
+    assert_eq!(snapshot(&backend).unwrap()["episodes"][0]["position_secs"], 2.0);
+    let mut invalid = action("invalid-time", 3, "played", json!(true), 0);
+    invalid["actions"][0]["changed_at"] = json!(-1);
+    assert!(apply_actions(&backend, invalid).is_err());
+}

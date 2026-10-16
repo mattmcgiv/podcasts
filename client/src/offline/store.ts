@@ -31,10 +31,12 @@ export interface Snapshot {
 }
 export interface Operation {
   id: string; sequence: number; entity: string; field: string; value: unknown;
+  changed_at?: number;
   base_revision: number; conflict?: number; sent?: boolean; error?: string;
 }
 export interface Preferences { limit: number; count: number }
 export interface LocalState {
+  lastChangeAt?: number;
   device_name?: string; client_id: string; sequence: number; snapshot: Snapshot | null; outbox: Operation[];
   preferences: Preferences; lastSync: number | null;
   notificationsClearedThrough?: number;

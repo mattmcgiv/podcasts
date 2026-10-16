@@ -159,3 +159,9 @@ CREATE TABLE IF NOT EXISTS browser_missing_artifacts (
     episode_id INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
     detected_at INTEGER NOT NULL
 );
+
+-- Stable event timestamps for automatic per-field last-write-wins reconciliation.
+CREATE TABLE IF NOT EXISTS browser_field_changes (
+    entity TEXT NOT NULL, field TEXT NOT NULL, changed_at INTEGER NOT NULL,
+    operation_id TEXT NOT NULL, PRIMARY KEY(entity, field)
+);

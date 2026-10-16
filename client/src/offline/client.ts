@@ -141,7 +141,7 @@ function coalesceOutbox(outbox: Operation[]): Operation[] {
   return outbox.filter(operation => operation.conflict != null || operation.sent || operation.error || last.get(`${operation.entity}:${operation.field}`) === operation);
 }
 
-type SyncAction = { id: string; sequence: number; entity: string; field: string; value: unknown; base_revision: number };
+type SyncAction = { id: string; sequence: number; entity: string; field: string; value: unknown; base_revision: number; changed_at?: number };
 type ActionResult = { id: string; status: string; revision: number; error?: string };
 
 async function postActions(clientId: string, actions: SyncAction[]): Promise<ActionResult[]> {
@@ -161,10 +161,15 @@ async function postActions(clientId: string, actions: SyncAction[]): Promise<Act
   }
 }
 
+function changeTime(s: LocalState): number {
+  s.lastChangeAt = Math.max(Date.now(), (s.lastChangeAt ?? 0) + 1);
+  return s.lastChangeAt;
+}
+
 export async function enqueue(entity: string, field: string, value: unknown): Promise<void> {
   try {
   await updateState(s => {
-    s.outbox.push({ id: crypto.randomUUID(), sequence: ++s.sequence, entity, field, value,
+    s.outbox.push({ id: crypto.randomUUID(), sequence: ++s.sequence, entity, field, value, changed_at: changeTime(s),
       base_revision: (field === "position" ? playbackBases.get(entity) : undefined) ?? s.snapshot?.versions[`${entity}:${field}`] ?? 0 });
   });
   } catch (error) {
@@ -230,7 +235,7 @@ async function migrateSharedPreferences(): Promise<void> {
     if (s.sharedPreferencesV1) return;
     const queue = (field: string, value: unknown) => {
       if (!s.outbox.some(o => o.entity === "settings" && o.field === field)) s.outbox.push({
-        id: crypto.randomUUID(), sequence: ++s.sequence, entity: "settings", field, value,
+        id: crypto.randomUUID(), sequence: ++s.sequence, entity: "settings", field, value, changed_at: changeTime(s),
         base_revision: s.snapshot?.versions[`settings:${field}`] ?? 0,
       });
     };
@@ -245,6 +250,13 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
     await migrateSharedPreferences();
     if (!(await probeMac())) throw new Error(MAC_OFFLINE_MESSAGE);
     if (refresh || !(await state()).snapshot) await receiveSnapshot();
+    // Older clients retained revision conflicts without recording when the edit occurred.
+    // Pull first and accept the shared value for these; never invent a fresh edit time.
+    if ((await state()).outbox.some(o => o.conflict != null)) {
+      await receiveSnapshot();
+      await updateState(s => { s.outbox = s.outbox.filter(o => o.conflict == null); });
+    }
+    let sharedWon = false;
     while (true) {
       // A sent operation is immutable: a lost response must retry the same identity.
       const current = await updateState(s => { s.outbox = coalesceOutbox(s.outbox); });
@@ -257,7 +269,7 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
       }).slice(0, ACTION_BATCH);
       if (!chunk.length) break;
       await updateState(s => { for (const op of s.outbox) if (chunk.some(c => c.id === op.id)) op.sent = true; });
-      const results = await postActions(current.client_id, chunk.map(({id,sequence,entity,field,value,base_revision}) => ({id,sequence,entity,field,value,base_revision})));
+      const results = await postActions(current.client_id, chunk.map(({id,sequence,entity,field,value,base_revision,changed_at}) => ({id,sequence,entity,field,value,base_revision,changed_at})));
       let missing = false;
       for (const operation of chunk) {
         const result = results.find(r => r.id === operation.id);
@@ -273,16 +285,19 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
               if (queued.entity === operation.entity && queued.field === operation.field && !queued.sent && queued.conflict == null && queued.base_revision === operation.base_revision) queued.base_revision = result.revision;
             }
             if (operation.field === "position" && playbackBases.get(operation.entity) === operation.base_revision) playbackBases.set(operation.entity, result.revision);
+          } else if (result.status === "superseded" || result.status === "conflict") {
+            s.outbox = s.outbox.filter(o => o.id !== operation.id);
+            playbackBases.delete(operation.entity);
+            sharedWon = true;
           } else {
             const pending = s.outbox.find(o => o.id === operation.id);
-            if (pending && result.status === "conflict") pending.conflict = result.revision;
-            else if (pending) pending.error = result.error ?? "Change not acknowledged by the Mac.";
+            if (pending) pending.error = result.error ?? "Change not acknowledged by the Mac.";
           }
         });
       }
       if (missing) throw new Error("Mac did not acknowledge every change. Pending changes are saved and will retry.");
     }
-    if (refresh) await receiveSnapshot();
+    if (refresh || sharedWon) await receiveSnapshot();
     await updateState(s => { s.lastSync = Date.now(); });
     lastError = null;
     emitEpisodesChanged();
@@ -477,7 +492,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
   } else if (route === "/refresh") {
     if (!(await probeMac())) throw new Error(MAC_OFFLINE_MESSAGE);
     result = await network("/refresh", { method: "POST", signal: init.signal ?? AbortSignal.timeout(REFRESH_TIMEOUT_MS) });
-    // Await the sync so the snapshot advances, but its conflicts surface via the conflict UI, not as the refresh result.
+    // Refresh outcome remains usable even if the follow-up synchronization fails.
     try { await synchronize(); } catch { /* refresh outcome already returned */ }
   }
   else if (route === "/refresh-status") result = cachedRefreshStatus(snapshot.refresh_status);

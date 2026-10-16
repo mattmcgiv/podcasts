@@ -53,9 +53,9 @@ it("distinguishes queued changes, conflicts, and the last successful sync", asyn
   await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Changes on this device are waiting to sync"));
   local.outbox[0].conflict=4;
   window.dispatchEvent(new Event("pods-offline-changed"));
-  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed Shared episode"));
-  expect(screen.getByRole("button", { name: /Keep this device.s change/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Use the shared change" })).toBeInTheDocument();
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Changes on this device are waiting to sync"));
+  expect(screen.queryByRole("button", { name: /Keep this device.s change/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use the shared change" })).not.toBeInTheDocument();
   local.outbox=[];local.lastSync=123;
   window.dispatchEvent(new Event("pods-offline-changed"));
   await waitFor(()=>expect(screen.queryByRole("status")).not.toBeInTheDocument());
@@ -67,7 +67,7 @@ it("distinguishes queued changes, conflicts, and the last successful sync", asyn
 it("names a feedback report in conflict and rejection notices", async()=>{
   local.outbox=[{id:"1",sequence:1,entity:"feedback",field:"r1",value:{kind:"bug",body:"x"},base_revision:0,conflict:4}];
   render(<SyncStatus/>);
-  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed a feedback report"));
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("Changes on this device are waiting to sync"));
   local.outbox=[{id:"1",sequence:1,entity:"feedback",field:"r1",value:{kind:"bug",body:"x"},base_revision:0,error:"report too long"}];
   window.dispatchEvent(new Event("pods-offline-changed"));
   await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("did not accept a change to a feedback report"));
@@ -86,14 +86,8 @@ it("does not flash Sync now while a played change is already syncing", async()=>
   await act(async () => { await vi.mocked(state).mock.results.at(-1)?.value; });
   expect(screen.queryByRole("button", { name: "Sync now" })).not.toBeInTheDocument();
 });
-it("keeps this device's change or the shared one, and retries or discards a rejected change", async()=>{
-  local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0,conflict:4}];
+it("retries or discards a rejected change", async()=>{
   render(<SyncStatus/>);
-  fireEvent.click(await screen.findByRole("button", { name: /Keep this device.s change/ }));
-  await waitFor(()=>expect(resolveConflict).toHaveBeenCalledWith("1", true));
-  await waitFor(()=>expect(screen.getByRole("button", { name: "Use the shared change" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "Use the shared change" }));
-  await waitFor(()=>expect(resolveConflict).toHaveBeenCalledWith("1", false));
   local.outbox=[{id:"2",sequence:2,entity:"1",field:"played",value:true,base_revision:0,error:"That episode is gone."}];
   window.dispatchEvent(new Event("pods-offline-changed"));
   expect(await screen.findByRole("status")).toHaveTextContent("That episode is gone.");
@@ -136,14 +130,14 @@ it("asks for the passkey when the Mac needs a sign-in and reports a failed attem
   fireEvent.click(screen.getByRole("button",{name:"Continue with passkey"}));
   expect(await screen.findByRole("alert")).toHaveTextContent("Passkey sign-in failed");
 });
-it("names a subscription or setting in conflict notices", async()=>{
+it("names a subscription or setting in rejection notices", async()=>{
   local.snapshot!.shows=[{feed_url:"https://s.example/rss",title:"Sub Show"} as unknown as Show];
-  local.outbox=[{id:"1",sequence:1,entity:"subscription",field:"https://s.example/rss",value:true,base_revision:0,conflict:4}];
+  local.outbox=[{id:"1",sequence:1,entity:"subscription",field:"https://s.example/rss",value:true,base_revision:0,error:"Invalid"}];
   render(<SyncStatus/>);
-  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed Sub Show"));
-  local.outbox=[{id:"2",sequence:2,entity:"settings",field:"autoplay",value:true,base_revision:0,conflict:4}];
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("did not accept a change to Sub Show"));
+  local.outbox=[{id:"2",sequence:2,entity:"settings",field:"autoplay",value:true,base_revision:0,error:"Invalid"}];
   window.dispatchEvent(new Event("pods-offline-changed"));
-  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("both changed a setting"));
+  await waitFor(()=>expect(screen.getByRole("status")).toHaveTextContent("did not accept a change to a setting"));
 });
 it("falls back when the dismissal store throws", async()=>{
   vi.spyOn(sessionStorage,"getItem").mockImplementationOnce(()=>{throw new Error("denied");});
@@ -163,14 +157,15 @@ it("syncs and prefetches from the Sync now button", async()=>{
   await waitFor(()=>expect(prefetch).toHaveBeenCalled());
   await waitFor(()=>expect(screen.getByRole("button",{name:"Sync now"})).toBeEnabled());
 });
-it("retries a conflicted change even when the prefetch fails", async()=>{
-  local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0,conflict:4}];
+it("retries a rejected change even when prefetch fails", async()=>{
+  local.outbox=[{id:"1",sequence:1,entity:"1",field:"played",value:true,base_revision:0,error:"Invalid"}];
   vi.mocked(prefetch).mockRejectedValue(new Error("offline"));
   render(<SyncStatus/>);
-  fireEvent.click(await screen.findByRole("button",{name:/Keep this device.s change/}));
+  fireEvent.click(await screen.findByRole("button",{name:"Try again"}));
   await waitFor(()=>expect(resolveConflict).toHaveBeenCalledWith("1",true));
-  await waitFor(()=>expect(screen.getByRole("button",{name:"Use the shared change"})).toBeEnabled());
+  await waitFor(()=>expect(screen.getByRole("button",{name:"Try again"})).toBeEnabled());
 });
+
 it("hides continue listening when the episode detail fails to load", async()=>{
   vi.mocked(Api.episode).mockRejectedValueOnce(new Error("gone"));
   render(<ContinueListening/>);

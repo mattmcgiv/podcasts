@@ -30,6 +30,10 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
+### October 16 automatic conflict resolution
+
+Per-field event timestamps replace manual conflict choices in the updated client. Retries keep their original timestamps and operation IDs; equal values advance the event clock, and exact timestamp ties use operation ID. Existing untimestamped conflicts accept the shared snapshot. The Mac runs immutable release `20261016-151709`; the running binary matched the build, the new clock table was present, and the loopback auth-status endpoint returned 200. The pre-install SQLite backup passed integrity checking. Validation passed 623 Rust tests and 519 client tests plus existing coverage checks. Cloudflare reported Success; public HTML, service worker, and `assets/main-DYd7C_kQ.js` matched the build byte-for-byte.
+
 ### October 16 download and missing-episode repair
 
 The server had 346 ready jobs and publications dated October 16; feed refresh reported 29 feeds and zero errors. The public client still served the October 13 asset `main-CgihtaoE.js`, so the October 15 resume fix had not reached production. Theo episode 26664's 821,098,001-byte video matched all 784 manifest chunk hashes on disk.
@@ -140,8 +144,8 @@ An inactive partial download shows "Download paused" and a Retry button, includi
 Only complete downloads can play. The service worker supports byte ranges. It does not load the whole episode into memory.
 
 Playback positions, played state, subscriptions, and app settings enter a durable local queue before synchronization.
-Retries reuse operation IDs. The backend rejects conflicting edits to the same field.
-Settings shows the local and shared values, with the device that wrote the shared value, and offers **Keep this device** and **Use shared** for conflicts. Backward seeks remain valid edits.
+Retries reuse operation IDs and their original change timestamps. The backend resolves each field automatically: the latest change timestamp wins, with operation ID breaking exact ties deterministically. A delayed offline edit cannot replace a newer timestamped change, and a newer backward seek remains valid. Notification dismissal remains a maximum watermark.
+Existing queued conflicts predate change timestamps; after a successful snapshot pull they accept the current shared value automatically. Device clocks supply timestamps, so cross-device ordering assumes their clocks are reasonably accurate. Old clients without timestamps retain revision checks for compatibility until updated.
 An expired login does not lock the cached library. A new login is necessary only for synchronization.
 
 When the Mac is off, the phone keeps using that cached library and any complete downloads. Listen, Played, Shows, search, playback, and mark-played stay local. Sync, feed refresh, and new audio transfers fail within a few seconds instead of blocking the app. The next successful Mac connection retries automatically, with increasing delay while the Mac stays down.

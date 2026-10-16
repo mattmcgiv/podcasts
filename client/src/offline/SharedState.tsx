@@ -13,7 +13,6 @@ const NOTICE_KEY = "pods-sync-notice";
 type SyncNotice =
   | { kind: "sign-in"; key: "auth"; text: string }
   | { kind: "offline"; key: string; text: string }
-  | { kind: "conflict"; key: string; text: string; operationId: string }
   | { kind: "rejected"; key: string; text: string; operationId: string }
   | { kind: "pending"; key: string; text: string }
   | { kind: "unsynced"; key: "never"; text: string };
@@ -35,17 +34,6 @@ export function syncNotice(local: LocalState): SyncNotice | null {
   }
   if (error) {
     return { kind: "offline", key: `offline:${error}`, text: "The Mac is not reachable. Downloaded episodes still play." };
-  }
-  const conflicts = local.outbox.filter(operation => operation.conflict != null);
-  if (conflicts.length > 0) {
-    const operation = conflicts[0];
-    const more = conflicts.length > 1 ? ` ${conflicts.length - 1} more need the same choice after this.` : "";
-    return {
-      kind: "conflict",
-      key: `conflict:${operation.id}`,
-      operationId: operation.id,
-      text: `This device and the shared library both changed ${changedThing(local, operation)}.${more}`,
-    };
   }
   const rejected = local.outbox.filter(operation => operation.error);
   if (rejected.length > 0) {
@@ -138,16 +126,6 @@ export function SyncStatus() {
         <button type="button" className={`settings-btn primary${busy === "sync" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "sync"} onClick={() => void run("sync", syncNow)}>
           {busy === "sync" ? "Syncing…" : notice.kind === "offline" ? "Try again" : "Sync now"}
         </button>
-      )}
-      {notice.kind === "conflict" && (
-        <>
-          <button type="button" className={`settings-btn primary${busy === "keep" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "keep"} onClick={() => void run("keep", () => choose(notice.operationId, true))}>
-            {busy === "keep" ? "Keeping this device’s change…" : "Keep this device’s change"}
-          </button>
-          <button type="button" className={`settings-btn${busy === "shared" ? " is-busy" : ""}`} disabled={working} aria-busy={busy === "shared"} onClick={() => void run("shared", () => choose(notice.operationId, false))}>
-            {busy === "shared" ? "Using the shared change…" : "Use the shared change"}
-          </button>
-        </>
       )}
       {notice.kind === "rejected" && (
         <>
