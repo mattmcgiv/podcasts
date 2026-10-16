@@ -442,7 +442,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
     }
     else if (match[2] === "show-notes") result = episode.show_notes;
     else throw new Error("This episode is already processed.");
-  } else if (route === "/recent") result = page(episodes.filter(e => e.played_at == null && e.archived_at == null && (e.downloaded || e.download_total != null)));
+  } else if (route === "/recent") result = page(episodes.filter(e => e.played_at == null && e.archived_at == null));
   else if (route === "/played") result = page(episodes.filter(e => e.played_at != null).sort((a, b) => (b.played_at ?? 0) - (a.played_at ?? 0)));
   else if (route === "/shows" && method === "GET") result = snapshot.shows;
   else if (route === "/youtube/videos" && method === "POST") {

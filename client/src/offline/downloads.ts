@@ -98,7 +98,9 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
   }
   if (used + manifest.bytes > s.preferences.limit) throw new DownloadError("Download limit reached. Increase the storage limit.", "device");
   const estimate = await navigator.storage?.estimate?.();
-  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < manifest.bytes + 20 * 1024 ** 2) throw new DownloadError("Browser storage is full. Increase the storage limit or free space on this device.", "device");
+  const existing = downloads.find(d => d.hash === manifest.hash);
+  const remaining = manifest.bytes - Math.min(existing?.received ?? 0, manifest.bytes);
+  if (estimate?.quota && estimate.usage != null && estimate.quota - estimate.usage < remaining + 20 * 1024 ** 2) throw new DownloadError("Browser storage is full. Increase the storage limit or free space on this device.", "device");
 }
 
 /**
@@ -263,8 +265,9 @@ export async function prefetch(): Promise<void> {
   const queue = episodes.slice().sort((a, b) => Number(b.id === last) - Number(a.id === last)).slice(0, s.preferences.count);
   for (const episode of queue) {
     if (!downloadEligible(episode.id, await state())) continue;
-    planned += episode.manifest?.bytes ?? 0;
-    if (planned > s.preferences.limit) break;
+    const bytes = episode.manifest?.bytes ?? 0;
+    if (planned + bytes > s.preferences.limit) continue;
+    planned += bytes;
     const downloaded = episode.manifest && await store.readRecord<Download>("downloads", episode.manifest.hash);
     if (downloaded?.complete) continue;
     try { await downloadEpisode(episode.id); }

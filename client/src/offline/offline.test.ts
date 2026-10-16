@@ -591,6 +591,33 @@ describe("verified downloads and local Range playback", () => {
     expect(emptyState().preferences.count).toBe(50);
     expect(emptyState().preferences).not.toHaveProperty("pins");
   });
+  it("skips an oversized episode and downloads later episodes that fit on repeated passes", async () => {
+    const bytes = await prepareAudio();
+    const digest = await digestOf(bytes);
+    await updateState(s => {
+      s.preferences.limit = 16;
+      s.snapshot!.episodes[0].manifest!.bytes = 100;
+      s.snapshot!.episodes[1].manifest!.chunks = [digest];
+    });
+    await prefetch();
+    await prefetch();
+    expect((await allDownloads()).map(d => [d.episode, d.complete])).toEqual([[2, true]]);
+    expect(artifactCalls()).toHaveLength(1);
+    expect((await localRequest<{ items: unknown[] }>("/recent")).items).toHaveLength(2);
+  });
+  it("reserves only remaining bytes when resuming near the browser quota", async () => {
+    await prepareAudio();
+    await writeRecord("downloads", hash, { hash, episode: 1, bytes: 8, received: 4, complete: false, touched: 0 });
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, "storage");
+    Object.defineProperty(navigator, "storage", { configurable: true, value: { estimate: async () => ({ quota: 20 * 1024 ** 2 + 100, usage: 96 }) } });
+    try {
+      await downloadEpisode(1);
+      expect(await readRecord("downloads", hash)).toMatchObject({ complete: true });
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, "storage", descriptor);
+      else Reflect.deleteProperty(navigator, "storage");
+    }
+  });
   it("quietly skips downloads and cleanups with nothing stored", async () => {
     await downloadEpisode(1);
     expect(await allDownloads()).toEqual([]);
@@ -791,19 +818,16 @@ describe("automatic Listen downloads", () => {
     await writeRecord("downloads", episodeHash, { hash: episodeHash, episode: episodeId, bytes: 8, complete, touched: 0 });
   }
 
-  it("lists downloaded and in-progress unplayed episodes on /recent", async () => {
+  it("lists all published unplayed episodes even before downloads start", async () => {
     await seed();
-    expect((await localRequest<{ items: unknown[] }>("/recent")).items).toEqual([]);
+    const recent = () => localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent");
+    expect((await recent()).items.map(e => [e.id, e.downloaded])).toEqual([[1, false], [2, false]]);
     await seedComplete(1, hash, false);
-    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items).toEqual([
-      expect.objectContaining({ id: 1, downloaded: false }),
-    ]);
+    expect((await recent()).items).toHaveLength(2);
     await seedComplete(1, hash, true);
-    expect((await localRequest<{ items: { id: number; downloaded?: boolean }[] }>("/recent")).items).toEqual([
-      expect.objectContaining({ id: 1, downloaded: true }),
-    ]);
-    await seedComplete(2, other, true);
-    expect((await localRequest<{ items: { id: number }[] }>("/recent")).items.map(e => e.id)).toEqual([1, 2]);
+    expect((await recent()).items.map(e => [e.id, e.downloaded])).toEqual([[1, true], [2, false]]);
+    await updateState(s => { s.snapshot!.episodes[1].archived_at = 1; });
+    expect((await recent()).items.map(e => e.id)).toEqual([1]);
   });
 
   it("normalizes legacy pins without clearing snapshot, outbox, or downloads", async () => {
@@ -920,6 +944,7 @@ describe("automatic Listen downloads", () => {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
     await seed();
+    await updateState(s => { s.snapshot!.episodes = s.snapshot!.episodes.slice(0, 1); });
     await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
     vi.mocked(fetch).mockResolvedValue(new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
     await downloadEpisode(1);
@@ -943,6 +968,7 @@ describe("automatic Listen downloads", () => {
 
   it("uses live transfer progress when the download record is not stored yet", async () => {
     await seed();
+    await updateState(s => { s.snapshot!.episodes = s.snapshot!.episodes.slice(0, 1); });
     setDownloadProgress({ episode: 1, received: 2, total: 8 });
     expect((await localRequest<{ items: { id: number; downloaded?: boolean; download_received?: number; download_total?: number }[] }>("/recent")).items).toEqual([
       expect.objectContaining({ id: 1, downloaded: false, download_received: 2, download_total: 8 }),
@@ -955,6 +981,7 @@ describe("automatic Listen downloads", () => {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
     await seed();
+    await updateState(s => { s.snapshot!.episodes = s.snapshot!.episodes.slice(0, 1); });
     await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
     let finishFetch: (value: Response) => void = () => {};
     vi.mocked(fetch).mockImplementation(url => {
@@ -984,6 +1011,7 @@ describe("automatic Listen downloads", () => {
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const digestHex = [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("");
     await seed();
+    await updateState(s => { s.snapshot!.episodes = s.snapshot!.episodes.slice(0, 1); });
     await updateState(s => { s.snapshot!.episodes[0].manifest!.chunks = [digestHex]; });
     let finishFetch: (value: Response) => void = () => {};
     vi.mocked(fetch).mockImplementation(url => {

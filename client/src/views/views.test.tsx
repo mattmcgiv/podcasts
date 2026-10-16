@@ -113,7 +113,7 @@ describe("RecentView", () => {
     });
     wrap(<RecentView />);
     await screen.findByText("Incoming");
-    expect(screen.getByText("Downloading 25%")).toBeInTheDocument();
+    expect(screen.getByText("Download paused · 25%")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "25");
   });
 

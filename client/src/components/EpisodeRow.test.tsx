@@ -100,10 +100,21 @@ describe("EpisodeRow client download progress", () => {
         onAction={() => {}}
       />,
     );
-    expect(screen.getByText("Downloading 25%")).toBeInTheDocument();
+    expect(screen.getByText("Download paused · 25%")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "25");
     expect(screen.queryByText("Ad-free")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Incoming/ })).toBeDisabled();
+  });
+
+  it("offers a download for a newly synchronized episode and reports pre-transfer failures", async () => {
+    window.PODS_LOCAL_CLIENT = true;
+    vi.mocked(downloadErrorFor).mockReturnValue("Download limit reached. Increase the storage limit.");
+    render(<EpisodeRow item={episode({ id: 9, downloaded: false, played_at: null, ad_removal_state: "ad-free" })}
+      onPlay={() => {}} actionLabel="Mark played" onAction={() => {}} />);
+    expect(screen.getByText("Not downloaded")).toBeInTheDocument();
+    expect(screen.getByText(/Download limit reached/)).toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Download" })));
+    expect(downloadEpisode).toHaveBeenCalledWith(9);
   });
 
   it("updates the bar from live download progress events", () => {
@@ -125,12 +136,12 @@ describe("EpisodeRow client download progress", () => {
         onAction={() => {}}
       />,
     );
-    expect(screen.getByText("Downloading 0%")).toBeInTheDocument();
+    expect(screen.getByText("Download paused · 0%")).toBeInTheDocument();
     act(() => setDownloadProgress({ episode: 1, received: 4, total: 8 }));
     expect(screen.getByText("Downloading 50%")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Download progress" })).toHaveAttribute("aria-valuenow", "50");
     act(() => setDownloadProgress({ episode: 2, received: 8, total: 8 }));
-    expect(screen.getByText("Downloading 0%")).toBeInTheDocument();
+    expect(screen.getByText("Download paused · 0%")).toBeInTheDocument();
   });
 
   it("shows why a partial download stopped and retries it from the row", async () => {
@@ -168,8 +179,8 @@ describe("EpisodeRow client download progress", () => {
     act(() => setDownloadProgress(null));
     vi.mocked(downloadErrorFor).mockReturnValue(null);
     act(() => { window.dispatchEvent(new Event("pods-offline-changed")); });
-    expect(screen.getByText("Downloading 10%")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Retry download" })).not.toBeInTheDocument();
+    expect(screen.getByText("Download paused · 10%")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry download" })).toBeInTheDocument();
   });
 });
 

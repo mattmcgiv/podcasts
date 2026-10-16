@@ -30,6 +30,14 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
+### October 16 download and missing-episode repair
+
+The server had 346 ready jobs and publications dated October 16; feed refresh reported 29 feeds and zero errors. The public client still served the October 13 asset `main-CgihtaoE.js`, so the October 15 resume fix had not reached production. Theo episode 26664's 821,098,001-byte video matched all 784 manifest chunk hashes on disk.
+
+Listen previously hid publications without download records, and automatic prefetch stopped at the first episode exceeding the remaining budget. The client now lists all published unplayed episodes, offers manual downloads, skips entries that do not fit, distinguishes inactive partial transfers, and reserves only remaining bytes against browser quota. No library data was cleared.
+
+All 517 frontend tests, TypeScript, and the existing coverage checks passed. Production was uploaded through the existing Cloudflare dashboard in local Chrome. Browser-harness could not read Chrome's DevToolsActivePort because macOS returned `Operation not permitted`; the available Chrome UI connection completed the same zip-upload workflow. Public HTML, `sw.js`, and `assets/main-CmkJfbAI.js` matched the build byte-for-byte, with the expected CSP headers. Physical iPhone activation and transfer completion still require confirmation after reopening Pods.
+
 See [iPhone and iPad rollout evidence](ipad-sync-implementation.md) for the September 19 rollout and remaining deployment steps.
 
 ### Historical September 5 deployment evidence
@@ -121,13 +129,14 @@ Broader automatic monitoring remains appropriate.
 
 ## Offline behavior
 
-The default automatic download queue contains the oldest fifty unplayed episodes, within a 2 GiB limit.
+Listen lists all published unplayed episodes, including episodes not downloaded yet. Undownloaded rows offer a Download button and remain unavailable for playback until complete.
+The default automatic download queue considers the oldest fifty unplayed episodes, within a 2 GiB limit. An episode that exceeds the remaining budget is skipped so later smaller episodes can still download.
 The file currently playing is protected from eviction.
 Eviction removes played episodes first, then the most recent unplayed episodes.
 Downloads pause while the app is hidden. Verified 1 MiB chunks remain available for the next attempt.
 A resumed download keeps its stored byte count on screen while it re-verifies those chunks; it does not restart from 0%.
 A chunk request is retried twice after a dropped connection, a Mac error, or 20 seconds without data. A slow link that keeps delivering is not cut off.
-After the retries fail, the row shows "Download paused" with the reason and a Retry button. The next sync also retries. One failed episode no longer blocks the rest of the download queue; only a device-wide failure (no Mac, no storage, hidden page) stops it.
+An inactive partial download shows "Download paused" and a Retry button, including after reopening the page. After retries fail, the row also shows the reason. Browser quota checks reserve only the remaining bytes on resume. The next sync also retries. One failed episode no longer blocks the rest of the download queue; only a device-wide failure (no Mac, no storage, hidden page) stops it.
 Only complete downloads can play. The service worker supports byte ranges. It does not load the whole episode into memory.
 
 Playback positions, played state, subscriptions, and app settings enter a durable local queue before synchronization.

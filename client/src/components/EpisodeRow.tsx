@@ -60,7 +60,7 @@ function useDownloadStatus(item: EpisodeItem): DownloadStatus {
     const fraction = Math.min(1, Math.max(0, (item.download_received ?? 0) / item.download_total));
     return { fraction, live: false, error: downloadErrorFor(item.id) };
   }
-  return { fraction: null, live: false, error: null };
+  return { fraction: null, live: false, error: downloadErrorFor(item.id) };
 }
 
 function stageToCoarseState(stage: AdRemovalStage): EpisodeItem["ad_removal_state"] {
@@ -91,7 +91,8 @@ export function EpisodeRow({
   const progress = progressFraction(item);
   const download = useDownloadStatus(item);
   const downloading = download.fraction != null;
-  const downloadPaused = downloading && !download.live && download.error != null;
+  const downloadPaused = downloading && !download.live;
+  const needsDownload = offlineEnabled() && !item.downloaded && item.played_at == null && item.ad_removal_state === "ad-free";
   const [downloadRetrying, setDownloadRetrying] = useState(false);
   const [adBusy, setAdBusy] = useState(false);
   const [adError, setAdError] = useState<string | null>(null);
@@ -204,7 +205,7 @@ export function EpisodeRow({
               >
                 <span style={{ width: `${downloadPercent === 0 ? 0 : Math.max(4, downloadPercent)}%` }} />
               </span>
-              {downloadPaused && <span className="download-error">{download.error}</span>}
+              {downloadPaused && download.error && <span className="download-error">{download.error}</span>}
             </>
           ) : (
             <>
@@ -212,7 +213,7 @@ export function EpisodeRow({
                 className={`ad-removal-state is-${effectiveState}`}
                 style={effectiveState === "ad-free" ? { color: "var(--text-dim)" } : undefined}
               >
-                {adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
+                {needsDownload ? "Not downloaded" : adStageLabel(effectiveState, effectiveStage, effectiveBlocking, offlineEnabled())}
               </span>
               {adWindowProgress != null && (
                 <span
@@ -228,6 +229,7 @@ export function EpisodeRow({
               )}
             </>
           )}
+          {!downloading && needsDownload && download.error && <span className="download-error">{download.error}</span>}
           {adError && <span className="ad-removal-error">{adError}</span>}
           {progress > 0 && !item.played_at && !downloading && (
             <span className="row-progress" role="progressbar" aria-valuenow={Math.round(progress * 100)}>
@@ -236,16 +238,16 @@ export function EpisodeRow({
           )}
         </span>
       </button>
-      {downloadPaused && (
+      {(downloadPaused || (needsDownload && !downloading)) && (
         <button
           type="button"
           className="ad-removal-action ad-removal-retry download-retry"
-          aria-label="Retry download"
-          title="Retry download"
+          aria-label={downloading ? "Retry download" : "Download"}
+          title={downloading ? "Retry download" : "Download"}
           disabled={downloadRetrying}
           onClick={() => void retryDownload()}
         >
-          {downloadRetrying ? "…" : "Retry"}
+          {downloadRetrying ? "…" : downloading ? "Retry" : "Download"}
         </button>
       )}
       {effectiveAction && !downloadPaused && (
