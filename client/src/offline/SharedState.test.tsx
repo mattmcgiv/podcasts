@@ -1,17 +1,17 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { ContinueListening, SyncStatus } from "./SharedState";
+import { ContinueListening, DownloadQueueStatus, SyncStatus } from "./SharedState";
 import { emptyState, type LocalState } from "./store";
 import type { Show } from "../types";
 import { Api } from "../api";
 import { resolveConflict, state, syncError, syncInFlight, synchronize } from "./client";
-import { prefetch } from "./downloads";
+import { prefetch, downloadQueueNotice } from "./downloads";
 import { signInAndSync } from "./signIn";
 import type { EpisodeDetail } from "../types";
 const player = vi.hoisted(() => ({current:null as {id:number}|null,playEpisode:vi.fn()}));
 vi.mock("../player", () => ({ usePlayer: () => player }));
 vi.mock("./client", async original => ({ ...await original<typeof import("./client")>(), offlineEnabled:()=>true,state:vi.fn(),syncError:vi.fn(),synchronize:vi.fn(),resolveConflict:vi.fn(),syncInFlight:vi.fn(()=>false) }));
-vi.mock("./downloads", () => ({ prefetch: vi.fn() }));
+vi.mock("./downloads", () => ({ prefetch: vi.fn(), downloadQueueNotice: vi.fn(() => null) }));
 vi.mock("./signIn", () => ({ signInAndSync: vi.fn() }));
 let local:LocalState;
 const episode={id:1,title:"Shared episode",position_secs:90,played_at:null,downloaded:true} as EpisodeDetail;
@@ -171,4 +171,15 @@ it("hides continue listening when the episode detail fails to load", async()=>{
   render(<ContinueListening/>);
   await act(async()=>{});
   expect(screen.queryByText("Continue listening")).not.toBeInTheDocument();
+});
+
+it("shows and clears the automatic download capacity notice", async () => {
+  render(<DownloadQueueStatus/>);
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  vi.mocked(downloadQueueNotice).mockReturnValue("Automatic downloads reached the storage limit.");
+  act(() => window.dispatchEvent(new Event("pods-offline-changed")));
+  expect(screen.getByRole("status")).toHaveTextContent("storage limit");
+  vi.mocked(downloadQueueNotice).mockReturnValue(null);
+  act(() => window.dispatchEvent(new Event("pods-offline-changed")));
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });

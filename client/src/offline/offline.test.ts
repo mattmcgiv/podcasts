@@ -5,7 +5,7 @@ import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writ
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
 import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
-import { cleanupPlayedDownload, configureDownloadRetriesForTests, DownloadError, downloadEpisode, downloadError, downloadErrorFor, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
+import { cleanupPlayedDownload, configureDownloadRetriesForTests, DownloadError, downloadEpisode, downloadQueueNotice, downloadError, downloadErrorFor, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
 import { readDiagnostics, readMediaDiagnostics } from "./diagnostics";
@@ -637,6 +637,27 @@ describe("verified downloads and local Range playback", () => {
     expect(artifactCalls()).toHaveLength(1);
     expect((await localRequest<{ items: unknown[] }>("/recent")).items).toHaveLength(2);
   });
+  it("keeps a manual download after repeated automatic passes at the storage limit", async () => {
+    const bytes = await prepareAudio();
+    vi.mocked(fetch).mockImplementation(async () => new Response(bytes, { status: 206, headers: { "Content-Range": "bytes 0-7/8" } }));
+    await updateState(s => {
+      s.preferences = { limit: 8, count: 1 };
+      s.snapshot!.episodes[1].manifest!.chunks = s.snapshot!.episodes[0].manifest!.chunks;
+    });
+    await downloadEpisode(2);
+    expect(await localRequest<EpisodeDetail>("/episodes/2")).toMatchObject({ downloaded: true });
+    await prefetch();
+    await prefetch();
+    expect(await localRequest<EpisodeDetail>("/episodes/2")).toMatchObject({ downloaded: true });
+    const response = await localMedia(new Request(`https://pods.mcgiv.dev/_media/${"b".repeat(64)}.m4a`));
+    expect(await response.arrayBuffer()).toEqual(bytes);
+    expect(artifactCalls()).toHaveLength(1);
+    expect(downloadQueueNotice()).toContain("storage limit");
+    await updateState(s => { s.preferences.limit = 16; });
+    await prefetch();
+    expect((await allDownloads()).filter(d => d.complete)).toHaveLength(2);
+    expect(downloadQueueNotice()).toBeNull();
+  });
   it("reserves only remaining bytes when resuming near the browser quota", async () => {
     await prepareAudio();
     await writeRecord("downloads", hash, { hash, episode: 1, bytes: 8, received: 4, complete: false, touched: 0 });
@@ -657,11 +678,14 @@ describe("verified downloads and local Range playback", () => {
     await cleanupPlayedDownload(999);
     expect(await allDownloads()).toEqual([]);
   });
-  it("evicts the oldest downloads first when room runs out", async () => {
+  it("reclaims played and archived downloads when room runs out", async () => {
     await prepareAudio();
     await writeRecord("downloads", "c".repeat(64), { hash: "c".repeat(64), episode: 7, bytes: 100, received: 100, complete: true, touched: 0 });
     await writeRecord("downloads", "d".repeat(64), { hash: "d".repeat(64), episode: 8, bytes: 100, received: 100, complete: true, touched: 0 });
-    await updateState(s => { s.preferences.limit = 10; });
+    await updateState(s => {
+      s.preferences.limit = 10;
+      s.snapshot!.episodes.push({ ...s.snapshot!.episodes[0], id: 7, played_at: 1 }, { ...s.snapshot!.episodes[0], id: 8, archived_at: 1 });
+    });
     await downloadEpisode(1);
     expect((await allDownloads()).map(d => d.episode)).toEqual([1]);
   });

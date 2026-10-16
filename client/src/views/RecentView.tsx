@@ -9,7 +9,7 @@ import { listenClassifierPause } from "../lib";
 import { refreshFeeds } from "../refreshFeeds";
 import { offlineEnabled } from "../offline/client";
 import { ProcessingNotifications } from "./NotificationsView";
-import { ContinueListening } from "../offline/SharedState";
+import { ContinueListening, DownloadQueueStatus } from "../offline/SharedState";
 import type { AdRemovalSettings, AdRemovalStage, EpisodeItem } from "../types";
 import type { AdRemovalStatusItem } from "../types";
 
@@ -361,6 +361,7 @@ export function RecentView() {
         </p>
       )}
 
+      <DownloadQueueStatus />
       <ProcessingNotifications />
       {list.error && <p className="error">{list.error}</p>}
       {list.items == null && !list.error && <p className="muted">Loading…</p>}

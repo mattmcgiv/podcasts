@@ -27,6 +27,9 @@ const MAC_ERROR = "Mac unavailable. Reconnect to resume.";
 
 let activeHash: string | null = null;
 let tail: Promise<void> | null = null;
+let automaticPass: Promise<void> | null = null;
+let queueNotice: string | null = null;
+export const downloadQueueNotice = () => queueNotice;
 const pending = new Map<number, Promise<void>>();
 let error: string | null = null;
 const errors = new Map<number, string>();
@@ -43,6 +46,7 @@ export function configureDownloadRetriesForTests(delays: number[], stallMs = chu
   chunkStallMs = stallMs;
   errors.clear();
   error = null;
+  queueNotice = null;
 }
 
 export async function savePreferences(preferences: Preferences): Promise<void> {
@@ -86,7 +90,13 @@ async function makeRoom(manifest: ArtifactManifest): Promise<void> {
   const downloads = await store.allDownloads();
   let used = downloads.filter(d => d.hash !== manifest.hash).reduce((total, d) => total + d.bytes, 0);
   const current = s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes : [];
-  const candidates = downloads.filter(d => d.hash !== activeHash && d.hash !== manifest.hash);
+  // Never evict an unplayed download to fetch another one: the next automatic
+  // pass would fetch the evicted episode again and evict this one in return.
+  const candidates = downloads.filter(d => {
+    const episode = current.find(e => e.id === d.episode);
+    return d.hash !== activeHash && d.hash !== manifest.hash
+      && episode != null && (episode.played_at != null || episode.archived_at != null);
+  });
   candidates.sort((a, b) => {
     const ae = current.find(e => e.id === a.episode), be = current.find(e => e.id === b.episode);
     return Number(be?.played_at != null) - Number(ae?.played_at != null) || (be?.published_at ?? Infinity) - (ae?.published_at ?? Infinity);
@@ -255,20 +265,29 @@ export async function verifyChunk(bytes: ArrayBuffer, expected: string): Promise
   return [...new Uint8Array(digest)].map(v => v.toString(16).padStart(2, "0")).join("") === expected;
 }
 
-export async function prefetch(): Promise<void> {
+export function prefetch(): Promise<void> {
+  if (automaticPass) return automaticPass;
+  automaticPass = runPrefetch().finally(() => { automaticPass = null; });
+  return automaticPass;
+}
+
+async function runPrefetch(): Promise<void> {
   try { await sweepStaleDownloads(); } catch { /* A later bootstrap/sync pass retries. */ }
   if (document.visibilityState === "hidden") return;
   const s = await state();
   const episodes = (s.snapshot ? applyOverlay(s.snapshot, s.outbox).episodes : []).filter(e => e.played_at == null && e.archived_at == null);
-  let planned = 0;
+  let limited = false;
   const last = Number((s.snapshot ? applyOverlay(s.snapshot, s.outbox).settings.last_listened : 0));
   const queue = episodes.slice().sort((a, b) => Number(b.id === last) - Number(a.id === last)).slice(0, s.preferences.count);
   for (const episode of queue) {
     if (!downloadEligible(episode.id, await state())) continue;
+    // Budget against what is actually retained, including manual and partial
+    // downloads outside this automatic selection. Partial files reserve their full size.
+    const downloads = await store.allDownloads();
+    const downloaded = downloads.find(d => d.hash === episode.manifest?.hash);
+    const used = downloads.filter(d => d.hash !== episode.manifest?.hash).reduce((n, d) => n + d.bytes, 0);
     const bytes = episode.manifest?.bytes ?? 0;
-    if (planned + bytes > s.preferences.limit) continue;
-    planned += bytes;
-    const downloaded = episode.manifest && await store.readRecord<Download>("downloads", episode.manifest.hash);
+    if (used + bytes > (await state()).preferences.limit) { limited = true; continue; }
     if (downloaded?.complete) continue;
     try { await downloadEpisode(episode.id); }
     catch (caught) {
@@ -276,4 +295,6 @@ export async function prefetch(): Promise<void> {
       if (!(caught instanceof DownloadError) || caught.scope === "device") break;
     }
   }
+  const nextNotice = limited ? "Automatic downloads reached the storage limit. Saved episodes are kept. Increase the storage limit in Settings or mark episodes played to make room." : null;
+  if (queueNotice !== nextNotice) { queueNotice = nextNotice; changed(); }
 }

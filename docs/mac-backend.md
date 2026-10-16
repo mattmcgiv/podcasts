@@ -30,6 +30,14 @@ The model revision is `49e6aa286ad60c14352c404340ded53710378a11` from `mlx-commu
 
 ## Current deployment
 
+### October 16 completed-download retention repair
+
+Two client regressions were reproduced before the fix: automatic downloads could evict a completed manual download to make room, and an in-flight list read could swallow the completion refresh. Unplayed downloads are now retained, automatic passes share one queue and budget against all saved files, and a refresh arriving during a read is replayed afterward. A storage-limit notice explains why an automatic item is skipped.
+
+All 522 client tests and existing coverage checks passed, and the production build passed. An isolated browser fixture with a 100 MiB limit retained a manually downloaded 60 MiB episode, skipped another 60 MiB episode, and automatically completed a 4 MiB episode. Both completed entries remained available after focus/online events and reload; a service-worker audio range returned 206 with the expected 1,024 bytes. This was browser verification, not physical iPhone verification. No user library data was cleared.
+
+Cloudflare reported Success for the local Chrome zip upload. Public HTML, service worker, and `assets/main-Bt5UCNB4.js` matched the tested build byte-for-byte. The Mac backend was unchanged.
+
 ### October 16 automatic conflict resolution
 
 Per-field event timestamps replace manual conflict choices in the updated client. Retries keep their original timestamps and operation IDs; equal values advance the event clock, and exact timestamp ties use operation ID. Existing untimestamped conflicts accept the shared snapshot. The Mac runs immutable release `20261016-151709`; the running binary matched the build, the new clock table was present, and the loopback auth-status endpoint returned 200. The pre-install SQLite backup passed integrity checking. Validation passed 623 Rust tests and 519 client tests plus existing coverage checks. Cloudflare reported Success; public HTML, service worker, and `assets/main-DYd7C_kQ.js` matched the build byte-for-byte.
@@ -136,7 +144,7 @@ Broader automatic monitoring remains appropriate.
 Listen lists all published unplayed episodes, including episodes not downloaded yet. Undownloaded rows offer a Download button and remain unavailable for playback until complete.
 The default automatic download queue considers the oldest fifty unplayed episodes, within a 2 GiB limit. An episode that exceeds the remaining budget is skipped so later smaller episodes can still download.
 The file currently playing is protected from eviction.
-Eviction removes played episodes first, then the most recent unplayed episodes.
+Only played or archived downloads can be reclaimed. Unplayed downloads are retained, including manual downloads outside the automatic selection. Automatic transfers reserve space against all retained downloads and skip episodes that do not fit; a storage-limit notice explains how to make room.
 Downloads pause while the app is hidden. Verified 1 MiB chunks remain available for the next attempt.
 A resumed download keeps its stored byte count on screen while it re-verifies those chunks; it does not restart from 0%.
 A chunk request is retried twice after a dropped connection, a Mac error, or 20 seconds without data. A slow link that keeps delivering is not cut off.

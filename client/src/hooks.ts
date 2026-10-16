@@ -22,10 +22,14 @@ export function useList<T extends { id: number }>(
   const [loading, setLoading] = useState(false);
   const nextOffset = useRef<number | null>(0);
   const busy = useRef(false);
+  const reloadPending = useRef(false);
 
   const load = useCallback(
     async (reset: boolean) => {
-      if (busy.current) return;
+      if (busy.current) {
+        if (reset) reloadPending.current = true;
+        return;
+      }
       const offset = reset ? 0 : nextOffset.current;
       if (offset == null) return;
       busy.current = true;
@@ -40,6 +44,10 @@ export function useList<T extends { id: number }>(
       } finally {
         busy.current = false;
         setLoading(false);
+        if (reloadPending.current) {
+          reloadPending.current = false;
+          void load(true);
+        }
       }
     },
     [fetcher],

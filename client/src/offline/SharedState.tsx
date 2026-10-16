@@ -4,7 +4,7 @@ import { usePlayer } from "../player";
 import { fmtTime } from "../lib";
 import type { EpisodeDetail } from "../types";
 import { applyOverlay, offlineEnabled, resolveConflict, state, syncError, syncInFlight, synchronize } from "./client";
-import { prefetch } from "./downloads";
+import { prefetch, downloadQueueNotice } from "./downloads";
 import { signInAndSync } from "./signIn";
 import type { LocalState, Operation } from "./store";
 
@@ -141,6 +141,16 @@ export function SyncStatus() {
     </div>
     <button type="button" className="sync-badge-dismiss" onClick={dismiss} disabled={working}>Dismiss</button>
   </div>;
+}
+
+export function DownloadQueueStatus() {
+  const [notice, setNotice] = useState(downloadQueueNotice);
+  useEffect(() => {
+    const refresh = () => setNotice(downloadQueueNotice());
+    window.addEventListener("pods-offline-changed", refresh);
+    return () => window.removeEventListener("pods-offline-changed", refresh);
+  }, []);
+  return offlineEnabled() && notice ? <p className="low-storage-banner" role="status">{notice}</p> : null;
 }
 
 export function ContinueListening() {
