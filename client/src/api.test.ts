@@ -1,10 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Api } from "./api";
 import { episode, HttpError, installApi, page } from "./test/mockApi";
-
-afterEach(() => {
-  delete window.PODS_API_BASE;
-});
 
 describe("request wrapper", () => {
   it("parses json without sending bearer auth", async () => {
@@ -14,13 +10,6 @@ describe("request wrapper", () => {
     const headers = new Headers(calls[0].init.headers);
     expect(headers.has("authorization")).toBe(false);
     expect(calls[0].init.credentials).toBe("include");
-  });
-
-  it("uses the native API base when provided", async () => {
-    window.PODS_API_BASE = "http://127.0.0.1:18180";
-    const { calls } = installApi({ "GET /api/recent": page([]) });
-    await Api.recent();
-    expect(calls[0].url.origin).toBe("http://127.0.0.1:18180");
   });
 
   it("surfaces server error messages", async () => {

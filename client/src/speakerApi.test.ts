@@ -1,10 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSpeakerClient, SpeakerDisconnectedError, SpeakerResyncError, SpeakerStaleError } from "./speakerApi";
 import { HttpError, installApi } from "./test/mockApi";
-
-afterEach(() => {
-  delete window.PODS_API_BASE;
-});
 
 const okStatus = {
   available: true,
@@ -23,7 +19,6 @@ const okStatus = {
 
 describe("speakerApi", () => {
   it("sends generation and artifact hash and never a media URL", async () => {
-    window.PODS_API_BASE = "https://sync.pods.mcgiv.dev:8443";
     const { calls } = installApi({
       "POST /api/speaker/load": okStatus,
     });

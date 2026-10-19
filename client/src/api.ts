@@ -18,12 +18,6 @@ import type {
 } from "./types";
 import { localRequest, offlineEnabled } from "./offline/client";
 
-declare global {
-  interface Window {
-    PODS_API_BASE?: string;
-  }
-}
-
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -42,7 +36,7 @@ async function request<T>(path: string, init: RequestInit = {}, raw = false): Pr
   }
   let res: Response;
   try {
-    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, headers, credentials: "include" });
+    res = await fetch(target, { ...init, headers, credentials: "include" });
   } catch (error) {
     console.warn(
       `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
@@ -72,7 +66,7 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
   const target = `/api${path}`;
   let res: Response;
   try {
-    res = await fetch(`${window.PODS_API_BASE ?? ""}${target}`, { ...init, credentials: "include" });
+    res = await fetch(target, { ...init, credentials: "include" });
   } catch (error) {
     console.warn(
       `api_fetch_failed method=${method} target=${target} error=${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,

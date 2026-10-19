@@ -7,9 +7,13 @@ import { automaticDownloadPlan, cleanupPlayedDownload, requestAutomaticDownloads
 import { currentDownloadProgress } from "./progress";
 import { allDownloads, readRecord, updateState, type ArtifactManifest, type Download, type LocalState, type Operation, type Snapshot } from "./store";
 
-declare global { interface Window { PODS_LOCAL_CLIENT?: boolean } }
-export const offlineEnabled = () => window.PODS_LOCAL_CLIENT ?? import.meta.env.PROD;
-export const backendBase = () => window.PODS_API_BASE ?? import.meta.env.VITE_API_BASE ?? "https://sync.pods.mcgiv.dev:8443";
+export const backendBase = () => import.meta.env.VITE_API_BASE ?? "https://sync.pods.mcgiv.dev:8443";
+let offlineOverride: boolean | null = null;
+/** Test seam: production derives offline mode from import.meta.env.PROD alone. */
+export function setOfflineEnabledForTests(value: boolean | null): void {
+  offlineOverride = value;
+}
+export const offlineEnabled = () => offlineOverride ?? import.meta.env.PROD;
 export const MAC_OFFLINE_MESSAGE = "Mac unavailable. Downloaded episodes still play.";
 export const PROBE_TIMEOUT_MS = 3_000;
 let syncing: Promise<void> | null = null;

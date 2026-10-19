@@ -1,3 +1,4 @@
+import { setOfflineEnabledForTests } from "./offline/client";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +8,7 @@ import { HttpError, installApi } from "./test/mockApi";
 
 afterEach(() => {
   window.location.hash = "";
-  delete window.PODS_LOCAL_CLIENT;
+  setOfflineEnabledForTests(null);
 });
 
 function mockCredentials(create?: unknown, get?: unknown) {
@@ -89,7 +90,7 @@ describe("AuthGate", () => {
   });
 
   it("opens the cached library without contacting the Mac", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     await updateState(s => {
       s.snapshot = { version: 1, cursor: 0, replace: true, episodes: [], shows: [], settings: {}, versions: {} };
@@ -104,7 +105,7 @@ describe("AuthGate", () => {
   });
 
   it("stays on reconnect when the Mac is down and there is no cached library", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
     render(
@@ -118,7 +119,7 @@ describe("AuthGate", () => {
   });
 
   it("times out a hanging Mac instead of spinning forever", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     render(
@@ -131,7 +132,7 @@ describe("AuthGate", () => {
   }, 15000);
 
   it("answers from the Mac when there is no cached library", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     installApi({ "GET /api/auth/status": { enrolled: true, session: true } });
     const authenticated: string[] = [];
@@ -146,7 +147,7 @@ describe("AuthGate", () => {
   });
 
   it("falls back to unset when local storage itself is broken", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", undefined);
     installApi({});
     render(
@@ -160,7 +161,7 @@ describe("AuthGate", () => {
   });
 
   it("retries the Mac from the reconnect button", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
     render(
@@ -189,7 +190,7 @@ describe("AuthGate", () => {
   });
 
   it("keeps local playback usable when reauthentication is required", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.stubGlobal("indexedDB", new IDBFactory());
     installApi({ "GET /api/auth/status": { enrolled: true, session: true } });
     render(

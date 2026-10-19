@@ -12,21 +12,17 @@ const shellRoutes = {
 };
 
 afterEach(() => {
-  delete window.webkit;
+  vi.unstubAllEnvs();
 });
 
 describe("App", () => {
-  it("notifies the native container after the UI commits", () => {
+  it("renders the shell with Listen and Played tabs", async () => {
     installApi(shellRoutes);
-    const postMessage = vi.fn();
-    Object.defineProperty(window, "webkit", {
-      configurable: true,
-      value: { messageHandlers: { podsLifecycle: { postMessage } } },
-    });
-
     render(<App />);
+    await screen.findByText("Fresh Episode");
 
-    expect(postMessage).toHaveBeenCalledWith({ event: "ui-ready" });
+    expect(screen.getByRole("button", { name: "Listen" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Played" })).toBeInTheDocument();
   });
 
   it("opens directly into Listen without login", async () => {

@@ -4,7 +4,7 @@ import { webcrypto } from "node:crypto";
 import { allDownloads, deleteDownload, emptyState, readRecord, updateState, writeRecord, type ArtifactManifest, type LocalState, type Snapshot } from "./store";
 import * as store from "./store";
 import { LOCAL_OMLX_MODEL } from "../lib";
-import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, state, synchronize, syncError, validateSnapshot } from "./client";
+import { beginPlaybackSession, endPlaybackSession, clearNotifications, applyOverlay, enqueue, hasLocalLibrary, localRequest, MAC_OFFLINE_MESSAGE, network, offlineEnabled, probeMac, resolveConflict, setOfflineEnabledForTests, state, synchronize, syncError, validateSnapshot } from "./client";
 import { cleanupPlayedDownload, configureDownloadRetriesForTests, DownloadError, downloadEpisode, downloadQueueNotice, downloadError, downloadErrorFor, prefetch, protectPlayingArtifact, savePreferences, sweepStaleDownloads, verifyChunk } from "./downloads";
 import { currentDownloadProgress, onDownloadProgress, setDownloadProgress, type DownloadProgress } from "./progress";
 import { byteRange, localMedia } from "./media";
@@ -27,15 +27,14 @@ beforeEach(() => {
   vi.stubGlobal("indexedDB", new IDBFactory()); vi.stubGlobal("IDBKeyRange", IDBKeyRange);
   vi.stubGlobal("crypto", webcrypto);
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Mac unavailable")));
-  window.PODS_LOCAL_CLIENT = true;
-  window.PODS_API_BASE = "https://sync.pods.mcgiv.dev:8443";
+  setOfflineEnabledForTests(true);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   protectPlayingArtifact(null);
   configureDownloadRetriesForTests([0, 0], 5000);
 });
 afterEach(async () => {
   await synchronize().catch(() => {});
-  delete window.PODS_LOCAL_CLIENT; delete window.PODS_API_BASE;
+  setOfflineEnabledForTests(null);
   vi.unstubAllGlobals();
 });
 

@@ -1,5 +1,5 @@
 import { flushVoiceDrafts } from "../voice";
-import { backendBase, offlineEnabled, synchronize } from "./client";
+import { offlineEnabled, synchronize } from "./client";
 import { DOWNLOAD_QUEUE_EVENT, listenForDownloadChanges, prefetch, sweepStaleDownloads } from "./downloads";
 import { logDiagnostic } from "./diagnostics";
 
@@ -7,7 +7,6 @@ declare const __PODS_BUILD_ID__: string;
 
 export async function bootstrapOffline(): Promise<(() => void) | undefined> {
   if (!offlineEnabled()) return;
-  window.PODS_API_BASE = backendBase();
   if (!navigator.serviceWorker) throw new Error("This browser cannot store offline playback.");
   logDiagnostic("app-build", __PODS_BUILD_ID__);
   // Updating the app shell must not disable downloads when a worker already

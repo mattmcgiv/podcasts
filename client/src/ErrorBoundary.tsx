@@ -1,5 +1,4 @@
 import { Component, type ReactNode } from "react";
-import { postPodsLifecycleEvent } from "./podsLifecycle";
 
 type Props = {
   children: ReactNode;
@@ -9,15 +8,11 @@ type State = {
   failed: boolean;
 };
 
-export class PodsLifecycleBoundary extends Component<Props, State> {
+export class ErrorBoundary extends Component<Props, State> {
   state: State = { failed: false };
 
   static getDerivedStateFromError(): State {
     return { failed: true };
-  }
-
-  componentDidCatch(): void {
-    postPodsLifecycleEvent("ui-failed");
   }
 
   render(): ReactNode {

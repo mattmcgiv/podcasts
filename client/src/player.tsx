@@ -9,13 +9,12 @@ import {
   type ReactNode,
 } from "react";
 import { Api } from "./api";
-import { offlineEnabled, beginPlaybackSession, endPlaybackSession, enqueue, syncBeforePlayback } from "./offline/client";
+import { offlineEnabled, beginPlaybackSession, endPlaybackSession, enqueue, syncBeforePlayback, backendBase } from "./offline/client";
 import { logDiagnostic } from "./offline/diagnostics";
 import { protectPlayingArtifact } from "./offline/downloads";
 import {
   createAudioEngine,
   createVideoEngine,
-  hasNativeAudioBridge,
   type AudioEngine,
   type AudioMetadata,
   type AdSkipNotice,
@@ -397,7 +396,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         videoNode.load();
       }
       const a = ensureAudio();
-      resumeAtRef.current = hasNativeAudioBridge() || engineOutput(a) === "mac" ? 0 : resumeAt;
+      resumeAtRef.current = engineOutput(a) === "mac" ? 0 : resumeAt;
       const metadata = audioMetadata(item);
       a.setMetadata?.(metadata);
       a.playbackRate = speedRef.current;
@@ -429,7 +428,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const handleEnded = useCallback(async () => {
     // In-flight guard only: duplicate ended during one async completion transition.
-    // Stale cross-episode ended is filtered by NativeAudioEngine episode identity.
+    // Stale cross-episode ended is filtered by the Mac transport's episode identity.
     if (endInFlightRef.current) return;
     const cur = currentRef.current;
     if (!cur) return;
@@ -885,7 +884,7 @@ function audioMetadata(item: EpisodeItem): AudioMetadata {
 
 function absoluteArtworkUrl(src: string): string {
   try {
-    return new URL(src, window.PODS_API_BASE ?? window.location.origin).href;
+    return new URL(src, backendBase()).href;
   } catch {
     return src;
   }

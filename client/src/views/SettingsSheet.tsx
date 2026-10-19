@@ -330,8 +330,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
 
       <div className="settings-body">
         {offlineEnabled() && <OfflineSettings />}
-        {!window.PODS_API_BASE && (
-          <section className="settings-section" aria-labelledby="account-title">
+        <section className="settings-section" aria-labelledby="account-title">
             <h2 className="section-title" id="account-title">Account</h2>
             <p className="settings-detail">Sign out on this browser. Your passkey stays in 1Password.</p>
             <button
@@ -347,7 +346,6 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
               Sign out
             </button>
           </section>
-        )}
         <section className="settings-section" aria-labelledby="feedback-title">
           <h2 className="section-title" id="feedback-title">Feedback</h2>
           <p className="settings-detail">Type a feature request or bug report. It syncs to the Mac, which dispatches a fix.</p>

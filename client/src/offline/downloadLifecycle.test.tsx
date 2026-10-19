@@ -5,7 +5,7 @@ import { webcrypto } from "node:crypto";
 import { RecentView } from "../views/RecentView";
 import { allDownloads, readRecord, updateState, type Snapshot } from "./store";
 import * as store from "./store";
-import { localRequest, state, synchronize, validateSnapshot } from "./client";
+import { localRequest, setOfflineEnabledForTests, state, synchronize, validateSnapshot } from "./client";
 import { configureDownloadRetriesForTests, downloadEpisode, prefetch, sweepStaleDownloads, DOWNLOAD_QUEUE_EVENT, listenForDownloadChanges, protectPlayingArtifact, automaticDownloadPlan } from "./downloads";
 import { localMedia } from "./media";
 import { bootstrapOffline } from "./bootstrap";
@@ -21,7 +21,7 @@ beforeEach(async () => {
   vi.stubGlobal("IDBKeyRange", IDBKeyRange);
   vi.stubGlobal("crypto", webcrypto);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
-  window.PODS_LOCAL_CLIENT = true;
+  setOfflineEnabledForTests(true);
   configureDownloadRetriesForTests([], 1000);
   files.clear();
   library = { version: 1, cursor: 0, replace: true, episodes: [], shows: [], settings: {}, versions: {} };
@@ -55,7 +55,7 @@ afterEach(async () => {
   stop?.(); stop = undefined;
   await prefetch();
   await synchronize().catch(() => {});
-  delete window.PODS_LOCAL_CLIENT;
+  setOfflineEnabledForTests(null);
 });
 
 it("automatically refills after marking played and changing limits without a focus event or Sync tap", async () => {

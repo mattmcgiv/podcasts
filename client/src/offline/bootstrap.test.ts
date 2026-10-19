@@ -31,9 +31,7 @@ it("registers a module worker and synchronizes on reconnect/foreground", async (
   await vi.advanceTimersByTimeAsync(60000);
   expect(client.synchronize).toHaveBeenCalledTimes(count + 5);
 });
-it("skips deprecated native mode and fails clearly without service worker support", async () => {
-  vi.mocked(client.offlineEnabled).mockReturnValue(false); stop = await bootstrapOffline();
-  vi.mocked(client.offlineEnabled).mockReturnValue(true);
+it("fails clearly without service worker support", async () => {
   Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: undefined });
   await expect(bootstrapOffline()).rejects.toThrow("cannot store");
 });

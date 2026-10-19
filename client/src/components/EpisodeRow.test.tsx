@@ -1,3 +1,4 @@
+import { setOfflineEnabledForTests } from "../offline/client";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { downloadEpisode, downloadErrorFor } from "../offline/downloads";
@@ -11,13 +12,13 @@ vi.mock("../offline/downloads", () => ({
 }));
 
 afterEach(() => {
-  delete window.PODS_LOCAL_CLIENT;
+  setOfflineEnabledForTests(null);
   vi.mocked(downloadErrorFor).mockReturnValue(null);
   vi.mocked(downloadEpisode).mockClear();
 });
 
 function renderRow(local: boolean) {
-  window.PODS_LOCAL_CLIENT = local;
+  setOfflineEnabledForTests(local);
   render(
     <EpisodeRow
       item={episode({
@@ -36,7 +37,7 @@ function renderRow(local: boolean) {
 
 describe("EpisodeRow download controls", () => {
   it("does not render download status, pin, or remove-download controls", () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     const { container, rerender } = render(
       <EpisodeRow
         item={episode({
@@ -83,7 +84,7 @@ describe("EpisodeRow download controls", () => {
 
 describe("EpisodeRow client download progress", () => {
   it("shows a download bar and keeps Play disabled until the file is local", () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     render(
       <EpisodeRow
         item={episode({
@@ -107,7 +108,7 @@ describe("EpisodeRow client download progress", () => {
   });
 
   it("offers a download for a newly synchronized episode and reports pre-transfer failures", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.mocked(downloadErrorFor).mockReturnValue("Download limit reached. Increase the storage limit.");
     render(<EpisodeRow item={episode({ id: 9, downloaded: false, played_at: null, ad_removal_state: "ad-free" })}
       onPlay={() => {}} actionLabel="Mark played" onAction={() => {}} />);
@@ -118,7 +119,7 @@ describe("EpisodeRow client download progress", () => {
   });
 
   it("updates the bar from live download progress events", () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     render(
       <EpisodeRow
         item={episode({
@@ -145,7 +146,7 @@ describe("EpisodeRow client download progress", () => {
   });
 
   it("shows why a partial download stopped and retries it from the row", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     vi.mocked(downloadErrorFor).mockReturnValue("Download stalled. Check the connection, then retry.");
     render(
       <EpisodeRow

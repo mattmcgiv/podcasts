@@ -1,11 +1,30 @@
+import { setOfflineEnabledForTests } from "../offline/client";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlayerProvider, usePlayer } from "../player";
 import { FakeAudio } from "../test/fakeAudio";
+import { FakeEngine } from "../test/fakeEngine";
 import { episode, HttpError, installApi } from "../test/mockApi";
 import { MiniPlayer } from "./MiniPlayer";
 import { PlayerSheet } from "./PlayerSheet";
+
+const engineOverride = vi.hoisted(() => ({ current: null as null | (() => unknown) }));
+
+vi.mock("../audioEngine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../audioEngine")>();
+  const { BrowserSpeakerEngine } = await import("../speakerEngine");
+  return {
+    ...actual,
+    createAudioEngine: () =>
+      engineOverride.current ? (engineOverride.current() as ReturnType<typeof actual.createAudioEngine>) : new BrowserSpeakerEngine(),
+  };
+});
+
+function useFakeEngine(): void {
+  FakeEngine.reset();
+  engineOverride.current = () => new FakeEngine();
+}
 
 function Starter() {
   const p = usePlayer();
@@ -271,24 +290,21 @@ describe("PlayerSheet + MiniPlayer", () => {
   });
 
   it("keeps the Mac output label stable after the speaker identifies itself", async () => {
-    window.webkit = {
-      messageHandlers: { podsAudio: { postMessage() {} } },
-    };
-    try {
-      const { user } = setup();
-      await user.click(screen.getByText("start"));
-      await screen.findByRole("dialog", { name: "Player" });
+    useFakeEngine();
+    const { user } = setup();
+    await user.click(screen.getByText("start"));
+    await screen.findByRole("dialog", { name: "Player" });
 
-      window.PodsAudioBridge?.emit({
-        type: "cast",
-        cast: { available: true, connected: true, name: "Matthew's Mac", output: "mac" },
-      });
+    FakeEngine.last().emit({
+      type: "cast",
+      available: true,
+      connected: true,
+      name: "Matthew's Mac",
+      output: "mac",
+    });
 
-      expect(await screen.findByRole("button", { name: "Mac" })).toHaveTextContent("Mac");
-      expect(screen.getByRole("button", { name: "Mac" })).not.toHaveTextContent("Matthew's Mac");
-    } finally {
-      window.webkit = undefined;
-    }
+    expect(await screen.findByRole("button", { name: "Mac" })).toHaveTextContent("Mac");
+    expect(screen.getByRole("button", { name: "Mac" })).not.toHaveTextContent("Matthew's Mac");
   });
 
   it("autoplay switch persists the setting", async () => {
@@ -377,19 +393,13 @@ describe("PlayerSheet + MiniPlayer", () => {
   });
 
   it("selects This device and Mac playback outputs", async () => {
-    window.webkit = {
-      messageHandlers: {
-        podsAudio: {
-          postMessage() {},
-        },
-      },
-    };
+    useFakeEngine();
     const { user } = setup();
     await user.click(screen.getByText("start"));
     await screen.findByRole("dialog", { name: "Player" });
     await user.click(screen.getByRole("button", { name: "This device" }));
     act(() => {
-      window.PodsAudioBridge?.emit({
+      FakeEngine.last().emit({
         type: "cast",
         available: true,
         connected: false,
@@ -398,8 +408,6 @@ describe("PlayerSheet + MiniPlayer", () => {
       });
     });
     await user.click(screen.getByRole("button", { name: "Mac" }));
-    delete window.webkit;
-    delete window.PodsAudioBridge;
   });
 
   it("formats a next-chapter delta over one hour", async () => {
@@ -435,7 +443,7 @@ describe("PlayerSheet + MiniPlayer", () => {
   });
 
   it("shows audio output controls in offline browser mode", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     const hash = "a".repeat(64);
     const item = episode({
       id: 1,
@@ -630,5 +638,6 @@ describe("PlayerSheet + MiniPlayer", () => {
 });
 
 afterEach(() => {
-  delete window.PODS_LOCAL_CLIENT;
+  engineOverride.current = null;
+  setOfflineEnabledForTests(null);
 });

@@ -3,7 +3,6 @@ import { MiniPlayer } from "./components/MiniPlayer";
 import { PlayerSheet } from "./components/PlayerSheet";
 import { TabBar } from "./components/TabBar";
 import { PlayerProvider } from "./player";
-import { postPodsLifecycleEvent } from "./podsLifecycle";
 import { navigate, useRoute } from "./router";
 import { FeedbackView } from "./views/FeedbackView";
 import { PlayedView } from "./views/PlayedView";
@@ -30,7 +29,6 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
 
 export function App() {
   useEffect(() => {
-    postPodsLifecycleEvent("ui-ready");
     applyThemePreference(currentThemePreference(), false);
   }, []);
 

@@ -1,3 +1,4 @@
+import { setOfflineEnabledForTests } from "../offline/client";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +37,7 @@ const adRemovalSettings = {
 
 describe("SettingsSheet", () => {
   afterEach(() => {
-    delete window.PODS_LOCAL_CLIENT;
+    setOfflineEnabledForTests(null);
   });
 
   it("shows the most recent native automatic refresh", async () => {
@@ -370,7 +371,7 @@ describe("SettingsSheet", () => {
   });
 
   it("explains local Mac oMLX processing and hides DeepSeek cloud controls", async () => {
-    window.PODS_LOCAL_CLIENT = true;
+    setOfflineEnabledForTests(true);
     installApi({});
     render(<SettingsSheet onClose={() => {}} />);
 

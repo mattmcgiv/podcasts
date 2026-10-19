@@ -9,7 +9,7 @@ import {
   pendingFeedback,
   submitFeedback,
 } from "./feedback";
-import { state, synchronize } from "./offline/client";
+import { setOfflineEnabledForTests, state, synchronize } from "./offline/client";
 import { emptyState } from "./offline/store";
 
 beforeEach(() => {
@@ -17,12 +17,12 @@ beforeEach(() => {
   vi.stubGlobal("IDBKeyRange", IDBKeyRange);
   vi.stubGlobal("crypto", webcrypto);
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Mac unavailable")));
-  window.PODS_LOCAL_CLIENT = true;
+  setOfflineEnabledForTests(true);
 });
 
 afterEach(async () => {
   await synchronize().catch(() => {});
-  delete window.PODS_LOCAL_CLIENT;
+  setOfflineEnabledForTests(null);
   vi.unstubAllGlobals();
 });
 

@@ -1,3 +1,4 @@
+import { setOfflineEnabledForTests } from "./offline/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { webcrypto } from "node:crypto";
@@ -64,8 +65,8 @@ beforeEach(() => {
   vi.stubGlobal("indexedDB", new IDBFactory());
   vi.stubGlobal("IDBKeyRange", IDBKeyRange);
   vi.stubGlobal("crypto", webcrypto);
-  window.PODS_API_BASE = "https://mac.test";
-  window.PODS_LOCAL_CLIENT = true;
+  vi.stubEnv("VITE_API_BASE", "https://mac.test");
+  setOfflineEnabledForTests(true);
   FakeRecorder.instance = null;
   FakeRecorder.failConstruct = false;
   FakeRecorder.supported = true;
@@ -81,8 +82,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete window.PODS_API_BASE;
-  delete window.PODS_LOCAL_CLIENT;
+  setOfflineEnabledForTests(null);
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
