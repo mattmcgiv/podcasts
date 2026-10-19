@@ -41,12 +41,6 @@ pub use error::Error;
 pub use feeds::{FeedFetcher, MockFeedFetcher};
 pub use http::{HttpRequest, HttpResponse};
 
-// DEPRECATED as of 1 October 2026. iPhone FFI only. Do not extend. See ios/DEPRECATED.md.
-#[deprecated(
-    since = "2026-10-01",
-    note = "The iPhone FFI embedding is deprecated as of 1 October 2026. Do not extend. See ios/DEPRECATED.md."
-)]
-pub mod ffi;
 
 pub mod reliability;
 pub mod child_process;

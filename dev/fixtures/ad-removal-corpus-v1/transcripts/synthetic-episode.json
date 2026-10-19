@@ -1,8 +1,0 @@
-{
-  "schema_version": "pods-ad-removal-corpus-v1",
-  "episode_id": "synthetic-episode",
-  "segment_ids": [
-    "segment-content",
-    "segment-ad"
-  ]
-}

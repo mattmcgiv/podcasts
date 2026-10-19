@@ -7,7 +7,7 @@ publish = false
 
 [lib]
 name = "pods_backend"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "pods-backend"

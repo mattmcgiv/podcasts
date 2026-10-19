@@ -9,7 +9,7 @@ This project treats npm supply-chain compromise as the primary threat. The devel
 3. Git runs on the host only. The guest holds no GitHub/SSH credentials.
 4. `node_modules/` lives in a guest-only volume — untrusted packages never land on host disk.
 5. npm runs with `ignore-scripts=true` and `save-exact=true` (enforced by `client/.npmrc`). Lockfiles are committed.
-6. Podcast Index credentials stay in the host-only credential store: `~/.config/podcasts/credentials.env`. The Mac backend reads them. Never include credentials in the browser build. The deprecated iPhone Xcode build still injects them into the signed app bundle at build time.
+6. Podcast Index credentials stay in the host-only credential store: `~/.config/podcasts/credentials.env`. The Mac backend reads them. Never include credentials in the browser build.
 
 ## Dev workflow
 
@@ -34,9 +34,7 @@ The Mac menu-bar app is Pods Pipeline Preview (`Pods Speaker`, `dev.mcgiv.pods.s
 - The library/API backend is the Rust crate in `backend/` (`Backend::handle`), hosted on the Mac. The browser must work from downloaded data while the Mac is unavailable.
 - The browser synchronizes over HTTPS through Tailscale while the Mac is awake and connected. Only processed episodes with finished show notes are published.
 - For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.
-- The iPhone client app (Swift), the in-app iPhone "backend" (loopback server + Rust FFI shell), and all iPhone signing/install tooling are **deprecated as of 1 October 2026**. Do not review, extend, or append to `ios/`, `backend/src/ffi.rs`, `backend/include/pods_backend.h`, or `backend/build-ios.sh`. See `ios/DEPRECATED.md`. The code is kept until removal.
-- The still-present iPhone shell serves the Rust backend on `127.0.0.1:18180` via `ios/Pods/PodsLocalServer.swift` calling `RustBackend`.
-- The bundled React app can point at that loopback backend through `window.PODS_API_BASE` in `ios/Pods/PodsWebView.swift`.
+- The iPhone client app (Swift), the in-app iPhone "backend" (loopback server + Rust FFI shell), and all iPhone signing/install tooling were removed on 19 October 2026 after the 1 October deprecation. The old tree lived in `ios/` (deleted) plus `backend/src/ffi.rs`, `backend/include/pods_backend.h`, and `backend/build-ios.sh` (all deleted). Historical records of that work remain in dated docs such as `ios/DEPRECATED.md` via git history.
 - There is no active Hetzner remote dev host for this project.
 - There is no Vultr VPS. Cloudflare Pages serves the client. The Mac host runs the backend.
 

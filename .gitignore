@@ -10,16 +10,8 @@ coverage/
 *.sqlite
 *.sqlite-*
 .DS_Store
-ios/build/
-ios/DerivedData/
-# PodsSpeaker Xcode build output (mirrors ios/build/)
+# PodsSpeaker Xcode build output
 mac/build/
-ios/*.xcresult
-ios/**/*.xcuserstate
-ios/Pods/Web/*
-!ios/Pods/Web/.gitkeep
-ios/Pods/SeedData/*.sqlite
-ios/Pods/SeedData/*.sqlite-*
 infra/terraform/hetzner-dev/.terraform/
 infra/terraform/hetzner-dev/terraform.tfstate*
 infra/terraform/hetzner-dev/terraform.tfvars

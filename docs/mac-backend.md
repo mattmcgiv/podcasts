@@ -2,8 +2,10 @@
 
 ## Supported architecture
 
-The supported client is Chrome on iPhone and iPad at `https://pods.mcgiv.dev`. The native iOS app is deprecated.
-The `ios/` source remains for history and migration. Native builds are not an acceptance gate for this architecture.
+The supported client is Chrome on iPhone and iPad at `https://pods.mcgiv.dev`. The native iOS app
+was removed on 19 October 2026 after its 1 October deprecation; the Swift tree, the iPhone FFI
+(`ffi.rs`, `pods_backend.h`, `build-ios.sh`), and the corpus evaluator that depended on iOS Swift
+are gone. Native builds are not an acceptance gate for this architecture.
 
 Cloudflare Pages serves the static client. The Mac supplies the library API while awake.
 Tailscale connects either device to the Mac, including over the internet.
@@ -292,8 +294,7 @@ dev/backend-coverage.sh
 
 Reports land in `backend/target/llvm-cov/`: `html/index.html` for browsing and `lcov.info` for editors.
 The script fails unless lines, functions, and regions all clear 90%.
-`backend/src/ffi.rs` is excluded from the totals: it is the deprecated iPhone FFI shell,
-untestable without the iPhone runtime. The September 2026 baseline after gating is
+The September 2026 baseline after gating is
 93.1% lines, 92.8% functions, and 90.3% regions.
 
 The frontend build emits `sw.js` and `offline-assets.json`.

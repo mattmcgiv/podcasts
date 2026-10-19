@@ -11,7 +11,7 @@ Listen is the unplayed queue, oldest first. Open an episode for the player.
 
 The app is [MIT licensed](LICENSE). It is built for one person, with a passkey on that person's devices. Listen shows subscriptions only.
 
-The deployed client is [pods.mcgiv.dev](https://pods.mcgiv.dev). A checkout is the source for that app. Running it yourself means running the Mac backend and hosting the static client. The native iPhone app under `ios/` is deprecated as of 1 October 2026 and is kept only for history. See [ios/DEPRECATED.md](ios/DEPRECATED.md).
+The deployed client is [pods.mcgiv.dev](https://pods.mcgiv.dev). A checkout is the source for that app. Running it yourself means running the Mac backend and hosting the static client. The native iPhone app was removed on 19 October 2026 after its 1 October deprecation; its source lives in git history.
 
 ## Features
 
@@ -41,7 +41,6 @@ Guest-appearance following exists in the client and stays off (`FOLLOW_APPEARANC
 | `mac/PodsSpeaker/` | Menu-bar app for the processing queue and its pause switch. |
 | `docs/` | Mac backend, offline client, speaker, and local-inference notes. `docs/screens.html` is a static render of the phone screens. |
 | `dev/` | Isolated container workflow for the client toolchain. |
-| `ios/` | Deprecated iPhone app. Do not extend it. |
 | `shared/` | Small shared Swift helpers. |
 
 ## Development
