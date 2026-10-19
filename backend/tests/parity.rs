@@ -1100,12 +1100,12 @@ fn test_export_archive_contains_versioned_manifest_logs_snapshots_and_state_summ
     let names: Vec<String> = (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_string()).collect();
     assert!(names.contains(&"manifest.json".to_string()), "{names:?}");
     assert!(names.contains(&"state-summary.json".to_string()), "{names:?}");
-    assert!(names.iter().any(|n| n.starts_with("iphone/logs/")), "{names:?}");
-    assert!(names.iter().any(|n| n.starts_with("iphone/snapshots/")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("logs/")), "{names:?}");
+    assert!(names.iter().any(|n| n.starts_with("snapshots/")), "{names:?}");
     let mut manifest = String::new();
     zip.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
     assert!(manifest.contains("\"version\":1") || manifest.contains("\"version\": 1"), "{manifest}");
-    assert!(manifest.contains("iphone/snapshots/"));
+    assert!(manifest.contains("snapshots/"));
 }
 
 #[test]

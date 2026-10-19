@@ -2,12 +2,10 @@ import Foundation
 import OSLog
 
 enum AdRemovalDiagnosticsComponent: String, Codable {
-    case iphone
     case mac
 
     fileprivate var applicationSupportFolder: String {
         switch self {
-        case .iphone: "Pods"
         case .mac: "PodsSpeaker"
         }
     }
@@ -137,7 +135,7 @@ final class AdRemovalDiagnostics: @unchecked Sendable {
             maximumLogFileBytes: Int = 10 * 1_024 * 1_024,
             retainedLogFileCount: Int = 5,
             retainedSnapshotCount: Int = 10,
-            component: AdRemovalDiagnosticsComponent = .iphone,
+            component: AdRemovalDiagnosticsComponent = .mac,
             appVersion: String,
             buildVersion: String
         ) {

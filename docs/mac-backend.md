@@ -149,7 +149,7 @@ The earlier v13 automatic real test for episode 20720 used a fresh disposable tr
 It completed all 41 coarse classification windows. It failed closed at the first opening-boundary disagreement.
 The test published no automatic result. Runtime was 433.11 seconds.
 
-The iOS native app is deprecated. The Vultr VPS was destroyed on 2026-09-07.
+The native iOS app was removed on 2026-10-19. The Vultr VPS was destroyed on 2026-09-07.
 
 Classifier v21 fixtures pass the current automatic acceptance contract.
 They do not prove universal classifier accuracy.
@@ -209,7 +209,7 @@ dev/check.sh
 dev/sh.sh sh -c "cd /work/client && npm run build"
 ```
 
-Do not set `VITE_BASE=./`. That path is for the deprecated iOS bundle.
+Do not set `VITE_BASE=./`. That setting was for the removed iOS bundle.
 
 Confirm `client/dist/` contains `_headers`, `index.html`, `sw.js`, `offline-assets.json`, `manifest.webmanifest`, and hashed files under `assets/`.
 
@@ -551,7 +551,7 @@ Note: The installed release is `20260912-085138`. The live model is `Qwen3.8-27B
 
 ## Backup and migration
 
-CAUTION: Do not uninstall the deprecated iOS app. Uninstalling the native app can erase its remaining local data.
+CAUTION: The native iOS app is removed from the repo but may still be installed on the iPhone. Uninstalling that app can erase its remaining local data.
 The Vultr VPS was destroyed on 2026-09-07. Cloudflare Pages serves the client. The Mac host runs the backend.
 
 Use SQLite backup, not a standalone copy of a live database file.
@@ -653,7 +653,7 @@ They do not prove universal classifier accuracy.
 Broader automatic monitoring remains appropriate.
 There is no manual review or operator labeling.
 
-The native iOS app remains deprecated.
+The native iOS app was removed on 2026-10-19.
 The Vultr VPS, firewall, and SSH key were destroyed on 2026-09-07.
 The account had no snapshots, backups, reserved IPs, object storage, or other paid Vultr resources.
 `https://pods.mcgiv.dev` stayed on Cloudflare Pages. Route53 records were not deleted.

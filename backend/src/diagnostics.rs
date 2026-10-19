@@ -185,8 +185,8 @@ impl Diagnostics {
 fn write_archive<W: std::io::Write + std::io::Seek>(writer: W, diagnostics: &Diagnostics) -> std::io::Result<()> {
     let logs = diagnostics.log_names().unwrap_or_default();
     let snapshots = diagnostics.snapshot_ids().unwrap_or_default();
-    let log_files: Vec<String> = logs.iter().map(|name| format!("iphone/logs/{name}")).collect();
-    let snapshot_files: Vec<String> = snapshots.iter().map(|id| format!("iphone/snapshots/{id}.json")).collect();
+    let log_files: Vec<String> = logs.iter().map(|name| format!("logs/{name}")).collect();
+    let snapshot_files: Vec<String> = snapshots.iter().map(|id| format!("snapshots/{id}.json")).collect();
     let manifest = serde_json::json!({
         "version": 1,
         "logFiles": log_files,
@@ -201,14 +201,14 @@ fn write_archive<W: std::io::Write + std::io::Seek>(writer: W, diagnostics: &Dia
     for name in &logs {
         let path = diagnostics.root.join("logs").join(name);
         if let Ok(bytes) = fs::read(&path) {
-            zip.start_file(format!("iphone/logs/{name}"), options)?;
+            zip.start_file(format!("logs/{name}"), options)?;
             std::io::Write::write_all(&mut zip, &bytes)?;
         }
     }
     for id in &snapshots {
         let path = diagnostics.root.join("snapshots").join(format!("{id}.json"));
         if let Ok(bytes) = fs::read(&path) {
-            zip.start_file(format!("iphone/snapshots/{id}.json"), options)?;
+            zip.start_file(format!("snapshots/{id}.json"), options)?;
             std::io::Write::write_all(&mut zip, &bytes)?;
         }
     }

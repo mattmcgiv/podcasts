@@ -30,7 +30,7 @@ The Mac menu-bar app is Pods Pipeline Preview (`Pods Speaker`, `dev.mcgiv.pods.s
 
 ## Default app/runtime
 
-- The browser at `pods.mcgiv.dev` is the supported client. The native iOS app is deprecated; retain its source and data for migration only.
+- The browser at `pods.mcgiv.dev` is the supported client. The native iOS app was removed on 19 October 2026; its source is in git history.
 - The library/API backend is the Rust crate in `backend/` (`Backend::handle`), hosted on the Mac. The browser must work from downloaded data while the Mac is unavailable.
 - The browser synchronizes over HTTPS through Tailscale while the Mac is awake and connected. Only processed episodes with finished show notes are published.
 - For user-facing library/API behavior, implement backend changes in Rust (`backend/`) and cover them with `cargo test`.

@@ -4,6 +4,10 @@ Date: 2026-07-16
 Branch: `feat/ad-removal`  
 Accepted design: `docs/ad-removal-design.md` at `45b911e`
 
+Historical record. The iOS simulator suite, signed device build, corpus
+evaluator, and diagnostics collector below referenced `ios/`, which was
+removed on 2026-10-19. The macOS and client results remain valid history.
+
 ## Automated gates completed
 
 - Client merge gate:
