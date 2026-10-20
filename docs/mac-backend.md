@@ -439,10 +439,16 @@ Dispatch stays disabled until `mac.json` names the checkout Pi should edit:
 }
 ```
 
-Optional keys: `feedback_model` (default `Qwen3.8-27B-4bit`, the show-notes model) and `feedback_timeout_secs` (default 1800).
-Each pipeline step dispatches at most one queued report: it holds the cooperative oMLX lock under purpose `code_fix`,
-runs `pi --provider omlx --model <model> --print` in the checkout, and records the outcome in `browser_feedback`.
-Busy power, memory, or oMLX gates defer the report without consuming an attempt; three failed runs mark it `failed`.
+Optional keys: `feedback_provider` (default `deepseek`), `feedback_model` (default `deepseek-flash`; with the
+`omlx` provider the default is `Qwen3.8-27B-4bit`, the show-notes model), and `feedback_timeout_secs` (default 1800).
+Each pipeline step dispatches at most one queued report: it runs
+`pi --provider <provider> --model <model> --print` in the checkout and records the outcome in `browser_feedback`.
+The default provider is the DeepSeek cloud API; pi reads its key from pi's own auth store
+(`~/.pi/agent/auth.json`), never from `mac.json` or the service environment.
+Only the `omlx` provider runs inference on the Mac, so only it holds the cooperative oMLX lock under purpose
+`code_fix` and waits on the inference memory gate. A busy power gate defers every provider without consuming an
+attempt (memory/oMLX deferrals are oMLX-only); three failed runs mark the report `failed`.
+Rollback to the local model: set `"feedback_provider": "omlx"` (and optionally `feedback_model`), then restart the agent.
 The `result` column always names the latest wait or outcome: deferrals record the gate (`waiting on power/memory/omlx`),
 a mid-run unplug records `preempted` without consuming the attempt, and every run appends its pi transcript at
 `feedback/<id>.pi.log` in the artifact store (fresh per attempt, kept on timeout and preempt). Each report gets an

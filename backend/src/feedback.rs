@@ -1,11 +1,15 @@
 //! User-typed feature requests and bug reports, dispatched to `pi` on the Mac.
 //!
 //! The browser queues reports through `/api/sync/actions` (entity `feedback`,
-//! field is the report id). This worker claims one queued report per step,
-//! holds the cooperative oMLX lock for the code-fix model, and runs
-//! `pi --provider omlx --model <model> --print` in the repo checkout so the
-//! report becomes a local code fix. Dispatch stays disabled until
-//! `PODS_FEEDBACK_REPO` names the checkout directory.
+//! field is the report id). This worker claims one queued report per step
+//! and runs `pi --provider <provider> --model <model> --print` in the repo
+//! checkout so the report becomes a local code fix. The default provider is
+//! the DeepSeek cloud API (`deepseek` / `deepseek-flash`, key in pi's own
+//! auth store); with `PODS_FEEDBACK_PROVIDER=omlx` the worker instead holds
+//! the cooperative oMLX lock and memory gate for the local code-fix model,
+//! as it did before the cloud switch. The external-power gate applies to
+//! every provider: a run and its local verification are long, heavy work.
+//! Dispatch stays disabled until `PODS_FEEDBACK_REPO` names the checkout.
 //!
 //! A clean pi exit is not trusted on its own: `verify` checks the worktree
 //! diff is non-empty, touches no protected build/gate path, and passes the
@@ -29,7 +33,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const PI_PROVIDER: &str = "omlx";
+pub const DEFAULT_PROVIDER: &str = "deepseek";
+pub const DEFAULT_MODEL: &str = "deepseek-flash";
+/// The one provider that runs inference on this Mac; only it is gated on
+/// local memory and the cooperative oMLX lock.
+const LOCAL_PROVIDER: &str = "omlx";
 pub const MAX_ATTEMPTS: i64 = 3;
 const DEFAULT_TIMEOUT_SECS: u64 = 1800;
 const DEFAULT_VERIFY_TIMEOUT_SECS: u64 = 600;
@@ -40,11 +48,24 @@ const LAUNCH_RETRY_SECS: i64 = 60;
 const MAX_REASON_CHARS: usize = 200;
 const MAX_VERIFY_TAIL_CHARS: usize = 1200;
 
+pub fn provider() -> String {
+    std::env::var("PODS_FEEDBACK_PROVIDER")
+        .ok()
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
+}
+
 pub fn model() -> String {
     std::env::var("PODS_FEEDBACK_MODEL")
         .ok()
         .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| crate::local_worker::MODEL.to_string())
+        .unwrap_or_else(|| {
+            if provider() == LOCAL_PROVIDER {
+                crate::local_worker::MODEL.to_string()
+            } else {
+                DEFAULT_MODEL.to_string()
+            }
+        })
 }
 
 fn pi_bin() -> String {
@@ -147,13 +168,23 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     if let Err(error) = crate::power_gate::require_external_power() {
         return defer(backend, &report.id, &format!("waiting on power ({error})"));
     }
-    if let Err(error) = crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx) {
-        return defer(backend, &report.id, &format!("waiting on memory ({error})"));
-    }
+    let provider = provider();
     let model = model();
-    let _permit = match crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_CODE_FIX, &model) {
-        Ok(permit) => permit,
-        Err(error) => return defer(backend, &report.id, &format!("waiting on omlx ({error})")),
+    // Only the local oMLX provider loads a model on this Mac, so only it
+    // contends for inference memory and the one-chat-at-a-time oMLX lock.
+    // Cloud providers dispatch straight to pi.
+    let _permit = if provider == LOCAL_PROVIDER {
+        if let Err(error) =
+            crate::memory_gate::require_inference(crate::memory_gate::InferenceKind::Omlx)
+        {
+            return defer(backend, &report.id, &format!("waiting on memory ({error})"));
+        }
+        match crate::omlx_lock::acquire_chat(crate::omlx_lock::PURPOSE_CODE_FIX, &model) {
+            Ok(permit) => Some(permit),
+            Err(error) => return defer(backend, &report.id, &format!("waiting on omlx ({error})")),
+        }
+    } else {
+        None
     };
     let claimed = backend.db.execute(
         "UPDATE browser_feedback SET status='running', started_at=?, attempts=attempts+1 WHERE id=? AND status='queued'",
@@ -174,6 +205,7 @@ pub fn step(backend: &Backend) -> Result<bool, Error> {
     let prompt = dispatch_prompt(&worktree, &branch, &report.kind, &report.body);
     let outcome = run_pi(
         &pi_bin(),
+        &provider,
         &model,
         &worktree,
         &prompt,
@@ -624,6 +656,7 @@ fn dispatch_prompt(worktree: &Path, branch: &str, kind: &str, body: &str) -> Str
 #[cfg(unix)]
 fn run_pi(
     pi: &str,
+    provider: &str,
     model: &str,
     repo: &Path,
     prompt: &str,
@@ -634,7 +667,7 @@ fn run_pi(
     let (log_out, log_err) = log_stdio_pair(log);
     let mut child = match Command::new(pi)
         .arg("--provider")
-        .arg(PI_PROVIDER)
+        .arg(provider)
         .arg("--model")
         .arg(model)
         .arg("--print")
@@ -672,6 +705,7 @@ fn run_pi(
 #[cfg(not(unix))]
 fn run_pi(
     pi: &str,
+    provider: &str,
     model: &str,
     repo: &Path,
     prompt: &str,
@@ -682,7 +716,7 @@ fn run_pi(
     let (log_out, log_err) = log_stdio_pair(log);
     match Command::new(pi)
         .arg("--provider")
-        .arg(PI_PROVIDER)
+        .arg(provider)
         .arg("--model")
         .arg(model)
         .arg("--print")
@@ -1031,15 +1065,27 @@ mod tests {
     }
 
     #[test]
-    fn env_defaults_match_local_model() {
+    fn env_defaults_use_deepseek_flash() {
         let _env = EnvGuard::apply(vec![
+            ("PODS_FEEDBACK_PROVIDER", None),
             ("PODS_FEEDBACK_MODEL", None),
             ("PODS_FEEDBACK_PI", None),
             ("PODS_FEEDBACK_TIMEOUT_SECS", None),
         ]);
-        assert_eq!(model(), crate::local_worker::MODEL);
+        assert_eq!(provider(), "deepseek");
+        assert_eq!(model(), "deepseek-flash");
         assert_eq!(pi_bin(), "pi");
         assert_eq!(timeout_secs(), 1800);
+    }
+
+    #[test]
+    fn omlx_provider_defaults_to_local_model() {
+        let _env = EnvGuard::apply(vec![
+            ("PODS_FEEDBACK_PROVIDER", Some("omlx".to_string())),
+            ("PODS_FEEDBACK_MODEL", None),
+        ]);
+        assert_eq!(provider(), "omlx");
+        assert_eq!(model(), crate::local_worker::MODEL);
     }
 
     #[test]
@@ -1062,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_run_without_changes_needs_review_and_invokes_pi_with_omlx_model() {
+    fn successful_run_without_changes_needs_review_and_invokes_pi_with_deepseek_flash() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "crash on launch");
         git_repo(temp.path());
@@ -1077,8 +1123,11 @@ mod tests {
                 Some(temp.path().to_string_lossy().into_owned()),
             ),
             ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_PROVIDER", None),
+            ("PODS_FEEDBACK_MODEL", None),
         ]);
-        let dispatched = open_gates(|| with_lock(|| step(&backend).unwrap()));
+        // No with_lock: the cloud default must dispatch without the oMLX lock.
+        let dispatched = open_gates(|| step(&backend).unwrap());
         assert!(dispatched);
         let (status, attempts, _, result) = report_status(&backend, "r1");
         assert_eq!(status, "needs-review");
@@ -1087,8 +1136,8 @@ mod tests {
         assert!(result.contains("pi exit 0"), "{result}");
         assert!(result.contains("no file changed"), "{result}");
         let args = std::fs::read_to_string(&args_log).unwrap();
-        assert!(args.contains("--provider omlx"), "{args}");
-        assert!(args.contains(&format!("--model {}", model())), "{args}");
+        assert!(args.contains("--provider deepseek"), "{args}");
+        assert!(args.contains("--model deepseek-flash"), "{args}");
         assert!(args.contains("--print"), "{args}");
         assert!(args.contains("crash on launch"), "{args}");
     }
@@ -1206,12 +1255,15 @@ mod tests {
         queue_report(&backend, "r1", "bug", "stuck sync");
         let pi = stub_pi(temp.path(), "exit 0");
         let dir = tempfile::tempdir().unwrap();
+        // The oMLX lock only gates the local provider.
         let _env = EnvGuard::apply(vec![
             (
                 "PODS_FEEDBACK_REPO",
                 Some(temp.path().to_string_lossy().into_owned()),
             ),
             ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_PROVIDER", Some("omlx".to_string())),
+            ("PODS_FEEDBACK_MODEL", None),
         ]);
         let dispatched = open_gates(|| {
             crate::omlx_lock::with_test_lock_env(
@@ -1331,10 +1383,15 @@ mod tests {
     fn defer_records_memory_wait_reason() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "no memory");
-        let _env = EnvGuard::apply(vec![(
-            "PODS_FEEDBACK_REPO",
-            Some(temp.path().to_string_lossy().into_owned()),
-        )]);
+        // The memory gate only applies to local oMLX inference.
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PROVIDER", Some("omlx".to_string())),
+            ("PODS_FEEDBACK_MODEL", None),
+        ]);
         let mut memory = crate::memory_gate::TestMemory::default();
         memory.snapshot.available_bytes = 0;
         let dispatched = crate::memory_gate::with_test_memory(memory, || {
@@ -1351,6 +1408,45 @@ mod tests {
     }
 
     #[test]
+    fn cloud_provider_dispatches_without_omlx_lock_or_memory() {
+        // The default provider is a cloud API: no local inference runs, so
+        // neither the oMLX memory gate nor the cooperative oMLX lock may
+        // defer dispatch. No lock test env is installed here at all.
+        let (backend, temp) = fixture();
+        queue_report(&backend, "r1", "feature", "dark mode");
+        git_repo(temp.path());
+        let args_log = temp.path().join("args.log");
+        let pi = stub_pi(
+            temp.path(),
+            &format!("echo \"$*\" >> '{}'\nexit 0", args_log.display()),
+        );
+        let _env = EnvGuard::apply(vec![
+            (
+                "PODS_FEEDBACK_REPO",
+                Some(temp.path().to_string_lossy().into_owned()),
+            ),
+            ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_PROVIDER", None),
+            ("PODS_FEEDBACK_MODEL", None),
+        ]);
+        let mut memory = crate::memory_gate::TestMemory::default();
+        memory.snapshot.available_bytes = 0;
+        let dispatched = crate::memory_gate::with_test_memory(memory, || {
+            crate::power_gate::with_test_power_status(
+                crate::power_gate::PowerStatus::External,
+                || step(&backend).unwrap(),
+            )
+        });
+        assert!(dispatched);
+        let (status, attempts, _, _) = report_status(&backend, "r1");
+        assert_eq!(status, "needs-review");
+        assert_eq!(attempts, 1);
+        let args = std::fs::read_to_string(&args_log).unwrap();
+        assert!(args.contains("--provider deepseek"), "{args}");
+        assert!(args.contains("--model deepseek-flash"), "{args}");
+    }
+
+    #[test]
     fn defer_records_omlx_wait_reason() {
         let (backend, temp) = fixture();
         queue_report(&backend, "r1", "bug", "stuck sync");
@@ -1362,6 +1458,8 @@ mod tests {
                 Some(temp.path().to_string_lossy().into_owned()),
             ),
             ("PODS_FEEDBACK_PI", Some(pi.to_string_lossy().into_owned())),
+            ("PODS_FEEDBACK_PROVIDER", Some("omlx".to_string())),
+            ("PODS_FEEDBACK_MODEL", None),
         ]);
         let dispatched = open_gates(|| {
             crate::omlx_lock::with_test_lock_env(

@@ -242,6 +242,8 @@ def backend_env(config):
         env["PODS_FEEDBACK_TIMEOUT_SECS"] = str(int(config["feedback_timeout_secs"]))
     if config.get("feedback_model"):
         env["PODS_FEEDBACK_MODEL"] = str(config["feedback_model"])
+    if config.get("feedback_provider"):
+        env["PODS_FEEDBACK_PROVIDER"] = str(config["feedback_provider"])
     if "memory_gate" in config:
         env["PODS_MEMORY_GATE"] = "0" if config["memory_gate"] in (False, 0, "0") else "1"
     if "memory_whisper_defer_below_bytes" in config:
