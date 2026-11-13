@@ -24,3 +24,6 @@ infra/library-export/
 **/xcuserdata/
 mac/backend/.venv/
 mac/backend/__pycache__/
+
+# iOS shell build output
+ios/build/
