@@ -311,6 +311,13 @@ CREATE TABLE IF NOT EXISTS podcasts (
         used INTEGER NOT NULL DEFAULT 0
     );
 
+    -- One-time codes the Mac issues so the native iPhone app can open a session.
+    CREATE TABLE IF NOT EXISTS auth_pair_tokens (
+        token_hash TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS auth_webauthn_state (
         id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,

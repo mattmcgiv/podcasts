@@ -185,3 +185,38 @@ fn test_login_after_enroll() {
     let cookie = cookie_pair(set_cookie(&logged).as_deref().unwrap());
     assert_eq!(call_cookie(&backend, "GET", "/api/recent", None, &cookie).status_code, 200);
 }
+
+fn issue_pair_code(backend: &Backend, code: &str, expires_in: i64) {
+    backend
+        .db
+        .execute(
+            "INSERT INTO auth_pair_tokens (token_hash, expires_at, used) VALUES (?, ?, 0)",
+            rusqlite::params![pods_backend::auth::hash_secret(code), pods_backend::db::now_unix() + expires_in],
+        )
+        .expect("pair code");
+}
+
+#[test]
+fn test_pair_code_opens_one_session() {
+    let backend = backend();
+    issue_pair_code(&backend, "pair-secret", 600);
+    let paired = call(&backend, "POST", "/api/auth/pair", Some(json!({ "code": "pair-secret" })));
+    assert_eq!(paired.status_code, 200);
+    let cookie = cookie_pair(&set_cookie(&paired).expect("session cookie"));
+    assert_eq!(call_cookie(&backend, "GET", "/api/recent", None, &cookie).status_code, 200);
+    // Single use: a replayed code must not open a second session.
+    let replay = call(&backend, "POST", "/api/auth/pair", Some(json!({ "code": "pair-secret" })));
+    assert_eq!(replay.status_code, 401);
+    assert!(set_cookie(&replay).is_none());
+}
+
+#[test]
+fn test_pair_rejects_unknown_expired_and_missing_codes() {
+    let backend = backend();
+    issue_pair_code(&backend, "stale", -1);
+    for body in [json!({ "code": "never-issued" }), json!({ "code": "stale" }), json!({ "code": "" }), json!({})] {
+        let response = call(&backend, "POST", "/api/auth/pair", Some(body));
+        assert_eq!(response.status_code, 401);
+        assert!(set_cookie(&response).is_none());
+    }
+}

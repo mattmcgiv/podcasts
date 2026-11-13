@@ -501,6 +501,15 @@ def enroll():
     print(f"https://pods.mcgiv.dev/#enroll={token}")
 
 
+def pair():
+    # Single-use code for the native iPhone app, valid for ten minutes. Only its hash is stored.
+    code = secrets.token_urlsafe(32)
+    with sqlite3.connect(STATE / "data/pods.sqlite") as db:
+        db.execute("INSERT INTO auth_pair_tokens(token_hash,expires_at,used) VALUES(?,?,0)",
+                   (hashlib.sha256(code.encode()).hexdigest(), int(time.time()) + 600))
+    print(code)
+
+
 def list_jobs(db):
     # The pending view excludes untouched duplicates and played or unsubscribed work.
     return [dict(zip(("episode_id", "stage", "attempts", "error"), row))
@@ -901,7 +910,7 @@ def main():
     os.environ["PATH"] = PATH
     os.umask(0o077)
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["install", "agent", "run", "ship", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll", "devices"])
+    parser.add_argument("command", choices=["install", "agent", "run", "ship", "certificate", "acme-auth", "acme-cleanup", "backup", "import", "inventory", "jobs", "retry", "enroll", "pair", "devices"])
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     if args.command == "install": install()
@@ -910,6 +919,7 @@ def main():
     elif args.command == "ship": ship_once()
     elif args.command == "certificate": certificate()
     elif args.command == "enroll": enroll()
+    elif args.command == "pair": pair()
     elif args.command.startswith("acme-"): acme_hook(args.command == "acme-cleanup")
     elif args.command == "backup": print(json.dumps(backup(Path(args.arguments[0]), Path(args.arguments[1]))))
     elif args.command == "import": import_library(Path(args.arguments[0]))

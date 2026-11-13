@@ -2,7 +2,7 @@ import Foundation
 
 /// Small on-device files the Mac reads back with `devicectl device copy from`
 /// to check that an install works. Nothing here leaves the phone on its own.
-enum ShellLog {
+enum DeviceLog {
     static let directory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let directory = base.appendingPathComponent("Pods", isDirectory: true)
@@ -10,8 +10,8 @@ enum ShellLog {
         return directory
     }()
 
-    private static let queue = DispatchQueue(label: "dev.mcgiv.pods.shell-log")
-    private static let logURL = directory.appendingPathComponent("shell.log")
+    private static let queue = DispatchQueue(label: "dev.mcgiv.pods.device-log")
+    private static let logURL = directory.appendingPathComponent("device.log")
     private static let maxBytes = 256 * 1024
 
     static func write(_ line: String) {
@@ -36,7 +36,7 @@ enum ShellLog {
             guard JSONSerialization.isValidJSONObject(status),
                   let data = try? JSONSerialization.data(withJSONObject: status, options: [.prettyPrinted, .sortedKeys])
             else { return }
-            try? data.write(to: directory.appendingPathComponent("shell-status.json"), options: .atomic)
+            try? data.write(to: directory.appendingPathComponent("device-status.json"), options: .atomic)
         }
     }
 }

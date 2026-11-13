@@ -297,6 +297,7 @@ pub fn is_public_auth_path(path: &str, method: &str) -> bool {
             | ("POST", "/api/auth/register")
             | ("POST", "/api/internal/passkey-reset")
             | ("POST", "/api/auth/logout")
+            | ("POST", "/api/auth/pair")
     )
 }
 
@@ -497,6 +498,7 @@ pub fn handle_auth(auth: &Auth, db: &Database, request: &HttpRequest) -> Result<
                 "DELETE FROM passkey_credentials;
                  DELETE FROM auth_sessions;
                  DELETE FROM auth_enroll_tokens;
+                 DELETE FROM auth_pair_tokens;
                  DELETE FROM auth_webauthn_state;",
             )?;
         }
@@ -563,6 +565,25 @@ pub fn handle_auth(auth: &Auth, db: &Database, request: &HttpRequest) -> Result<
             rusqlite::params![stored.credential_id, USER_HANDLE, stored.public_key_json, now],
         )?;
         return Ok(Some(session_response(auth, db, json!({ "enrolled": true, "session": true }), 201)?));
+    }
+
+    // The native iPhone app cannot use a passkey on a free Personal Team (no
+    // Associated Domains), so the Mac issues it a single-use code instead.
+    if path == "/api/auth/pair" && method == "POST" {
+        let body = request.json_object()?;
+        let code = body
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .ok_or_else(|| Error::Unauthorized("pairing code is required".into()))?;
+        let changed = db.execute(
+            "UPDATE auth_pair_tokens SET used = 1 WHERE token_hash = ? AND used = 0 AND expires_at > ?",
+            rusqlite::params![hash_secret(code), db::now_unix()],
+        )?;
+        if changed != 1 {
+            return Err(Error::Unauthorized("pairing code is invalid".into()));
+        }
+        return Ok(Some(session_response(auth, db, json!({ "enrolled": true, "session": true }), 200)?));
     }
 
     if path == "/api/auth/login/options" && method == "POST" {
