@@ -109,15 +109,14 @@ final class DownloadsTests: XCTestCase {
         let preferences = DownloadPreferences()
         let listen = [Fixture.episode(1), Fixture.episode(2)]
         let requested: [Episode?] = [Fixture.episode(5), nil]
-        let key = Downloads.planKey(listen: listen, requested: requested, preferences: preferences, paired: true)
+        let key = Downloads.planKey(listen: listen, requested: requested, preferences: preferences)
         var moved = listen
         moved[0].position_secs = 321
-        XCTAssertEqual(Downloads.planKey(listen: moved, requested: requested, preferences: preferences, paired: true), key, "a position save")
-        XCTAssertNotEqual(Downloads.planKey(listen: [listen[1], listen[0]], requested: requested, preferences: preferences, paired: true), key)
+        XCTAssertEqual(Downloads.planKey(listen: moved, requested: requested, preferences: preferences), key, "a position save")
+        XCTAssertNotEqual(Downloads.planKey(listen: [listen[1], listen[0]], requested: requested, preferences: preferences), key)
         var played = Fixture.episode(5); played.played_at = 1_700_000_500
-        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: [played, nil], preferences: preferences, paired: true), key)
-        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true), paired: true), key)
-        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: preferences, paired: false), key, "pairing again")
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: [played, nil], preferences: preferences), key)
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true)), key)
     }
 
     func testAPassSkipsFilesThatFinishedSinceItsScan() {
@@ -201,6 +200,41 @@ final class DownloadsTests: XCTestCase {
         XCTAssertFalse(backoff.record(.stored(complete: false), at: last + 1))
         XCTAssertEqual(backoff, Downloads.Backoff())
         XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
+    }
+
+    func testSyncsAndTapsEndTheWait() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var backoff = Downloads.Backoff()
+        XCTAssertFalse(backoff.resume(), "nothing to end")
+        XCTAssertEqual(backoff, Downloads.Backoff())
+        _ = backoff.record(.unreachable, at: start)
+        XCTAssertTrue(backoff.resume())
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 1), 1, "a probe at once")
+        XCTAssertTrue(backoff.record(.unreachable, at: start + 2), "a failed probe still counts")
+        XCTAssertEqual(backoff.until, start + 62)
+        XCTAssertEqual(Downloads.outcome(ofSync: SyncError.unreachable), .unreachable)
+        XCTAssertEqual(Downloads.outcome(ofSync: SyncError.http(502, "")), .unreachable)
+        XCTAssertEqual(Downloads.outcome(ofSync: SyncError.unauthorized), .unauthorized)
+        XCTAssertNil(Downloads.outcome(ofSync: SyncError.http(409, "conflict")))
+        XCTAssertNil(Downloads.outcome(ofSync: SyncError.message("Unsupported Mac library format.")))
+        XCTAssertNil(Downloads.outcome(ofSync: CocoaError(.fileReadCorruptFile)))
+    }
+
+    func testTransfersQueuedInTheBackgroundAreQueuedAgainOnScreen() throws {
+        XCTAssertTrue(Downloads.requeue(foreground: false, received: 0, active: true))
+        XCTAssertFalse(Downloads.requeue(foreground: false, received: 1, active: true), "already moving")
+        XCTAssertFalse(Downloads.requeue(foreground: true, received: 0, active: true))
+        XCTAssertFalse(Downloads.requeue(foreground: false, received: 0, active: false), "not while in the background")
+        let record = Transfers.Description(hash: Fixture.hash(1), segment: 3, foreground: true)
+        let description = try XCTUnwrap(String(data: JSONEncoder().encode(record), encoding: .utf8))
+        XCTAssertEqual(Transfers.info(description), Transfers.Info(hash: Fixture.hash(1), segment: 3))
+        XCTAssertTrue(Transfers.queuedInForeground(description))
+        // Transfers queued by the previous build carry no flag: treated as queued in the background.
+        let old = "{\"hash\":\"\(Fixture.hash(1))\",\"segment\":3}"
+        XCTAssertEqual(Transfers.info(old), Transfers.Info(hash: Fixture.hash(1), segment: 3))
+        XCTAssertFalse(Transfers.queuedInForeground(old))
+        XCTAssertNil(Transfers.info("not json"))
+        XCTAssertNil(Transfers.info(nil))
     }
 
     func testTheNextAndRequestedEpisodesShowProgressAtOnce() {

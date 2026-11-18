@@ -694,6 +694,33 @@ fn pending_excludes_terminal_blocked_unpublished_episodes() {
 }
 
 #[test]
+fn a_pull_renews_the_session_cookie() {
+    let (backend, _temp, _manifest) = fixture();
+    backend.auth.enable_passkey("test-reset-secret", "https://pods.mcgiv.dev");
+    backend
+        .db
+        .execute(
+            "INSERT INTO auth_pair_tokens (token_hash, expires_at, used) VALUES (?, ?, 0)",
+            rusqlite::params![pods_backend::auth::hash_secret("pair-secret"), pods_backend::db::now_unix() + 600],
+        )
+        .unwrap();
+    let paired = backend.handle(HttpRequest::new("POST", "/api/auth/pair").with_json(&json!({ "code": "pair-secret" })));
+    let issued = paired.headers.get("set-cookie").cloned().expect("session cookie");
+    let cookie = issued.split(';').next().unwrap().to_string();
+    let pull = |target: &str, cookie: &str| backend.handle(HttpRequest::new("GET", target).with_header("cookie", cookie));
+    let pulled = pull("/api/sync?version=2", &cookie);
+    assert_eq!(pulled.status_code, 200);
+    assert_eq!(pulled.headers.get("set-cookie"), Some(&issued), "same token and attributes, a fresh Max-Age");
+    // Other routes, and requests without a valid session, leave the cookie alone.
+    let status = pull("/api/status", &cookie);
+    assert_eq!(status.status_code, 200);
+    assert!(status.headers.get("set-cookie").is_none());
+    let forged = pull("/api/sync", "pods_session=00000000-0000-4000-8000-000000000000");
+    assert_eq!(forged.status_code, 401);
+    assert!(forged.headers.get("set-cookie").is_none());
+}
+
+#[test]
 fn browser_routes_require_session_but_allow_login_bootstrap() {
     let (backend, _temp, manifest) = fixture();
     backend

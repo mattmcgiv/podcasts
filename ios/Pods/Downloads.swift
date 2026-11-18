@@ -33,7 +33,8 @@ final class Downloads {
     }
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var lastLibraryKey = ""
-    @ObservationIgnored private var wasPaired = false
+    /// The last sync failed in a way that means the Mac is down or refusing this iPhone.
+    @ObservationIgnored private var syncFailed = false
     @ObservationIgnored private var again = false
     @ObservationIgnored var protectedHash: String?
     /// Transfer state of each episode being fetched, and bytes of segments in flight.
@@ -91,34 +92,30 @@ final class Downloads {
     /// not for the position saves that bump the revision every few seconds during playback.
     func libraryChanged() {
         let library = Library.shared
-        let paired = library.pairing == .paired
         let key = Self.planKey(listen: library.listen, requested: requested.map { library.episode($0.id) },
-                               preferences: library.device.preferences, paired: paired)
-        // Just paired (again): what the Mac refused before may work now, so do not wait it out.
-        if paired, !wasPaired { backoff = Backoff() }
-        wasPaired = paired
+                               preferences: library.device.preferences)
         guard key != lastLibraryKey else { return }
         lastLibraryKey = key
         run()
     }
 
     /// Everything the download plan depends on, and nothing else (positions change constantly).
-    nonisolated static func planKey(listen: [Episode], requested: [Episode?], preferences: DownloadPreferences, paired: Bool) -> String {
+    nonisolated static func planKey(listen: [Episode], requested: [Episode?], preferences: DownloadPreferences) -> String {
         var key = listen.map { "\($0.id):\($0.manifest?.hash ?? "-"):\($0.isSummary)" }
         key += requested.map { episode in
             episode.map { "r\($0.id):\($0.manifest?.hash ?? "-"):\($0.played_at ?? -1):\($0.archived_at ?? -1):\($0.isSummary)" } ?? "r-"
         }
         key.append("\(preferences.automatic):\(preferences.count):\(preferences.limit)")
-        key.append(paired ? "paired" : "unpaired")
         return key.joined(separator: ",")
     }
 
-    /// The wait after the Mac fails a transfer outright (an error status, a refused or lost
-    /// connection, or this iPhone not paired), so a Mac that fails fast is not handed the whole
-    /// plan again every minute and on every background wake. 30 seconds, doubling to 30
-    /// minutes; failures of transfers queued before the wait began do not lengthen it. Once it
-    /// is over a single segment goes out as a probe, and the next stored segment ends it.
-    /// Transfers already queued are left alone: after a brief outage they carry on by themselves.
+    /// The wait after the Mac fails outright (an error status, a refused or lost connection, or
+    /// this iPhone not paired), so a Mac that fails fast is not handed the whole plan again every
+    /// minute and on every background wake. 30 seconds, doubling to 30 minutes. Failures that
+    /// arrive while the wait runs (the rest of the queue) do not lengthen it; any failure after
+    /// it ends counts as a failed probe. Once it is over a single segment goes out as a probe,
+    /// and the next stored segment ends it. Transfers already queued are left alone: after a
+    /// brief outage they carry on by themselves.
     struct Backoff: Equatable {
         private(set) var failures = 0
         private(set) var until: Date?
@@ -140,6 +137,42 @@ final class Downloads {
             case .stale, .cancelled, .failed:
                 return false
             }
+        }
+
+        /// End the wait now, so the next pass sends its probe. A failed probe still lengthens
+        /// the next wait. True when there was a wait.
+        mutating func resume() -> Bool {
+            guard until != nil else { return false }
+            until = .distantPast
+            return true
+        }
+    }
+
+    /// How a failed sync bears on downloads: the Mac down (no answer or a 5xx) or refusing this
+    /// iPhone counts as a failed transfer would. Other errors say nothing about the transfers.
+    nonisolated static func outcome(ofSync error: Error) -> Transfers.Outcome? {
+        switch error as? SyncError {
+        case .unreachable?: return .unreachable
+        case .unauthorized?: return .unauthorized
+        case .http(let status, _)? where status >= 500: return .unreachable
+        default: return nil
+        }
+    }
+
+    /// Called by `Library` after each sync. A failure that means the Mac is down starts the wait,
+    /// so a background launch during an outage queues nothing. The first sync that reaches
+    /// the Mac after one (it is back, or this iPhone was paired again) ends the wait at once.
+    func syncFinished(_ error: Error?) {
+        guard let error else {
+            guard syncFailed else { return }
+            syncFailed = false
+            if backoff.resume() { run() }
+            return
+        }
+        guard let outcome = Self.outcome(ofSync: error) else { return }
+        syncFailed = true
+        if backoff.record(outcome, at: Date()), let until = backoff.until {
+            DeviceLog.write("downloads wait \(Int(until.timeIntervalSinceNow.rounded()))s after sync \(outcome) (failure \(backoff.failures))")
         }
     }
 
@@ -203,6 +236,8 @@ final class Downloads {
         errors[episode.id] = nil
         errorHashes[episode.id] = nil
         if let hash = episode.manifest?.hash { failures[hash] = nil }
+        // A tap is worth a try now, as the probe, so it visibly does something.
+        _ = backoff.resume()
         requested.removeAll { $0.id == episode.id }
         requested.insert(Request(id: episode.id, played_at: episode.played_at, archived_at: episode.archived_at), at: 0)
         if episode.isSummary {
@@ -270,10 +305,13 @@ final class Downloads {
         scan()
 
         // Stop transfers nothing wants now, or for a file that is already complete. Partial
-        // files stay while the episode is unplayed.
+        // files stay while the episode is unplayed. On screen, transfers queued in the background
+        // that have not started are queued again, so iOS runs them now.
+        let active = UIApplication.shared.applicationState == .active
         var queued = Set<Transfers.Info>()
         for (info, task) in running {
-            if wantedHashes.contains(info.hash), !complete.contains(info.hash), task.state != .canceling {
+            let restart = Self.requeue(foreground: Transfers.queuedInForeground(task), received: task.countOfBytesReceived, active: active)
+            if wantedHashes.contains(info.hash), !complete.contains(info.hash), task.state != .canceling, !restart {
                 queued.insert(info)
             } else {
                 task.cancel()
@@ -304,7 +342,7 @@ final class Downloads {
         let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
         for (info, task) in running { if let priority = changes[info] { task.priority = priority } }
         for planned in schedule.start {
-            transfers.start(planned.info, range: planned.range, priority: planned.priority)
+            transfers.start(planned.info, range: planned.range, priority: planned.priority, foreground: active)
         }
         episodeIDs = shown
         parts = parts.filter { shown[$0.key] != nil }
@@ -369,6 +407,13 @@ final class Downloads {
             remaining -= part.done.indices.filter { !part.done[$0] && !plan.queued.contains(.init(hash: part.hash, segment: $0)) }.count
         }
         return plan
+    }
+
+    /// A queued transfer to queue again: on screen, one queued while the app was in the background
+    /// that has not started. iOS runs those only when it chooses (often only on Wi-Fi and power),
+    /// so they could hold up the queue, the probe among them, for hours.
+    nonisolated static func requeue(foreground: Bool, received: Int64, active: Bool) -> Bool {
+        active && !foreground && received == 0
     }
 
     /// Rows that show progress before any audio arrives: the first episode being fetched, and
@@ -692,6 +737,8 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     static let identifier = "dev.mcgiv.pods.media"
 
     struct Info: Codable, Hashable { var hash: String; var segment: Int }
+    /// A task's description: its segment, and whether it was queued while the app was on screen.
+    struct Description: Codable, Equatable { var hash: String; var segment: Int; var foreground: Bool? }
     enum Outcome: Equatable { case stored(complete: Bool), stale, cancelled, unreachable, unauthorized, failed(String) }
 
     private let lock = NSLock()
@@ -740,9 +787,10 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         }
     }
 
-    func start(_ info: Info, range: ClosedRange<Int>, priority: Float) {
+    func start(_ info: Info, range: ClosedRange<Int>, priority: Float, foreground: Bool) {
+        let record = Description(hash: info.hash, segment: info.segment, foreground: foreground)
         guard let url = URL(string: "/api/artifacts/\(info.hash)", relativeTo: MacClient.base)?.absoluteURL,
-              let description = try? String(data: JSONEncoder().encode(info), encoding: .utf8) else { return }
+              let description = try? String(data: JSONEncoder().encode(record), encoding: .utf8) else { return }
         var request = URLRequest(url: url)
         request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range")
         request.setValue("\"\(info.hash)\"", forHTTPHeaderField: "If-Range")
@@ -762,8 +810,15 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         await session.allTasks.compactMap { task in Self.info(task).map { ($0, task) } }
     }
 
-    static func info(_ task: URLSessionTask) -> Info? {
-        task.taskDescription.flatMap { try? JSONDecoder().decode(Info.self, from: Data($0.utf8)) }
+    static func info(_ task: URLSessionTask) -> Info? { info(task.taskDescription) }
+    static func queuedInForeground(_ task: URLSessionTask) -> Bool { queuedInForeground(task.taskDescription) }
+
+    static func info(_ description: String?) -> Info? {
+        description.flatMap { try? JSONDecoder().decode(Description.self, from: Data($0.utf8)) }.map { Info(hash: $0.hash, segment: $0.segment) }
+    }
+    /// False for transfers queued before this was recorded: they are treated as queued in the background.
+    static func queuedInForeground(_ description: String?) -> Bool {
+        description.flatMap { try? JSONDecoder().decode(Description.self, from: Data($0.utf8)) }?.foreground ?? false
     }
 
     /// What a finished transfer's response means, before any data is written.

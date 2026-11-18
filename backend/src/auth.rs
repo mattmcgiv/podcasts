@@ -311,6 +311,19 @@ pub fn session_cookie_header(token: &str, secure: bool) -> String {
     value
 }
 
+/// The request's session cookie again with a fresh `Max-Age`, for a response to a request that
+/// passed `require_session`. The Mac extends a session each time it is used, but the cookie
+/// itself would still expire 30 days after pairing or sign-in however often the device syncs.
+/// Only a cookie shaped like one this Mac issued is echoed back.
+pub fn renewed_session_cookie(auth: &Auth, request: &HttpRequest) -> Option<String> {
+    if !auth.enabled() {
+        return None;
+    }
+    let token = HttpResponse::cookie(request, SESSION_COOKIE)?;
+    Uuid::parse_str(&token).ok()?;
+    Some(session_cookie_header(&token, auth.cookie_secure()))
+}
+
 pub fn clear_session_cookie(secure: bool) -> String {
     let mut value = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     if secure {

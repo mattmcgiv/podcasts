@@ -186,9 +186,11 @@ final class Library {
                 do {
                     try await self.synchronizeOnce(refresh: pull, force: force)
                     self.lastError = nil
+                    Downloads.shared.syncFinished(nil)
                 } catch is CancellationError {
                 } catch {
                     if case SyncError.unauthorized = error { self.pairing = .unpaired }
+                    Downloads.shared.syncFinished(error)
                     self.lastError = error.localizedDescription
                     self.syncAgain = false
                 }

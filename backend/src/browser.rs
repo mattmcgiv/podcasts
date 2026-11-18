@@ -169,7 +169,12 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
         let compact = request.query("version").as_deref() == Some("2");
         let body = snapshot_with(backend, compact)?;
         record_pull_device(backend, request)?;
-        return Ok(HttpResponse::json(body, 200));
+        let response = HttpResponse::json(body, 200);
+        // Devices pull often, so this keeps a session in use from expiring on the device.
+        return Ok(match crate::auth::renewed_session_cookie(&backend.auth, request) {
+            Some(cookie) => response.with_header("set-cookie", cookie),
+            None => response,
+        });
     }
     if let Some(client) = path.strip_prefix("/api/devices/").and_then(|rest| rest.strip_suffix("/report")) {
         if request.method != "PUT" { return Err(Error::NotFound); }
