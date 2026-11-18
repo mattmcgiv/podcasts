@@ -28,7 +28,8 @@ final class AppCoordinator {
     @ObservationIgnored private var lastRevision = -1
 
     func start() async {
-        guard !started else { return }
+        // Hosted unit tests load the app but must not sync or play.
+        guard !started, NSClassFromString("XCTestCase") == nil else { return }
         started = true
         DeviceLog.write("launch version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "?") build=\(Bundle.main.object(forInfoDictionaryKey: "PodsBuildID") ?? "?")")
         _ = Player.shared

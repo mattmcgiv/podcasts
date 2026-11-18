@@ -60,7 +60,7 @@ final class Downloads {
     // MARK: Queue
 
     /// Episodes the automatic queue wants, in Listen order, within the count and size limits.
-    static func plan(listen: [Episode], preferences: DownloadPreferences) -> [Episode] {
+    nonisolated static func plan(listen: [Episode], preferences: DownloadPreferences) -> [Episode] {
         guard preferences.automatic else { return [] }
         var total = 0
         var plan: [Episode] = []

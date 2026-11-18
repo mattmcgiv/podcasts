@@ -25,9 +25,12 @@ final class Library {
     @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var playbackBases: [String: Int] = [:]
     @ObservationIgnored private let client = MacClient.shared
+    /// UI tests run against the real Mac library and must never change it: local
+    /// changes stay in memory and are never sent. Only a launch argument sets this.
+    @ObservationIgnored let readOnly = UserDefaults.standard.bool(forKey: "PodsReadOnly")
 
-    private static let snapshotURL = DeviceLog.directory.appendingPathComponent("snapshot.json")
-    private static let deviceURL = DeviceLog.directory.appendingPathComponent("device.json")
+    nonisolated private static let snapshotURL = DeviceLog.directory.appendingPathComponent("snapshot.json")
+    nonisolated private static let deviceURL = DeviceLog.directory.appendingPathComponent("device.json")
     static let pairCodeURL = DeviceLog.directory.appendingPathComponent("pair-code")
 
     init() {
@@ -65,6 +68,7 @@ final class Library {
     private static let disk = DispatchQueue(label: "dev.mcgiv.pods.library-disk", qos: .utility)
 
     private func saveDevice() {
+        guard !readOnly else { return }
         let state = device
         Self.disk.async {
             guard let data = try? JSONEncoder().encode(state) else { return }
@@ -204,7 +208,7 @@ final class Library {
     private func synchronizeOnce(refresh: Bool) async throws {
         var sharedWon = false
         if snapshot == nil { try await receiveSnapshot() }
-        while true {
+        while !readOnly {
             device.outbox = SyncLogic.coalesce(device.outbox)
             let batch = SyncLogic.nextBatch(device.outbox)
             if batch.isEmpty { break }

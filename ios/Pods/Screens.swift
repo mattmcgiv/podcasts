@@ -35,6 +35,7 @@ struct ListenView: View {
                 ForEach(library.listen) { episode in
                     Button { player.play(episode, context: .listen) } label: { EpisodeRow(episode: episode) }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("listen-row")
                         .swipeActions(edge: .trailing) {
                             Button { library.setPlayed(episode, true) } label: { Label("Played", systemImage: "checkmark") }.tint(.green)
                         }
@@ -73,6 +74,8 @@ struct PlayedView: View {
         NavigationStack {
             List(library.played.prefix(200)) { episode in
                 EpisodeRow(episode: episode)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("played-row")
                     .swipeActions(edge: .trailing) {
                         Button { library.setPlayed(episode, false) } label: { Label("Unplayed", systemImage: "arrow.uturn.backward") }.tint(.blue)
                     }
@@ -152,6 +155,7 @@ struct ShowDetail: View {
                         if episode.isUnplayed { player.play(episode, context: .show) }
                     } label: { EpisodeRow(episode: episode).opacity(episode.isUnplayed ? 1 : 0.55) }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("show-episode-row")
                     .swipeActions(edge: .trailing) {
                         if episode.played_at == nil {
                             Button { library.setPlayed(episode, true) } label: { Label("Played", systemImage: "checkmark") }.tint(.green)

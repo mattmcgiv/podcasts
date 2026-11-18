@@ -130,18 +130,28 @@ struct MiniPlayer: View {
             }
             .padding(.leading, 12).padding(.trailing, 4).padding(.vertical, 6)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(alignment: .bottom) {
-                GeometryReader { proxy in
-                    Capsule().fill(Color.accentColor)
-                        .frame(width: proxy.size.width * (player.duration > 0 ? min(1, player.position / player.duration) : 0), height: 2)
-                }
-                .frame(height: 2).padding(.horizontal, 16)
-            }
+            .overlay(alignment: .bottom) { MiniProgress().frame(height: 2).padding(.horizontal, 16) }
             .padding(.horizontal, 12).padding(.bottom, 6)
             .contentShape(Rectangle())
             .onTapGesture { player.expanded = true }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("mini-player")
+            .accessibilityAction(named: "Open player") { player.expanded = true }
             .tint(.primary)
         }
+    }
+}
+
+/// Separate so playhead updates redraw only this line.
+private struct MiniProgress: View {
+    @Environment(Player.self) private var player
+
+    var body: some View {
+        GeometryReader { proxy in
+            Capsule().fill(Color.accentColor)
+                .frame(width: proxy.size.width * (player.duration > 0 ? min(1, player.position / player.duration) : 0), height: 2)
+        }
+        .accessibilityHidden(true)
     }
 }
 

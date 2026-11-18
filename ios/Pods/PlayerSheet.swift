@@ -1,41 +1,43 @@
 import SwiftUI
 
+/// The full player. Views that read the playhead are split out so the twice-a-second
+/// position updates redraw only the scrubber and chapter highlight.
 struct PlayerSheet: View {
     @Environment(Player.self) private var player
     @Environment(\.dismiss) private var dismiss
-    @State private var scrub: Double?
 
     var body: some View {
         if let episode = player.current {
             ScrollView {
                 VStack(spacing: 22) {
+                    HStack {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.down").font(.title3.weight(.semibold)).frame(width: 44, height: 44)
+                        }
+                        .accessibilityLabel("Close player")
+                        Spacer()
+                    }
+                    .tint(.primary)
+                    .padding(.top, 8)
                     Artwork(url: episode.artworkURL, size: 260)
                         .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
-                        .padding(.top, 28)
                     VStack(spacing: 4) {
                         Text(episode.title).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+                            .accessibilityIdentifier("player-title")
                         Text(episode.podcast_title).font(.subheadline).foregroundStyle(.secondary)
                     }
-                    scrubber
-                    transport
+                    Scrubber()
+                    Transport()
                     HStack {
-                        Menu {
-                            ForEach(Player.speeds, id: \.self) { value in
-                                Button { player.setSpeed(value) } label: {
-                                    if value == player.speed { Label(Format.speed(value), systemImage: "checkmark") } else { Text(Format.speed(value)) }
-                                }
-                            }
-                        } label: {
-                            Text(Format.speed(player.speed)).font(.body.weight(.semibold).monospacedDigit())
-                                .frame(minWidth: 56, minHeight: 44)
-                        }
-                        .accessibilityLabel("Playback speed")
+                        SpeedMenu()
                         Spacer()
                         Button { player.markCurrentPlayed() } label: {
                             Label("Mark played", systemImage: "checkmark.circle").frame(minHeight: 44)
                         }
                     }
-                    chapters(for: episode)
+                    Chapters(notes: (episode.show_notes ?? [])
+                        .filter { $0.start_time.isFinite && $0.start_time >= 0 }
+                        .sorted { $0.start_time < $1.start_time })
                 }
                 .padding(.horizontal, 24).padding(.bottom, 32)
             }
@@ -44,11 +46,16 @@ struct PlayerSheet: View {
             Color.clear.onAppear { dismiss() }
         }
     }
+}
 
-    private var scrubber: some View {
+private struct Scrubber: View {
+    @Environment(Player.self) private var player
+    @State private var scrub: Double?
+
+    var body: some View {
         let length = max(player.duration, 1)
         let shown = scrub ?? min(player.position, length)
-        return VStack(spacing: 2) {
+        VStack(spacing: 2) {
             Slider(value: Binding(get: { shown }, set: { scrub = $0 }), in: 0...length) { editing in
                 if !editing, let target = scrub { player.seek(to: target); scrub = nil }
             }
@@ -60,10 +67,15 @@ struct PlayerSheet: View {
                 Text("−" + Format.clock(max(0, length - shown) / max(player.speed, 0.1)))
             }
             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            .accessibilityHidden(true)
         }
     }
+}
 
-    private var transport: some View {
+private struct Transport: View {
+    @Environment(Player.self) private var player
+
+    var body: some View {
         HStack(spacing: 44) {
             Button { player.skip(-Player.skipBack) } label: { Image(systemName: "gobackward.15").font(.system(size: 30)) }
                 .accessibilityLabel("Back 15 seconds")
@@ -76,9 +88,32 @@ struct PlayerSheet: View {
         }
         .tint(.primary)
     }
+}
 
-    @ViewBuilder private func chapters(for episode: Episode) -> some View {
-        let notes = (episode.show_notes ?? []).filter { $0.start_time.isFinite && $0.start_time >= 0 }.sorted { $0.start_time < $1.start_time }
+private struct SpeedMenu: View {
+    @Environment(Player.self) private var player
+
+    var body: some View {
+        Menu {
+            ForEach(Player.speeds, id: \.self) { value in
+                Button { player.setSpeed(value) } label: {
+                    if value == player.speed { Label(Format.speed(value), systemImage: "checkmark") } else { Text(Format.speed(value)) }
+                }
+            }
+        } label: {
+            Text(Format.speed(player.speed)).font(.body.weight(.semibold).monospacedDigit())
+                .frame(minWidth: 56, minHeight: 44)
+        }
+        .accessibilityLabel("Playback speed")
+        .accessibilityValue(Format.speed(player.speed))
+    }
+}
+
+private struct Chapters: View {
+    let notes: [ShowNote]
+    @Environment(Player.self) private var player
+
+    var body: some View {
         if !notes.isEmpty {
             let active = notes.last { $0.start_time <= player.position }?.id
             VStack(alignment: .leading, spacing: 0) {

@@ -261,9 +261,8 @@ final class Player {
     private func registerRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
         let run: (@escaping @MainActor (Player) -> Void) -> (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { action in
-            { [weak self] _ in
-                guard let self else { return .commandFailed }
-                Task { @MainActor in action(self) }
+            { _ in
+                Task { @MainActor in action(Player.shared) }
                 return .success
             }
         }
@@ -345,8 +344,12 @@ final class CarResume {
         if port.portType == .carAudio { return true }
         guard Self.isBluetooth(port) else { return false }
         if knownDevices.contains(Self.deviceKey(port)) { return true }
-        // Without enrollment only an unmistakable vehicle name counts; headphones must never auto-resume.
-        let name = port.portName.lowercased()
+        return Self.looksLikeCar(port.portName)
+    }
+
+    /// Without enrollment only an unmistakable vehicle name counts; headphones must never auto-resume.
+    nonisolated static func looksLikeCar(_ portName: String) -> Bool {
+        let name = portName.lowercased()
         if ["airpods", "beats", "buds", "headphone", "headset", "speaker"].contains(where: name.contains) { return false }
         return ["tesla", "model 3", "model y", "model s", "model x", "carplay", "car audio", "car stereo", "vehicle"].contains(where: name.contains)
     }
