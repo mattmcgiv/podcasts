@@ -174,3 +174,15 @@ struct SyncBanner: View {
         }
     }
 }
+
+/// Shown in Listen once the free-account signature has under two days left.
+struct ExpiryBanner: View {
+    var body: some View {
+        if let expiry = Signing.expiry, expiry.timeIntervalSinceNow < 2 * 86400 {
+            Label("Pods stops opening \(expiry.formatted(.relative(presentation: .named))). Unlock this iPhone on the Mac's Wi-Fi, or plug it in, so the Mac can re-sign it.",
+                  systemImage: "clock.badge.exclamationmark")
+                .font(.footnote).foregroundStyle(.orange)
+                .listRowBackground(Color.clear)
+        }
+    }
+}

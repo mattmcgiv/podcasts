@@ -82,17 +82,29 @@ enum SyncLogic {
         return batch
     }
 
+    /// Snapshot versions this app reads: 1 is the browser's full form, 2 the compact form it asks for.
+    static let snapshotVersions = [1, 2]
+
     static func validate(_ snapshot: Snapshot) throws {
-        guard snapshot.version == 1, snapshot.replace else { throw SyncError.message("Unsupported Mac library format.") }
+        guard snapshotVersions.contains(snapshot.version), snapshot.replace else { throw SyncError.message("Unsupported Mac library format.") }
         var ids = Set<Int>()
         for episode in snapshot.episodes {
-            guard ids.insert(episode.id).inserted, episode.id > 0, let manifest = episode.manifest,
-                  manifest.episode_id == episode.id, manifest.version == 1, manifest.bytes > 0,
-                  manifest.chunk_size == 1024 * 1024,
-                  manifest.chunks.count == (manifest.bytes + manifest.chunk_size - 1) / manifest.chunk_size,
-                  isHash(manifest.hash), manifest.chunks.allSatisfy(isHash)
+            guard ids.insert(episode.id).inserted, isPublished(episode, compact: snapshot.version == 2)
             else { throw SyncError.message("Mac supplied an unpublished episode.") }
         }
+    }
+
+    /// The browser's `validateSnapshot` rules for one episode. A summary is allowed only
+    /// in a compact snapshot, only for a finished episode, and carries no chunk hashes.
+    static func isPublished(_ episode: Episode, compact: Bool) -> Bool {
+        guard episode.id > 0, episode.ad_removal_state == "ad-free", let manifest = episode.manifest,
+              manifest.episode_id == episode.id, manifest.version == 1, manifest.bytes > 0,
+              manifest.chunk_size == 1024 * 1024, isHash(manifest.hash),
+              episode.audio_url == "/_media/\(manifest.hash).\(manifest.fileExtension)"
+        else { return false }
+        if episode.isSummary { return compact && !episode.isUnplayed && manifest.chunks.isEmpty }
+        return manifest.chunks.count == (manifest.bytes + manifest.chunk_size - 1) / manifest.chunk_size
+            && manifest.chunks.allSatisfy(isHash)
     }
 
     static func isHash(_ value: String) -> Bool {

@@ -439,6 +439,8 @@ https://{DOMAIN}:8443 {{
     tls "{certificate_path / 'fullchain.pem'}" "{certificate_path / 'privkey.pem'}"
     @internal path /api/internal*
     respond @internal 404
+    # The library snapshot is JSON and compresses well; audio types are not matched.
+    encode zstd gzip
     reverse_proxy 127.0.0.1:18180
 }}
 ''')

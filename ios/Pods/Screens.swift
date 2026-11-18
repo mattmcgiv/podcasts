@@ -31,6 +31,7 @@ struct ListenView: View {
     var body: some View {
         NavigationStack {
             List {
+                ExpiryBanner()
                 SyncBanner()
                 ForEach(library.listen) { episode in
                     Button { player.play(episode, context: .listen) } label: { EpisodeRow(episode: episode) }

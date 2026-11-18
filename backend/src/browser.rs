@@ -165,9 +165,15 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
         return Ok(backend.handle_legacy(request));
     }
     if request.method == "GET" && path == "/api/sync" {
-        let body = snapshot(backend)?;
+        // Version 2 sends finished episodes as short summaries. The browser keeps version 1.
+        let compact = request.query("version").as_deref() == Some("2");
+        let body = snapshot_with(backend, compact)?;
         record_pull_device(backend, request)?;
         return Ok(HttpResponse::json(body, 200));
+    }
+    if let Some(client) = path.strip_prefix("/api/devices/").and_then(|rest| rest.strip_suffix("/report")) {
+        if request.method != "PUT" { return Err(Error::NotFound); }
+        return save_device_report(backend, client, request);
     }
     if path == "/api/sync/actions" && request.method == "POST" {
         let payload = request.json_object()?;
@@ -208,6 +214,12 @@ fn route(backend: &Backend, request: &HttpRequest) -> Result<HttpResponse, Error
     let parts: Vec<_> = path.split('/').collect();
     if parts.len() == 5 && parts[2] == "episodes" {
         let id: i64 = parts[3].parse().map_err(|_| Error::NotFound)?;
+        if parts[4] == "detail" && request.method == "GET" {
+            // The full record for one episode a compact snapshot summarized.
+            let conn = backend.db.lock()?;
+            let entry = episode_entry(&conn, id, false)?.ok_or(Error::NotFound)?;
+            return Ok(HttpResponse::json(entry, 200));
+        }
         if parts[4] == "artifact-manifest" && request.method == "GET" {
             return Ok(HttpResponse::json(publication(backend, id)?.0, 200));
         }
@@ -298,6 +310,50 @@ fn persisted_refresh_status(conn: &rusqlite::Connection) -> Result<Value, Error>
 }
 
 pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
+    snapshot_with(backend, false)
+}
+
+/// One published episode as the snapshot lists it. `compact` reduces a played or
+/// archived episode to a summary: no notes and no chunk hashes, which are most of
+/// the library's size. `GET /api/episodes/<id>/detail` returns the full record.
+fn episode_entry(conn: &rusqlite::Connection, id: i64, compact: bool) -> Result<Option<Value>, Error> {
+    // A concurrent unsubscribe may remove this publication from the visible set.
+    let Ok((mut manifest, notes)) = publication_on(conn, id) else {
+        return Ok(None);
+    };
+    let mut detail = serde_json::to_value(Backend::episode_detail_row(conn, id)?)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    if let Some(url) = detail["audio_url"]
+        .as_str()
+        .and_then(crate::articles::url_from_source)
+    {
+        detail["article_url"] = json!(url);
+    }
+    detail["audio_url"] = json!(media_url(&manifest));
+    detail["duration_secs"] = json!(manifest.duration);
+    detail["position_secs"] = json!(processed_time(
+        &manifest.timeline,
+        detail["position_secs"].as_f64().unwrap_or(0.0)
+    ));
+    detail["ad_removal_state"] = json!("ad-free");
+    detail["ad_removal_stage"] = json!("ready");
+    detail["ad_removal_action"] = Value::Null;
+    detail["ad_markers"] = json!([]);
+    detail["show_notes"] = notes;
+    if !manifest.listen_title.is_empty() {
+        detail["title"] = json!(manifest.listen_title);
+    }
+    if compact && (!detail["played_at"].is_null() || !detail["archived_at"].is_null()) {
+        detail["summary"] = json!(true);
+        detail["notes_html"] = json!("");
+        detail["show_notes"] = json!([]);
+        manifest.chunks.clear();
+    }
+    detail["manifest"] = serde_json::to_value(manifest).unwrap();
+    Ok(Some(detail))
+}
+
+pub fn snapshot_with(backend: &Backend, compact: bool) -> Result<Value, Error> {
     let storage = crate::local_worker::storage_status(backend);
     backend.db.with_transaction(|conn| {
     let writers = conn.prepare("SELECT entity,field,device,updated_at FROM browser_field_writers")?
@@ -345,34 +401,9 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
     };
     let mut episodes = Vec::new();
     for id in ids {
-        // A concurrent unsubscribe may remove this publication from the visible set.
-        let Ok((manifest, notes)) = publication_on(conn, id) else {
-            continue;
-        };
-        let mut detail = serde_json::to_value(Backend::episode_detail_row(conn, id)?)
-            .map_err(|e| Error::Invalid(e.to_string()))?;
-        if let Some(url) = detail["audio_url"]
-            .as_str()
-            .and_then(crate::articles::url_from_source)
-        {
-            detail["article_url"] = json!(url);
+        if let Some(entry) = episode_entry(conn, id, compact)? {
+            episodes.push(entry);
         }
-        detail["audio_url"] = json!(media_url(&manifest));
-        detail["duration_secs"] = json!(manifest.duration);
-        detail["position_secs"] = json!(processed_time(
-            &manifest.timeline,
-            detail["position_secs"].as_f64().unwrap_or(0.0)
-        ));
-        detail["ad_removal_state"] = json!("ad-free");
-        detail["ad_removal_stage"] = json!("ready");
-        detail["ad_removal_action"] = Value::Null;
-        detail["ad_markers"] = json!([]);
-        detail["show_notes"] = notes;
-        if !manifest.listen_title.is_empty() {
-            detail["title"] = json!(manifest.listen_title);
-        }
-        detail["manifest"] = serde_json::to_value(manifest).unwrap();
-        episodes.push(detail);
     }
     // A complete replacement snapshot carries removals without retaining an unbounded event log.
     let pending = conn.query_row(
@@ -436,7 +467,7 @@ pub fn snapshot(backend: &Backend) -> Result<Value, Error> {
         feedback
     };
     Ok(
-        json!({"version":1,"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
+        json!({"version":if compact { 2 } else { 1 },"cursor":revision,"replace":true,"episodes":episodes,"shows":shows,
         "settings":settings,"versions":versions,"writers":writers,"refresh_status":refresh_status,"notifications":notifications,
         "feedback":feedback,"pipeline":crate::reliability::status(conn)?,
         "processing":{"pending":pending,"failed":failed,"blocked":blocked,"storage":storage,
@@ -586,6 +617,53 @@ fn same_action(stored: &str, action: &Value) -> bool {
 
 /// Last-sync moments per device. Recording lives in the HTTP routes so direct
 /// internal `apply_actions` calls (pipeline menu) never appear as devices.
+/// Largest device report kept. The app sends its status and the tail of its log.
+pub const DEVICE_REPORT_BYTES: usize = 256 * 1024;
+
+/// Store the latest status and log tail from a device that has synced, so the
+/// Mac can see how a phone is doing without a cable. One file per device,
+/// replaced atomically: `<data root>/Diagnostics/devices/<client id>.json`.
+fn save_device_report(backend: &Backend, client: &str, request: &HttpRequest) -> Result<HttpResponse, Error> {
+    let valid = (8..=64).contains(&client.len())
+        && client.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-');
+    if !valid {
+        return Err(Error::Invalid("invalid client id".into()));
+    }
+    if request.body.len() > DEVICE_REPORT_BYTES {
+        return Err(Error::Invalid("device report is too large".into()));
+    }
+    let report = request.json_object()?;
+    // Only devices that already sync may leave a report; nothing else creates files.
+    let device: Option<String> = backend
+        .db
+        .lock()?
+        .query_row("SELECT device FROM browser_sync_devices WHERE client_id=?", [client], |r| r.get(0))
+        .optional()?;
+    let Some(device) = device else {
+        return Err(Error::NotFound);
+    };
+    let body = serde_json::to_vec_pretty(&json!({
+        "client_id": client, "device": device, "received_at": crate::db::now_unix(), "report": report,
+    }))
+    .map_err(|e| Error::Invalid(e.to_string()))?;
+    let directory = backend.data_root.join("Diagnostics").join("devices");
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&directory)?;
+        // A unique name keeps two overlapping reports from sharing a half-written file.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = directory.join(format!(".{client}.{serial}.tmp"));
+        let saved = std::fs::write(&temporary, &body)
+            .and_then(|()| std::fs::rename(&temporary, directory.join(format!("{client}.json"))));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        saved
+    };
+    write().map_err(|e| Error::Database(format!("could not save device report: {e}")))?;
+    Ok(HttpResponse::no_content())
+}
+
 fn record_sync_device(
     backend: &Backend,
     client: &str,

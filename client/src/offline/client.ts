@@ -136,13 +136,24 @@ export function applyOverlay(snapshot: Snapshot, outbox: Operation[]): Snapshot 
   return copy;
 }
 
-function coalesceOutbox(outbox: Operation[]): Operation[] {
+export function coalesceOutbox(outbox: Operation[]): Operation[] {
   const last = new Map<string, Operation>();
   for (const operation of outbox) {
     if (operation.conflict != null || operation.sent || operation.error) continue;
     last.set(`${operation.entity}:${operation.field}`, operation);
   }
   return outbox.filter(operation => operation.conflict != null || operation.sent || operation.error || last.get(`${operation.entity}:${operation.field}`) === operation);
+}
+
+/** The next changes to send: one per field, skipping fields with a conflict or a rejected change. */
+export function nextBatch(outbox: Operation[], limit = ACTION_BATCH): Operation[] {
+  const blocked = new Set(outbox.filter(o => o.conflict != null || o.error).map(o => `${o.entity}:${o.field}`));
+  const keys = new Set<string>();
+  return outbox.filter(o => {
+    const key = `${o.entity}:${o.field}`;
+    if (blocked.has(key) || keys.has(key)) return false;
+    keys.add(key); return true;
+  }).slice(0, limit);
 }
 
 type SyncAction = { id: string; sequence: number; entity: string; field: string; value: unknown; base_revision: number; changed_at?: number };
@@ -264,13 +275,7 @@ async function synchronizeOnce(refresh: boolean): Promise<void> {
     while (true) {
       // A sent operation is immutable: a lost response must retry the same identity.
       const current = await updateState(s => { s.outbox = coalesceOutbox(s.outbox); });
-      const blocked = new Set(current.outbox.filter(o => o.conflict != null || o.error).map(o => `${o.entity}:${o.field}`));
-      const keys = new Set<string>();
-      const chunk = current.outbox.filter(o => {
-        const key = `${o.entity}:${o.field}`;
-        if (blocked.has(key) || keys.has(key)) return false;
-        keys.add(key); return true;
-      }).slice(0, ACTION_BATCH);
+      const chunk = nextBatch(current.outbox);
       if (!chunk.length) break;
       await updateState(s => { for (const op of s.outbox) if (chunk.some(c => c.id === op.id)) op.sent = true; });
       const results = await postActions(current.client_id, chunk.map(({id,sequence,entity,field,value,base_revision,changed_at}) => ({id,sequence,entity,field,value,base_revision,changed_at})));

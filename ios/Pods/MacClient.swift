@@ -5,8 +5,20 @@ import Foundation
 final class MacClient {
     static let shared = MacClient()
     static let base = URL(string: "https://sync.pods.mcgiv.dev:8443")!
-    /// The backend only accepts state-changing requests from the Pods origin.
-    static let origin = "https://pods.mcgiv.dev"
+    /// The app names itself instead of borrowing the website's Origin. The Mac turns
+    /// away a mismatched Origin and accepts requests that carry none.
+    static let userAgent: String = {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        return "Pods-iOS/\(version) (\(build); iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion))"
+    }()
+
+    static func identify(_ request: inout URLRequest) {
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("ios", forHTTPHeaderField: "x-pods-client")
+    }
 
     let session: URLSession
 
@@ -27,7 +39,7 @@ final class MacClient {
         var request = URLRequest(url: URL(string: "/api\(path)", relativeTo: Self.base)!)
         request.httpMethod = method
         request.timeoutInterval = timeout
-        request.setValue(Self.origin, forHTTPHeaderField: "Origin")
+        Self.identify(&request)
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -69,19 +81,5 @@ final class MacClient {
         guard http.statusCode == 200 else {
             throw http.statusCode == 401 ? SyncError.message("That pairing code is not valid any more.") : Self.failure(http.statusCode, data)
         }
-    }
-
-    /// One verified-size byte range of a published artifact.
-    func artifactRange(hash: String, start: Int, end: Int, total: Int) async throws -> Data {
-        let (data, http) = try await request("/artifacts/\(hash)", headers: [
-            "Range": "bytes=\(start)-\(end)", "If-Range": "\"\(hash)\"",
-        ], timeout: 30)
-        if http.statusCode == 401 || http.statusCode == 403 { throw SyncError.unauthorized }
-        if http.statusCode >= 500 { throw SyncError.unreachable }
-        guard http.statusCode == 206,
-              http.value(forHTTPHeaderField: "content-range") == "bytes \(start)-\(end)/\(total)",
-              data.count == end - start + 1
-        else { throw SyncError.message("Audio changed on the Mac. It will download again after the next sync.") }
-        return data
     }
 }

@@ -15,7 +15,8 @@ enum Fixture {
         Episode(id: id, podcast_id: show, podcast_title: "Show \(show)", podcast_image: "", title: "Episode \(id)",
                 audio_url: "/_media/\(hash(id)).m4a", article_url: nil, duration_secs: 600, published_at: Double(1_700_000_000 + id),
                 image_url: "", position_secs: 0, played_at: played ? 1_700_000_100 : nil, archived_at: nil,
-                notes_html: nil, show_notes: nil, manifest: manifest(id: id, bytes: bytes, timeline: timeline))
+                notes_html: nil, show_notes: nil, manifest: manifest(id: id, bytes: bytes, timeline: timeline),
+                ad_removal_state: "ad-free")
     }
 
     static func show(_ id: Int) -> Show {

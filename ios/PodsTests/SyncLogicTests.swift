@@ -87,8 +87,8 @@ final class SyncLogicTests: XCTestCase {
         XCTAssertThrowsError(try SyncLogic.validate(Fixture.snapshot([wrongEpisode])))
         var noManifest = Fixture.episode(1); noManifest.manifest = nil
         XCTAssertThrowsError(try SyncLogic.validate(Fixture.snapshot([noManifest])))
-        var old = Fixture.snapshot([]); old.version = 2
-        XCTAssertThrowsError(try SyncLogic.validate(old))
+        var unknown = Fixture.snapshot([]); unknown.version = 3
+        XCTAssertThrowsError(try SyncLogic.validate(unknown))
     }
 
     func testHashCheck() {

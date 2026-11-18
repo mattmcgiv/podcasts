@@ -1,0 +1,205 @@
+{
+  "about": "Sync rules every client must agree on. Read by backend/tests/sync_vectors.rs (timeline), ios/PodsTests/SyncVectorTests.swift (all), and client/src/offline/syncVectors.test.ts (all version 1 cases). Change a rule here first, then make every reader pass.",
+  "timeline": [
+    {
+      "name": "ad cut from 100 s to 160 s of the original",
+      "timeline": [
+        { "original_start": 0, "original_end": 100, "processed_start": 0 },
+        { "original_start": 160, "original_end": 300, "processed_start": 100 }
+      ],
+      "to_original": [[0, 0], [50, 50], [99.5, 99.5], [100, 160], [150, 210], [239, 299], [240, 300], [500, 300]],
+      "to_processed": [[0, 0], [99, 99], [100, 100], [130, 100], [160, 100], [200, 140], [299, 239], [300, 240], [400, 240]]
+    },
+    {
+      "name": "ad at the start",
+      "timeline": [{ "original_start": 30, "original_end": 100, "processed_start": 0 }],
+      "to_original": [[0, 30], [10, 40], [69, 99], [70, 100], [90, 100]],
+      "to_processed": [[0, 0], [29, 0], [30, 0], [60, 30], [99, 69], [100, 70], [200, 70]]
+    }
+  ],
+  "overlay": [
+    {
+      "name": "played and unplayed",
+      "shows": [{ "id": 1, "feed_url": "https://example.com/1.xml" }],
+      "settings": {},
+      "episodes": [
+        { "id": 1, "podcast_id": 1, "played": false, "position": 0 },
+        { "id": 2, "podcast_id": 1, "played": true, "position": 0 }
+      ],
+      "outbox": [
+        { "entity": "1", "field": "played", "value": true },
+        { "entity": "2", "field": "played", "value": false },
+        { "entity": "99", "field": "played", "value": true }
+      ],
+      "expect": {
+        "shows": [1],
+        "settings": {},
+        "episodes": [
+          { "id": 1, "played": true, "position": 0 },
+          { "id": 2, "played": false, "position": 0 }
+        ]
+      }
+    },
+    {
+      "name": "a position maps original seconds through the timeline when there is one",
+      "shows": [{ "id": 1, "feed_url": "https://example.com/1.xml" }],
+      "settings": {},
+      "episodes": [
+        { "id": 1, "podcast_id": 1, "played": false, "position": 0, "timeline": [
+          { "original_start": 0, "original_end": 100, "processed_start": 0 },
+          { "original_start": 160, "original_end": 300, "processed_start": 100 }
+        ] },
+        { "id": 2, "podcast_id": 1, "played": false, "position": 7 },
+        { "id": 3, "podcast_id": 1, "played": false, "position": 7, "timeline": [
+          { "original_start": 0, "original_end": 100, "processed_start": 0 }
+        ] }
+      ],
+      "outbox": [
+        { "entity": "1", "field": "position", "value": { "seconds": 5, "original_seconds": 200, "artifact_hash": "h" } },
+        { "entity": "2", "field": "position", "value": { "seconds": 42, "original_seconds": 99, "artifact_hash": "h" } },
+        { "entity": "3", "field": "position", "value": { "seconds": 12, "artifact_hash": "h" } }
+      ],
+      "expect": {
+        "shows": [1],
+        "settings": {},
+        "episodes": [
+          { "id": 1, "played": false, "position": 140 },
+          { "id": 2, "played": false, "position": 42 },
+          { "id": 3, "played": false, "position": 12 }
+        ]
+      }
+    },
+    {
+      "name": "unsubscribing hides the show and its unplayed episodes but keeps played history",
+      "shows": [{ "id": 1, "feed_url": "https://example.com/1.xml" }, { "id": 2, "feed_url": "https://example.com/2.xml" }],
+      "settings": {},
+      "episodes": [
+        { "id": 1, "podcast_id": 1, "played": false, "position": 0 },
+        { "id": 2, "podcast_id": 1, "played": true, "position": 0 },
+        { "id": 3, "podcast_id": 2, "played": false, "position": 0 }
+      ],
+      "outbox": [
+        { "entity": "subscription", "field": "https://example.com/1.xml", "value": false },
+        { "entity": "subscription", "field": "https://example.com/new.xml", "value": true },
+        { "entity": "subscription", "field": "https://example.com/unknown.xml", "value": false }
+      ],
+      "expect": {
+        "shows": [2],
+        "settings": {},
+        "episodes": [
+          { "id": 2, "played": true, "position": 0 },
+          { "id": 3, "played": false, "position": 0 }
+        ]
+      }
+    },
+    {
+      "name": "settings replace, except the notification watermark which never moves back",
+      "shows": [],
+      "settings": { "speed": 1.5, "notifications_cleared_through": 10 },
+      "episodes": [],
+      "outbox": [
+        { "entity": "settings", "field": "speed", "value": 2 },
+        { "entity": "settings", "field": "notifications_cleared_through", "value": 5 },
+        { "entity": "settings", "field": "autoplay", "value": false }
+      ],
+      "expect": { "shows": [], "settings": { "speed": 2, "notifications_cleared_through": 10, "autoplay": false }, "episodes": [] }
+    },
+    {
+      "name": "the notification watermark moves forward",
+      "shows": [],
+      "settings": { "notifications_cleared_through": 10 },
+      "episodes": [],
+      "outbox": [{ "entity": "settings", "field": "notifications_cleared_through", "value": 20 }],
+      "expect": { "shows": [], "settings": { "notifications_cleared_through": 20 }, "episodes": [] }
+    }
+  ],
+  "coalesce": [
+    {
+      "name": "only the newest unsent change per field remains",
+      "outbox": [
+        { "id": "a1", "entity": "1", "field": "played" },
+        { "id": "b", "entity": "1", "field": "position" },
+        { "id": "a2", "entity": "1", "field": "played" }
+      ],
+      "expect": ["b", "a2"]
+    },
+    {
+      "name": "sent changes are immutable and stay",
+      "outbox": [
+        { "id": "s", "entity": "1", "field": "played", "sent": true },
+        { "id": "u1", "entity": "1", "field": "played" },
+        { "id": "u2", "entity": "1", "field": "played" }
+      ],
+      "expect": ["s", "u2"]
+    },
+    {
+      "name": "rejected changes stay until discarded",
+      "outbox": [
+        { "id": "e", "entity": "settings", "field": "speed", "error": "rejected" },
+        { "id": "u", "entity": "settings", "field": "speed" }
+      ],
+      "expect": ["e", "u"]
+    }
+  ],
+  "next_batch": [
+    {
+      "name": "one change per field, oldest first",
+      "outbox": [
+        { "id": "a", "entity": "1", "field": "played", "sent": true },
+        { "id": "b", "entity": "1", "field": "played" },
+        { "id": "c", "entity": "2", "field": "played" }
+      ],
+      "expect": ["a", "c"]
+    },
+    {
+      "name": "a rejected change blocks only its own field",
+      "outbox": [
+        { "id": "e", "entity": "1", "field": "played", "error": "rejected" },
+        { "id": "f", "entity": "1", "field": "played" },
+        { "id": "g", "entity": "settings", "field": "speed" }
+      ],
+      "expect": ["g"]
+    }
+  ],
+  "validate": {
+    "base_episode": {
+      "id": 1, "podcast_id": 1, "podcast_title": "Show", "podcast_image": "", "title": "Episode",
+      "audio_url": "/_media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.m4a",
+      "duration_secs": 600, "published_at": 1700000000, "image_url": "", "position_secs": 0,
+      "played_at": null, "archived_at": null, "notes_html": "", "show_notes": [], "ad_removal_state": "ad-free",
+      "ad_removal_action": null, "ad_removal_stage": "ready", "ad_removal_blocking_reason": null, "ad_markers": [],
+      "manifest": {
+        "version": 1, "episode_id": 1, "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_hash": "source", "bytes": 2097153, "duration": 600, "chunk_size": 1048576,
+        "chunks": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ],
+        "timeline": [], "model": "local", "pipeline_version": "v1"
+      }
+    },
+    "cases": [
+      { "name": "a published episode", "snapshot_version": 1, "valid": true },
+      { "name": "a published episode in a compact snapshot", "snapshot_version": 2, "valid": true },
+      { "name": "an unknown snapshot version", "snapshot_version": 3, "valid": false },
+      { "name": "a partial snapshot", "snapshot_version": 1, "replace": false, "valid": false },
+      { "name": "a duplicate episode", "snapshot_version": 1, "duplicate": true, "valid": false },
+      { "name": "an episode without ads removed", "snapshot_version": 1, "episode_patch": { "ad_removal_state": "preparing" }, "valid": false },
+      { "name": "an episode pointing at the original recording", "snapshot_version": 1, "episode_patch": { "audio_url": "https://example.org/original.mp3" }, "valid": false },
+      { "name": "a video with an audio address", "snapshot_version": 1, "manifest_patch": { "media": "video" }, "valid": false },
+      { "name": "a video with its own address", "snapshot_version": 1, "manifest_patch": { "media": "video" }, "episode_patch": { "audio_url": "/_media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4" }, "valid": true },
+      { "name": "a manifest for another episode", "snapshot_version": 1, "manifest_patch": { "episode_id": 2 }, "valid": false },
+      { "name": "a missing chunk hash", "snapshot_version": 1, "manifest_patch": { "bytes": 3145729 }, "valid": false },
+      { "name": "an uppercase artifact hash", "snapshot_version": 1, "manifest_patch": { "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }, "valid": false },
+      { "name": "a malformed chunk hash", "snapshot_version": 1, "manifest_patch": { "chunks": ["bbbb", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"] }, "valid": false },
+      { "name": "another chunk size", "snapshot_version": 1, "manifest_patch": { "chunk_size": 524288 }, "valid": false },
+      { "name": "an empty artifact", "snapshot_version": 1, "manifest_patch": { "bytes": 0, "chunks": [] }, "valid": false },
+      { "name": "a summary of a played episode in a compact snapshot", "snapshot_version": 2, "episode_patch": { "summary": true, "played_at": 1700000100 }, "manifest_patch": { "chunks": [] }, "valid": true },
+      { "name": "a summary of an archived episode in a compact snapshot", "snapshot_version": 2, "episode_patch": { "summary": true, "archived_at": 1700000100 }, "manifest_patch": { "chunks": [] }, "valid": true },
+      { "name": "a summary in a full snapshot", "snapshot_version": 1, "episode_patch": { "summary": true, "played_at": 1700000100 }, "manifest_patch": { "chunks": [] }, "valid": false },
+      { "name": "a summary of an unplayed episode", "snapshot_version": 2, "episode_patch": { "summary": true }, "manifest_patch": { "chunks": [] }, "valid": false },
+      { "name": "a summary that still lists chunks", "snapshot_version": 2, "episode_patch": { "summary": true, "played_at": 1700000100 }, "valid": false }
+    ]
+  }
+}

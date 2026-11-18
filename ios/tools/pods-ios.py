@@ -10,7 +10,7 @@ Only Xcode's own tools sign and install. Settings live outside the repo in
 Commands:
     install     build, sign, install, and pair the app with the Mac backend
     refresh     re-sign and reinstall when the signature has under 3 days left (--force: now)
-    status      show the signature expiry and the app's own status report
+    status      show the signature expiry, the app's status file, and its last report to the Mac
     schedule    run `refresh` from launchd every 3 hours
     unschedule  remove that launchd job
 """
@@ -24,6 +24,7 @@ LABEL = "dev.mcgiv.pods-ios-refresh"
 AGENT = pathlib.Path.home() / f"Library/LaunchAgents/{LABEL}.plist"
 APP = STATE / "DerivedData/Build/Products/Release-iphoneos/Pods.app"
 CONTAINER = "Library/Application Support/Pods"
+REPORTS = pathlib.Path.home() / ".local/share/pods/data/AdRemovalData/Diagnostics/devices"
 REFRESH_BELOW = 3 * 86400   # start trying with three days left
 WARN_BELOW = 2 * 86400      # tell Matt when attempts still fail with two days left
 PROFILE_DIRS = [pathlib.Path.home() / "Library/Developer/Xcode/UserData/Provisioning Profiles",
@@ -191,6 +192,19 @@ def command_refresh(force):
         deliver_pair_code(settings["DEVICE"])
 
 
+def latest_report():
+    """The newest status and log tail the iPhone app sent the Mac (works without a cable)."""
+    reports = []
+    for path in REPORTS.glob("*.json"):
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if str(report.get("report", {}).get("app", "")).startswith("Pods-iOS/"):
+            reports.append(report)
+    return max(reports, key=lambda r: r.get("received_at", 0), default=None)
+
+
 def command_status():
     state = read_state()
     if state.get("expires"):
@@ -201,9 +215,20 @@ def command_status():
     if state.get("last_error"):
         print(f"Last refresh error: {state['last_error']}")
     print(f"Scheduled: {'yes' if AGENT.exists() else 'no'}")
+    report = latest_report()
+    if report:
+        body = report["report"]
+        age = time.time() - report.get("received_at", 0)
+        print(f"Last report to the Mac: {age / 60:.0f} min ago ({body.get('reason', '?')}, {body.get('app', '?')})")
+        print("  " + json.dumps(body.get("status", {}), sort_keys=True))
+        tail = str(body.get("log", "")).strip().splitlines()[-8:]
+        if tail:
+            print("  Log tail:\n    " + "\n    ".join(tail))
+    else:
+        print("Last report to the Mac: none yet")
     try:
         status = app_status(config()["DEVICE"])
-        print("App report: " + (json.dumps(status, indent=2) if status else "unavailable (phone unreachable or app never opened)"))
+        print("App status file: " + (json.dumps(status, indent=2) if status else "unavailable (phone unreachable or app never opened)"))
     except Failure as error:
         print(error)
 
@@ -214,7 +239,7 @@ def command_schedule():
     with open(AGENT, "wb") as handle:
         plistlib.dump({
             "Label": LABEL,
-            "ProgramArguments": [sys.executable, str(pathlib.Path(__file__).resolve()), "refresh"],
+            "ProgramArguments": ["/usr/bin/python3", str(pathlib.Path(__file__).resolve()), "refresh"],
             "StartInterval": 3 * 3600,   # launchd runs a missed interval once after the Mac wakes
             "RunAtLoad": True,
             "ProcessType": "Background",

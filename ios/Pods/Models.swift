@@ -86,7 +86,12 @@ struct Episode: Codable, Equatable, Identifiable {
     var notes_html: String?
     var show_notes: [ShowNote]?
     var manifest: Manifest?
+    var ad_removal_state: String?
+    /// A compact snapshot lists finished episodes without notes or chunk hashes.
+    /// `Library.loadFull` fetches the rest when one is needed again.
+    var summary: Bool?
 
+    var isSummary: Bool { summary == true }
     var isUnplayed: Bool { played_at == nil && archived_at == nil }
     var artworkURL: URL? { URL(string: image_url.isEmpty ? podcast_image : image_url) }
     var duration: Double { manifest?.duration ?? duration_secs ?? 0 }

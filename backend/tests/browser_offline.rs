@@ -2304,3 +2304,119 @@ fn newer_rewind_wins_and_invalid_timestamps_fail() {
     invalid["actions"][0]["changed_at"] = json!(-1);
     assert!(apply_actions(&backend, invalid).is_err());
 }
+
+fn get_json(backend: &Backend, path: &str) -> Value {
+    let response = backend.handle(HttpRequest::new("GET", path));
+    assert_eq!(response.status_code, 200, "{path}");
+    serde_json::from_slice(&response.body).unwrap()
+}
+
+#[test]
+fn compact_sync_summarizes_finished_episodes_and_detail_restores_them() {
+    let (backend, _temp, manifest) = fixture();
+    // Unplayed episodes stay complete in the compact form.
+    let fresh = get_json(&backend, "/api/sync?version=2");
+    assert_eq!(fresh["version"], 2);
+    assert!(fresh["episodes"][0].get("summary").is_none());
+    assert_eq!(fresh["episodes"][0]["manifest"]["chunks"], json!([manifest.hash]));
+
+    apply_actions(&backend, action("finish", 1, "played", json!(true), 0)).unwrap();
+    let compact = get_json(&backend, "/api/sync?version=2");
+    let summary = &compact["episodes"][0];
+    assert_eq!(summary["summary"], true);
+    assert_eq!(summary["notes_html"], "");
+    assert_eq!(summary["show_notes"], json!([]));
+    assert_eq!(summary["manifest"]["chunks"], json!([]));
+    // Enough remains to list, restart and map positions without the full record.
+    assert_eq!(summary["manifest"]["hash"], manifest.hash.as_str());
+    assert_eq!(summary["manifest"]["bytes"], 8);
+    assert_eq!(summary["manifest"]["timeline"].as_array().unwrap().len(), 2);
+    assert_eq!(summary["audio_url"], format!("/_media/{}.m4a", manifest.hash));
+    assert!(summary["played_at"].is_i64());
+
+    // The browser's version 1 is unchanged.
+    let full = get_json(&backend, "/api/sync");
+    assert_eq!(full["version"], 1);
+    assert!(full["episodes"][0].get("summary").is_none());
+    assert_eq!(full["episodes"][0]["manifest"]["chunks"], json!([manifest.hash]));
+    assert_eq!(full["cursor"], compact["cursor"]);
+
+    let detail = get_json(&backend, "/api/episodes/1/detail");
+    assert!(detail.get("summary").is_none());
+    assert_eq!(detail["manifest"]["chunks"], json!([manifest.hash]));
+    assert_eq!(detail["show_notes"][0]["title"], "Intro");
+    assert_eq!(detail, full["episodes"][0]);
+    assert_eq!(backend.handle(HttpRequest::new("GET", "/api/episodes/2/detail")).status_code, 404);
+
+    // Marking it unplayed again brings the full record back into the compact snapshot.
+    let revision = compact["versions"]["1:played"].as_i64().unwrap();
+    apply_actions(&backend, action("again", 2, "played", json!(false), revision)).unwrap();
+    let restored = get_json(&backend, "/api/sync?version=2");
+    assert!(restored["episodes"][0].get("summary").is_none());
+    assert_eq!(restored["episodes"][0]["manifest"]["chunks"], json!([manifest.hash]));
+}
+
+#[test]
+fn device_reports_need_a_synced_client_and_are_bounded() {
+    let (backend, temp, _) = fixture();
+    let client = "0123abcd-4567-89ef";
+    let put = |id: &str, body: &Value| {
+        backend
+            .handle(HttpRequest::new("PUT", &format!("/api/devices/{id}/report")).with_json(body))
+            .status_code
+    };
+    let report = json!({"app_version":"1.0","status":{"listen":3},"log":"line one\nline two\n"});
+    // A device the Mac has never seen cannot create a file.
+    assert_eq!(put(client, &report), 404);
+    for bad in ["..", "../../etc", "ABCDEF12", "short", &"a".repeat(65), "0123abcd%2F..%2F"] {
+        // Dot segments are resolved away before routing (404); other bad ids are refused (422).
+        assert!(matches!(put(bad, &report), 404 | 422), "{bad}");
+    }
+    let pulled = backend.handle(
+        HttpRequest::new("GET", "/api/sync").with_header("x-pods-client-id", client).with_header("x-pods-device", "iPhone app"),
+    );
+    assert_eq!(pulled.status_code, 200);
+    assert_eq!(put(client, &report), 204);
+    let directory = temp.path().join("Diagnostics/devices");
+    let saved: Value = serde_json::from_slice(&std::fs::read(directory.join(format!("{client}.json"))).unwrap()).unwrap();
+    assert_eq!(saved["client_id"], client);
+    assert_eq!(saved["device"], "iPhone app");
+    assert_eq!(saved["report"], report);
+    assert!(saved["received_at"].as_i64().unwrap() > 0);
+
+    // A newer report replaces the old one; nothing else is left in the folder.
+    let newer = json!({"status":{"listen":4}});
+    assert_eq!(put(client, &newer), 204);
+    let saved: Value = serde_json::from_slice(&std::fs::read(directory.join(format!("{client}.json"))).unwrap()).unwrap();
+    assert_eq!(saved["report"], newer);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+    // Oversized reports and other methods are refused.
+    let huge = json!({"log": "x".repeat(pods_backend::browser::DEVICE_REPORT_BYTES)});
+    assert_eq!(put(client, &huge), 422);
+    assert_eq!(put(client, &json!(["not", "an", "object"])), 422);
+    let get = backend.handle(HttpRequest::new("GET", &format!("/api/devices/{client}/report")));
+    assert_eq!(get.status_code, 404);
+
+    // Reports need a signed-in session like every other app route.
+    backend.auth.enable_passkey("test-reset-secret", "https://pods.mcgiv.dev");
+    assert_eq!(put(client, &newer), 401);
+}
+
+#[test]
+fn native_clients_without_an_origin_are_accepted_and_wrong_origins_are_not() {
+    let (backend, _temp, _) = fixture();
+    let native = backend.handle(
+        HttpRequest::new("POST", "/api/sync/actions")
+            .with_header("user-agent", "Pods-iOS/1.0")
+            .with_header("x-pods-client", "ios")
+            .with_json(&action("native", 1, "played", json!(true), 0)),
+    );
+    assert_eq!(native.status_code, 200);
+    let foreign = backend.handle(
+        HttpRequest::new("POST", "/api/sync/actions")
+            .with_header("origin", "https://evil.example")
+            .with_json(&action("foreign", 2, "played", json!(false), 0)),
+    );
+    assert_eq!(foreign.status_code, 403);
+}

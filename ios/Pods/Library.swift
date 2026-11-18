@@ -24,9 +24,9 @@ final class Library {
     @ObservationIgnored private var refreshRequested = false
     @ObservationIgnored private var forceRequested = false
     @ObservationIgnored private var lastFullPull: Date?
-    /// The library is about 5 MB. Between full pulls the app asks the Mac for its revision
-    /// (a few bytes) and pulls only when it moved. Jobs that archive episodes do not move it,
-    /// so a full pull still happens this often.
+    /// Between full pulls the app asks the Mac for its revision (a few bytes) and pulls only
+    /// when it moved. Jobs that archive episodes do not move it, so a full pull still happens
+    /// this often. Pulls use the compact form: finished episodes arrive as summaries.
     static let fullPullInterval: TimeInterval = 30 * 60
     @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var playbackBases: [String: Int] = [:]
@@ -198,14 +198,15 @@ final class Library {
         }
     }
 
-    /// Await the sync in flight (or a new one). Used by pull-to-refresh.
-    func synchronizeAndWait() async {
-        synchronize(force: true)
+    /// Await the sync in flight (or a new one). Pull-to-refresh forces a full pull;
+    /// background refresh only pulls when the Mac's library moved.
+    func synchronizeAndWait(force: Bool = true) async {
+        synchronize(force: force)
         await syncTask?.value
     }
 
     private func receiveSnapshot() async throws {
-        let incoming = try await client.json(Snapshot.self, "/sync", headers: [
+        let incoming = try await client.json(Snapshot.self, "/sync?version=2", headers: [
             "x-pods-client-id": device.client_id, "x-pods-device": Self.deviceName,
         ], timeout: 120)
         try SyncLogic.validate(incoming)
@@ -267,8 +268,11 @@ final class Library {
             rebuild()
             if missing { throw SyncError.message("Mac did not acknowledge every change. Pending changes are saved and will retry.") }
         }
+        // An episode marked unplayed here is still a summary in the local copy; the Mac now
+        // sends it in full. (The local copy, not the overlay, so a pending change cannot loop.)
+        let promoted = snapshot?.episodes.contains { $0.isSummary && $0.isUnplayed } ?? false
         // Push first so the pull below already reflects this device's changes.
-        if sharedWon {
+        if sharedWon || promoted {
             try await receiveSnapshot()
         } else if refresh && !pulled {
             let due = force || lastFullPull.map { Date().timeIntervalSince($0) >= Self.fullPullInterval } ?? true
@@ -279,6 +283,26 @@ final class Library {
         saveDevice()
         saveSnapshot()
         rebuild()
+    }
+
+    /// Replace one summarized episode with its full record, for playing or downloading it
+    /// again before the next pull brings it in full.
+    func loadFull(_ id: Int) async {
+        guard snapshot?.episodes.first(where: { $0.id == id })?.isSummary == true else { return }
+        do {
+            let full = try await client.json(Episode.self, "/episodes/\(id)/detail", timeout: 30)
+            guard full.id == id, !full.isSummary, SyncLogic.isPublished(full, compact: false)
+            else { throw SyncError.message("Mac supplied an unpublished episode.") }
+            // A pull may have landed meanwhile; only fill in a summary that is still there.
+            guard var current = snapshot, let index = current.episodes.firstIndex(where: { $0.id == id }),
+                  current.episodes[index].isSummary else { return }
+            current.episodes[index] = full
+            snapshot = current
+            saveSnapshot()
+            rebuild()
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     private struct ActionsBody: Encodable {
