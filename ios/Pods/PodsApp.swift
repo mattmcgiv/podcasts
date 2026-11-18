@@ -121,7 +121,7 @@ final class AppCoordinator {
         let library = Library.shared
         if library.revision != lastRevision {
             lastRevision = library.revision
-            Downloads.shared.run()
+            Downloads.shared.libraryChanged()
             Player.shared.restore()
             writeStatus()
         }

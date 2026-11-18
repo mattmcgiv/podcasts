@@ -23,11 +23,16 @@ final class Downloads {
     private(set) var usedBytes = 0
 
     @ObservationIgnored private var worker: Task<Void, Never>?
-    /// Episodes asked for by hand, first first. Saved, because their transfers outlive the app
-    /// and the first pass after a relaunch would otherwise cancel them as unwanted.
-    @ObservationIgnored private var requested: [Int] = UserDefaults.standard.array(forKey: Downloads.requestedKey) as? [Int] ?? [] {
-        didSet { if requested != oldValue { UserDefaults.standard.set(requested, forKey: Self.requestedKey) } }
+    /// An episode asked for by hand, with its finished state at the time. It stays wanted,
+    /// and its file stays, until that state changes (it is played, archived or played again).
+    struct Request: Codable, Equatable { var id: Int; var played_at: Double?; var archived_at: Double? }
+    /// Newest first. Saved, because their transfers outlive the app and the first pass
+    /// after a relaunch would otherwise cancel them as unwanted.
+    @ObservationIgnored private(set) var requested: [Request] = [] {
+        didSet { if requested != oldValue { Self.save(requested, to: defaults) } }
     }
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private var lastLibraryKey = ""
     @ObservationIgnored private var again = false
     @ObservationIgnored var protectedHash: String?
     /// Transfer state of each episode being fetched, and bytes of segments in flight.
@@ -48,12 +53,51 @@ final class Downloads {
     /// the queue length, keeps the listening order.
     nonisolated static func queueLimit(_ preferences: DownloadPreferences) -> Int {
         let segment = MediaStore.segmentChunks * 1024 * 1024
-        return min(512, max(32, preferences.limit / segment + preferences.count))
+        return min(maxQueue, max(32, preferences.limit / segment + preferences.count))
     }
+    /// Kept modest: every queued task is tracked by the system's transfer daemon.
+    nonisolated static let maxQueue = 512
     /// Verification failures before an episode stops retrying until it is requested again.
     nonisolated static let maxFailures = 3
 
-    init() { scan() }
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        requested = Self.loadRequests(from: defaults)
+        scan()
+    }
+
+    nonisolated static func loadRequests(from defaults: UserDefaults) -> [Request] {
+        defaults.data(forKey: requestedKey).flatMap { try? JSONDecoder().decode([Request].self, from: $0) } ?? []
+    }
+
+    nonisolated static func save(_ requests: [Request], to defaults: UserDefaults) {
+        if let data = try? JSONEncoder().encode(requests) { defaults.set(data, forKey: requestedKey) }
+    }
+
+    /// Requests still in force: the episode is still there with a file to fetch, and its
+    /// finished state is what it was when it was asked for.
+    nonisolated static func live(_ requests: [Request], episode: (Int) -> Episode?) -> [Request] {
+        requests.filter { request in
+            guard let current = episode(request.id), current.manifest != nil else { return false }
+            return current.played_at == request.played_at && current.archived_at == request.archived_at
+        }
+    }
+
+    /// Re-plan after a library change, but only when something downloads depend on moved:
+    /// not for the position saves that bump the revision every few seconds during playback.
+    func libraryChanged() {
+        let library = Library.shared
+        let preferences = library.device.preferences
+        var key = library.listen.map { "\($0.id):\($0.manifest?.hash ?? "-"):\($0.isSummary)" }
+        key += requested.map { request in
+            library.episode(request.id).map { "r\($0.id):\($0.played_at ?? -1):\($0.archived_at ?? -1):\($0.isSummary)" } ?? "r-"
+        }
+        key.append("\(preferences.automatic):\(preferences.count):\(preferences.limit)")
+        let joined = key.joined(separator: ",")
+        guard joined != lastLibraryKey else { return }
+        lastLibraryKey = joined
+        run()
+    }
 
     static func fileURL(_ manifest: Manifest) -> URL { MediaStore.shared.finalURL(manifest.hash, manifest.fileExtension) }
 
@@ -91,8 +135,8 @@ final class Downloads {
         errors[episode.id] = nil
         errorHashes[episode.id] = nil
         if let hash = episode.manifest?.hash { failures[hash] = nil }
-        requested.removeAll { $0 == episode.id }
-        requested.insert(episode.id, at: 0)
+        requested.removeAll { $0.id == episode.id }
+        requested.insert(Request(id: episode.id, played_at: episode.played_at, archived_at: episode.archived_at), at: 0)
         if episode.isSummary {
             Task {
                 await Library.shared.loadFull(episode.id)
@@ -125,13 +169,14 @@ final class Downloads {
         await worker?.value
     }
 
+    /// Requested episodes first (downloaded ones too, so the sweep keeps them), then the plan.
     private func wanted(_ library: Library) -> [Episode] {
-        requested.removeAll { id in library.episode(id).map { isDownloaded($0) || $0.manifest == nil } ?? true }
+        requested = Self.live(requested, episode: library.episode)
         var result: [Episode] = []
         var seen = Set<Int>()
-        for id in requested {
-            // A summary waits in `requested` until `Library.loadFull` replaces it.
-            if let episode = library.episode(id), !episode.isSummary, seen.insert(id).inserted { result.append(episode) }
+        for request in requested {
+            // A summary waits in `requested` until `Library.loadFull` fills it in.
+            if let episode = library.episode(request.id), !episode.isSummary, seen.insert(request.id).inserted { result.append(episode) }
         }
         for episode in Self.plan(listen: library.listen, preferences: library.device.preferences)
         where !seen.contains(episode.id) && !isDownloaded(episode) {
@@ -162,7 +207,10 @@ final class Downloads {
         store.sweep(keep: keep)
         scan()
 
-        let budget = Self.queueLimit(library.device.preferences) - queued.count
+        // Room for the whole plan, plus whatever was asked for by hand on top of it.
+        let manual = requested.compactMap { library.episode($0.id)?.manifest }.filter { !complete.contains($0.hash) }
+            .map { MediaStore.Part($0).segments }.reduce(0, +)
+        let budget = min(Self.maxQueue, Self.queueLimit(library.device.preferences) + manual) - queued.count
         var remaining = budget
         var shown: [String: Int] = [:]
         var active: [MediaStore.Part] = []
@@ -170,8 +218,9 @@ final class Downloads {
             guard let manifest = episode.manifest, !complete.contains(manifest.hash) else { continue }
             let hasQueued = queued.contains { $0.hash == manifest.hash }
             // Start state for an episode only when it can be queued now or already has some.
-            guard remaining > 0 || hasQueued || store.part(manifest.hash) != nil else { continue }
-            let part = store.prepare(manifest)
+            let existing = store.part(manifest.hash)
+            guard remaining > 0 || hasQueued || existing != nil else { continue }
+            let part = existing.flatMap { $0.matches(manifest) ? $0 : nil } ?? store.prepare(manifest)
             parts[manifest.hash] = part
             shown[manifest.hash] = episode.id
             active.append(part)
@@ -179,9 +228,8 @@ final class Downloads {
         }
         let schedule = Self.schedule(active, queued: queued, budget: budget)
         // The order changes (a tap on Play, an episode finishing), so queued transfers follow it too.
-        for (info, task) in running where queued.contains(info) {
-            if let priority = schedule.priority[info.hash], task.priority != priority { task.priority = priority }
-        }
+        let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
+        for (info, task) in running { if let priority = changes[info] { task.priority = priority } }
         for planned in schedule.start {
             transfers.start(planned.info, range: planned.range, priority: planned.priority)
         }
@@ -216,6 +264,16 @@ final class Downloads {
             }
         }
         return result
+    }
+
+    /// Queued transfers whose priority differs from what the schedule now gives their episode.
+    nonisolated static func priorityChanges(_ queued: [(info: Transfers.Info, priority: Float)], _ schedule: Schedule)
+        -> [Transfers.Info: Float] {
+        var changes: [Transfers.Info: Float] = [:]
+        for (info, current) in queued {
+            if let wanted = schedule.priority[info.hash], wanted != current { changes[info] = wanted }
+        }
+        return changes
     }
 
     // MARK: Transfer events (from `Transfers`)
@@ -258,7 +316,7 @@ final class Downloads {
                 errors[id] = message
                 errorHashes[id] = info.hash
                 progress[id] = nil
-                requested.removeAll { $0 == id }
+                requested.removeAll { $0.id == id }
             }
             run()
         }

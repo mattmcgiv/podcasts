@@ -74,6 +74,48 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(reordered.priority[first.hash], URLSessionTask.defaultPriority)
     }
 
+    func testQueuedTransfersFollowTheCurrentOrder() {
+        let a = MediaStore.Part(Fixture.manifest(id: 1, bytes: 9 * 1024 * 1024))
+        let b = MediaStore.Part(Fixture.manifest(id: 2, bytes: 9 * 1024 * 1024))
+        let queued: [(info: Transfers.Info, priority: Float)] = [
+            (.init(hash: a.hash, segment: 0), URLSessionTask.highPriority), (.init(hash: b.hash, segment: 0), URLSessionTask.defaultPriority),
+            (.init(hash: b.hash, segment: 1), URLSessionTask.highPriority),
+        ]
+        // B is played next now.
+        let changes = Downloads.priorityChanges(queued, Downloads.schedule([b, a], queued: Set(queued.map(\.info)), budget: 0))
+        XCTAssertEqual(changes, [.init(hash: a.hash, segment: 0): URLSessionTask.defaultPriority,
+                                 .init(hash: b.hash, segment: 0): URLSessionTask.highPriority], "already right: left alone")
+    }
+
+    func testRequestsLastUntilTheEpisodeIsFinishedAgain() {
+        var replay = Fixture.episode(1, played: true)
+        var fresh = Fixture.episode(2)
+        let requests = [Downloads.Request(id: 1, played_at: replay.played_at, archived_at: nil),
+                        Downloads.Request(id: 2, played_at: nil, archived_at: nil),
+                        Downloads.Request(id: 3, played_at: nil, archived_at: nil)]
+        var episodes = [1: replay, 2: fresh]
+        XCTAssertEqual(Downloads.live(requests, episode: { episodes[$0] }).map(\.id), [1, 2], "an episode that left the library goes")
+        fresh.played_at = 1_700_000_500
+        replay.played_at = 1_700_000_600
+        episodes = [1: replay, 2: fresh]
+        XCTAssertEqual(Downloads.live(requests, episode: { episodes[$0] }), [],
+                       "marked played mid-download, or played to the end again: no longer wanted")
+        fresh.played_at = nil
+        fresh.archived_at = 1_700_000_700
+        XCTAssertEqual(Downloads.live([requests[1]], episode: { _ in fresh }), [])
+    }
+
+    @MainActor
+    func testRequestsSurviveARelaunch() throws {
+        let suite = "pods-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let saved = [Downloads.Request(id: 7, played_at: nil, archived_at: nil), Downloads.Request(id: 3, played_at: 1.5, archived_at: nil)]
+        Downloads.save(saved, to: defaults)
+        XCTAssertEqual(Downloads(defaults: defaults).requested, saved)
+        XCTAssertEqual(Downloads(defaults: UserDefaults(suiteName: "\(suite)-empty")!).requested, [])
+    }
+
     func testLogTailStartsAtAWholeLine() {
         let data = Data("tial line\nsecond\nthird\n".utf8)
         XCTAssertEqual(DeviceLog.wholeLines(data, cut: true), "second\nthird\n")
