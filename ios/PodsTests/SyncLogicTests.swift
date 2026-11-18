@@ -102,6 +102,7 @@ final class SyncLogicTests: XCTestCase {
         XCTAssertEqual(filled.position_secs, 400)
         XCTAssertEqual(filled.played_at, 1_700_000_900)
         XCTAssertTrue(SyncLogic.isPublished(filled, compact: false))
+        XCTAssertEqual(filled.local_detail, true)
         // A republished episode (another file) is not mixed with the old detail.
         var republished = summary
         republished.manifest?.hash = Fixture.hash(99)
@@ -110,16 +111,20 @@ final class SyncLogicTests: XCTestCase {
         XCTAssertNil(SyncLogic.filled(full, with: full), "only a summary is filled")
     }
 
-    func testPullsKeepFetchedDetailWhileTheFileIsTheSame() {
-        let full = Fixture.episode(1, played: true), other = Fixture.episode(2, played: true)
-        var previous = Fixture.snapshot([full, summarized(other)])
+    func testPullsKeepFetchedDetailWhileTheFileIsTheSame() throws {
+        let original = Fixture.episode(1, played: true)
+        let fetched = try XCTUnwrap(SyncLogic.filled(summarized(original), with: original))
+        // Sent in full while unplayed, then finished: nothing to keep, it shrinks.
+        let finished = Fixture.episode(2, played: true), other = Fixture.episode(3, played: true)
+        var previous = Fixture.snapshot([fetched, finished, summarized(other)])
         previous.version = 2
-        var incoming = Fixture.snapshot([summarized(full), summarized(other)])
+        var incoming = Fixture.snapshot([summarized(original), summarized(finished), summarized(other)])
         incoming.version = 2
         let kept = SyncLogic.keepingDetail(incoming, from: previous)
         XCTAssertFalse(kept.episodes[0].isSummary)
-        XCTAssertEqual(kept.episodes[0].manifest?.chunks, full.manifest?.chunks)
-        XCTAssertTrue(kept.episodes[1].isSummary, "nothing was fetched for this one")
+        XCTAssertEqual(kept.episodes[0].manifest?.chunks, original.manifest?.chunks)
+        XCTAssertTrue(kept.episodes[1].isSummary, "only detail this device asked for is kept")
+        XCTAssertTrue(kept.episodes[2].isSummary)
         XCTAssertNoThrow(try SyncLogic.validate(kept))
         XCTAssertEqual(SyncLogic.keepingDetail(incoming, from: nil), incoming)
     }

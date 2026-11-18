@@ -23,7 +23,11 @@ final class Downloads {
     private(set) var usedBytes = 0
 
     @ObservationIgnored private var worker: Task<Void, Never>?
-    @ObservationIgnored private var requested: [Int] = []
+    /// Episodes asked for by hand, first first. Saved, because their transfers outlive the app
+    /// and the first pass after a relaunch would otherwise cancel them as unwanted.
+    @ObservationIgnored private var requested: [Int] = UserDefaults.standard.array(forKey: Downloads.requestedKey) as? [Int] ?? [] {
+        didSet { if requested != oldValue { UserDefaults.standard.set(requested, forKey: Self.requestedKey) } }
+    }
     @ObservationIgnored private var again = false
     @ObservationIgnored var protectedHash: String?
     /// Transfer state of each episode being fetched, and bytes of segments in flight.
@@ -35,11 +39,17 @@ final class Downloads {
     @ObservationIgnored private var errorHashes: [Int: String] = [:]
     @ObservationIgnored private let store = MediaStore.shared
 
+    nonisolated static let requestedKey = "PodsRequestedDownloads"
+
     /// Segments queued with iOS at once. iOS runs transfers queued while the app is in
     /// the background only when it chooses (Wi-Fi, power), so the whole plan is queued
-    /// while the app is on screen: 256 segments cover the default 2 GiB limit. Priority,
-    /// not the queue length, keeps the listening order.
-    nonisolated static let maxQueued = 256
+    /// while the app is on screen: one segment per 8 MiB of the storage limit, plus one per
+    /// episode for its last, partial segment (306 at the defaults), up to 512. Priority, not
+    /// the queue length, keeps the listening order.
+    nonisolated static func queueLimit(_ preferences: DownloadPreferences) -> Int {
+        let segment = MediaStore.segmentChunks * 1024 * 1024
+        return min(512, max(32, preferences.limit / segment + preferences.count))
+    }
     /// Verification failures before an episode stops retrying until it is requested again.
     nonisolated static let maxFailures = 3
 
@@ -152,7 +162,7 @@ final class Downloads {
         store.sweep(keep: keep)
         scan()
 
-        let budget = Self.maxQueued - queued.count
+        let budget = Self.queueLimit(library.device.preferences) - queued.count
         var remaining = budget
         var shown: [String: Int] = [:]
         var active: [MediaStore.Part] = []
@@ -167,7 +177,12 @@ final class Downloads {
             active.append(part)
             remaining -= part.done.indices.filter { !part.done[$0] && !queued.contains(.init(hash: part.hash, segment: $0)) }.count
         }
-        for planned in Self.schedule(active, queued: queued, budget: budget) {
+        let schedule = Self.schedule(active, queued: queued, budget: budget)
+        // The order changes (a tap on Play, an episode finishing), so queued transfers follow it too.
+        for (info, task) in running where queued.contains(info) {
+            if let priority = schedule.priority[info.hash], task.priority != priority { task.priority = priority }
+        }
+        for planned in schedule.start {
             transfers.start(planned.info, range: planned.range, priority: planned.priority)
         }
         episodeIDs = shown
@@ -179,19 +194,25 @@ final class Downloads {
     }
 
     struct Planned: Equatable { var info: Transfers.Info; var range: ClosedRange<Int>; var priority: Float }
+    struct Schedule: Equatable {
+        /// Segments to queue now.
+        var start: [Planned]
+        /// The priority every transfer of each episode should have, queued or new.
+        var priority: [String: Float]
+    }
 
-    /// The segments to queue now: each episode's missing segments in order, episodes in
-    /// listening order, within `budget`. The next episode gets default priority and the
-    /// rest low, so iOS fetches the one about to be played first.
-    nonisolated static func schedule(_ parts: [MediaStore.Part], queued: Set<Transfers.Info>, budget: Int) -> [Planned] {
-        var result: [Planned] = []
+    /// Each episode's missing segments in order, episodes in the wanted order, within
+    /// `budget`. The next episode is high priority, the one after default and the rest
+    /// low, so iOS fetches the one about to be played first.
+    nonisolated static func schedule(_ parts: [MediaStore.Part], queued: Set<Transfers.Info>, budget: Int) -> Schedule {
+        var result = Schedule(start: [], priority: [:])
         for (rank, part) in parts.enumerated() {
             let priority = rank == 0 ? URLSessionTask.highPriority : rank == 1 ? URLSessionTask.defaultPriority : URLSessionTask.lowPriority
+            result.priority[part.hash] = priority
             for segment in part.done.indices where !part.done[segment] {
                 let info = Transfers.Info(hash: part.hash, segment: segment)
-                if queued.contains(info) { continue }
-                guard result.count < budget else { return result }
-                result.append(Planned(info: info, range: part.byteRange(segment), priority: priority))
+                if queued.contains(info) || result.start.count >= budget { continue }
+                result.start.append(Planned(info: info, range: part.byteRange(segment), priority: priority))
             }
         }
         return result

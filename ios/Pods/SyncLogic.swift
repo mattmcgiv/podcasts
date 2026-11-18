@@ -120,14 +120,17 @@ enum SyncLogic {
         episode.notes_html = full.notes_html
         episode.show_notes = full.show_notes
         episode.summary = nil
+        episode.local_detail = true
         return isPublished(episode, compact: false) ? episode : nil
     }
 
     /// Keep detail this device fetched for a summarized episode (`Library.loadFull`) when a
     /// new pull still summarizes the same file, so a download or the chapters do not vanish.
+    /// Only that detail: other finished episodes shrink to summaries as the Mac sends them.
     static func keepingDetail(_ incoming: Snapshot, from previous: Snapshot?) -> Snapshot {
         guard let previous else { return incoming }
-        let full = Dictionary(previous.episodes.filter { !$0.isSummary }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let full = Dictionary(previous.episodes.filter { !$0.isSummary && $0.local_detail == true }.map { ($0.id, $0) },
+                              uniquingKeysWith: { first, _ in first })
         var result = incoming
         for index in result.episodes.indices where result.episodes[index].isSummary {
             if let old = full[result.episodes[index].id], let filled = filled(result.episodes[index], with: old) {

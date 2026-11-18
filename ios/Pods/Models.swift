@@ -90,6 +90,9 @@ struct Episode: Codable, Equatable, Identifiable {
     /// A compact snapshot lists finished episodes without notes or chunk hashes.
     /// `Library.loadFull` fetches the rest when one is needed again.
     var summary: Bool?
+    /// Set on this device only, when `Library.loadFull` filled in a summary; such detail is
+    /// kept through later pulls. The Mac never sends it.
+    var local_detail: Bool?
 
     var isSummary: Bool { summary == true }
     var isUnplayed: Bool { played_at == nil && archived_at == nil }

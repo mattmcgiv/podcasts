@@ -38,10 +38,17 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(plan.map(\.id), [2])
     }
 
-    func testDefaultLimitFitsInOneQueue() {
-        let segment = MediaStore.segmentChunks * 1024 * 1024
-        XCTAssertGreaterThanOrEqual(Downloads.maxQueued * segment, DownloadPreferences().limit,
-                                    "the whole default plan is queued while the app is on screen")
+    func testTheWholeDefaultPlanFitsInOneQueue() {
+        let mb = 1024 * 1024
+        let preferences = DownloadPreferences()
+        // Many episodes just over a segment boundary need the most segments for their size.
+        for size in [50 * mb, 8 * mb + 1, 100 * mb, 1 * mb] {
+            let listen = (1...200).map { Fixture.episode($0, bytes: size) }
+            let segments = Downloads.plan(listen: listen, preferences: preferences)
+                .map { MediaStore.Part($0.manifest!).segments }.reduce(0, +)
+            XCTAssertLessThanOrEqual(segments, Downloads.queueLimit(preferences), "\(size) bytes")
+        }
+        XCTAssertEqual(Downloads.queueLimit(DownloadPreferences(limit: 20 * 1024 * mb, count: 100, automatic: true)), 512)
     }
 
     func testScheduleQueuesMissingSegmentsInListenOrderWithinBudget() {
@@ -51,13 +58,20 @@ final class DownloadsTests: XCTestCase {
         let second = MediaStore.Part(Fixture.manifest(id: 2, bytes: 9 * mb))   // 2 segments
         let third = MediaStore.Part(Fixture.manifest(id: 3, bytes: 1 * mb))    // 1 segment
         let queued: Set<Transfers.Info> = [.init(hash: first.hash, segment: 1)]
-        let planned = Downloads.schedule([first, second, third], queued: queued, budget: 3)
+        let schedule = Downloads.schedule([first, second, third], queued: queued, budget: 3)
+        let planned = schedule.start
         XCTAssertEqual(planned.map(\.info), [.init(hash: first.hash, segment: 2), .init(hash: second.hash, segment: 0),
                                              .init(hash: second.hash, segment: 1)], "done and queued segments are skipped")
         XCTAssertEqual(planned.map(\.priority), [URLSessionTask.highPriority, URLSessionTask.defaultPriority, URLSessionTask.defaultPriority])
         XCTAssertEqual(planned[0].range, first.byteRange(2))
-        XCTAssertEqual(Downloads.schedule([first, second, third], queued: [], budget: 10).last?.priority, URLSessionTask.lowPriority)
-        XCTAssertEqual(Downloads.schedule([first], queued: [], budget: 0), [])
+        XCTAssertEqual(schedule.priority, [first.hash: URLSessionTask.highPriority, second.hash: URLSessionTask.defaultPriority,
+                                           third.hash: URLSessionTask.lowPriority], "even episodes over the budget get a priority")
+        XCTAssertEqual(Downloads.schedule([first, second, third], queued: [], budget: 10).start.last?.priority, URLSessionTask.lowPriority)
+        XCTAssertEqual(Downloads.schedule([first], queued: [], budget: 0).start, [])
+        // Played next now: the same queued transfers move to the front.
+        let reordered = Downloads.schedule([third, first], queued: queued, budget: 0)
+        XCTAssertEqual(reordered.priority[third.hash], URLSessionTask.highPriority)
+        XCTAssertEqual(reordered.priority[first.hash], URLSessionTask.defaultPriority)
     }
 
     func testLogTailStartsAtAWholeLine() {

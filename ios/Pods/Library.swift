@@ -286,8 +286,10 @@ final class Library {
     /// Fill in one summarized episode (notes, chapters, chunk hashes) for playing or
     /// downloading it again. Later pulls keep the detail while the file stays the same.
     func loadFull(_ id: Int) async {
-        // Twice at most: a second time only if the Mac republished the episode meanwhile.
-        for _ in 0..<2 {
+        for attempt in 0..<2 {
+            // The first detail was for another file than the local summary: the Mac republished
+            // the episode, and only a pull brings the summary up to date.
+            if attempt > 0 { await synchronizeAndWait(force: true) }
             guard snapshot?.episodes.first(where: { $0.id == id })?.isSummary == true else { return }
             do {
                 let full = try await client.json(Episode.self, "/episodes/\(id)/detail", timeout: 30)
