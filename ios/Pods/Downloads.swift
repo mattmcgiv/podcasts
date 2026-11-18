@@ -234,27 +234,21 @@ final class Downloads {
         let budget = Self.budget(preferences: library.device.preferences,
                                  manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
                                  queued: queued.count)
-        var remaining = budget
-        var shown: [String: Int] = [:]
-        var active: [MediaStore.Part] = []
-        for episode in wanted {
-            guard let manifest = episode.manifest, !complete.contains(manifest.hash) else { continue }
-            let hasQueued = queued.contains { $0.hash == manifest.hash }
-            // Start state for an episode only when it can be queued now or already has some.
-            let existing = store.part(manifest.hash)
-            guard remaining > 0 || hasQueued || existing != nil else { continue }
-            // Nil when the last segment landed since the scan above: the file is complete.
-            guard let part = existing.flatMap({ $0.matches(manifest) ? $0 : nil }) ?? store.prepare(manifest) else {
-                scan()
-                for (info, task) in running where info.hash == manifest.hash { task.cancel(); queued.remove(info) }
-                continue
-            }
-            parts[manifest.hash] = part
-            shown[manifest.hash] = episode.id
-            active.append(part)
-            remaining -= part.done.indices.filter { !part.done[$0] && !queued.contains(.init(hash: part.hash, segment: $0)) }.count
+        let store = self.store
+        let plan = Self.planPass(wanted: wanted.compactMap { episode in episode.manifest.map { (episode.id, $0) } },
+                                 complete: complete, queued: queued, budget: budget,
+                                 existing: { store.part($0) }, prepare: { store.prepare($0) })
+        if !plan.finished.isEmpty {
+            scan()
+            for (info, task) in running where plan.finished.contains(info.hash) { task.cancel() }
         }
-        let schedule = Self.schedule(active, queued: queued, budget: budget)
+        queued = plan.queued
+        var shown: [String: Int] = [:]
+        for (id, part) in plan.active {
+            parts[part.hash] = part
+            shown[part.hash] = id
+        }
+        let schedule = Self.schedule(plan.active.map(\.part), queued: queued, budget: budget)
         // The order changes (a tap on Play, an episode finishing), so queued transfers follow it too.
         let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
         for (info, task) in running { if let priority = changes[info] { task.priority = priority } }
@@ -292,6 +286,38 @@ final class Downloads {
             }
         }
         return result
+    }
+
+    struct PassPlan {
+        /// Episodes with transfer state to follow, in wanted order.
+        var active: [(id: Int, part: MediaStore.Part)]
+        /// Files that turned out complete during the pass (a segment landed since the scan).
+        var finished: Set<String>
+        /// Queued transfers still wanted: those for finished files are dropped.
+        var queued: Set<Transfers.Info>
+    }
+
+    /// Which wanted episodes get transfer state now: those already started, plus new ones
+    /// while there is room. `existing` and `prepare` are the store's.
+    nonisolated static func planPass(wanted: [(id: Int, manifest: Manifest)], complete: Set<String>, queued: Set<Transfers.Info>,
+                                     budget: Int, existing: (String) -> MediaStore.Part?,
+                                     prepare: (Manifest) -> MediaStore.Part?) -> PassPlan {
+        var plan = PassPlan(active: [], finished: [], queued: queued)
+        var remaining = budget
+        for (id, manifest) in wanted where !complete.contains(manifest.hash) {
+            let hasQueued = plan.queued.contains { $0.hash == manifest.hash }
+            let current = existing(manifest.hash)
+            guard remaining > 0 || hasQueued || current != nil else { continue }
+            // Nil from `prepare`: the last segment landed since the scan, so the file is complete.
+            guard let part = current.flatMap({ $0.matches(manifest) ? $0 : nil }) ?? prepare(manifest) else {
+                plan.finished.insert(manifest.hash)
+                plan.queued = plan.queued.filter { $0.hash != manifest.hash }
+                continue
+            }
+            plan.active.append((id, part))
+            remaining -= part.done.indices.filter { !part.done[$0] && !plan.queued.contains(.init(hash: part.hash, segment: $0)) }.count
+        }
+        return plan
     }
 
     /// Queued transfers whose priority differs from what the schedule now gives their episode.
@@ -352,8 +378,15 @@ final class Downloads {
 
     private func updateProgress(_ hash: String) {
         guard let id = episodeIDs[hash], let part = parts[hash] else { return }
-        let received = part.receivedBytes + (inflight[hash]?.values.reduce(0, +) ?? 0)
-        progress[id] = Progress(received: min(received, part.bytes), total: part.bytes)
+        progress[id] = Self.progress(part, inflight: inflight[hash])
+    }
+
+    /// What an episode's row shows: nothing until some of it has arrived or is arriving, so
+    /// the rest of the queued plan does not all read "Downloading".
+    nonisolated static func progress(_ part: MediaStore.Part, inflight: [Int: Int]?) -> Progress? {
+        let moving = inflight?.values.reduce(0, +) ?? 0
+        guard part.receivedBytes > 0 || !(inflight ?? [:]).isEmpty else { return nil }
+        return Progress(received: min(part.receivedBytes + moving, part.bytes), total: part.bytes)
     }
 
     func removeAll() {

@@ -119,6 +119,38 @@ final class DownloadsTests: XCTestCase {
         XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true)), key)
     }
 
+    func testAPassSkipsFilesThatFinishedSinceItsScan() {
+        let mb = 1024 * 1024
+        let started = Fixture.manifest(id: 1, bytes: 9 * mb), finishing = Fixture.manifest(id: 2, bytes: 9 * mb)
+        let fresh = Fixture.manifest(id: 3, bytes: 9 * mb), later = Fixture.manifest(id: 4, bytes: 9 * mb)
+        var startedPart = MediaStore.Part(started); startedPart.done[0] = true
+        let queued: Set<Transfers.Info> = [.init(hash: finishing.hash, segment: 1), .init(hash: started.hash, segment: 1)]
+        var prepared: [String] = []
+        let plan = Downloads.planPass(
+            wanted: [(1, started), (2, finishing), (3, fresh), (4, later), (5, Fixture.manifest(id: 5))],
+            complete: [Fixture.hash(5)], queued: queued, budget: 2,
+            existing: { $0 == started.hash ? startedPart : nil },
+            prepare: { manifest in
+                prepared.append(manifest.hash)
+                // Episode 2's last segment landed after the scan.
+                return manifest.hash == finishing.hash ? nil : MediaStore.Part(manifest)
+            })
+        XCTAssertEqual(plan.finished, [finishing.hash])
+        XCTAssertEqual(plan.queued, [.init(hash: started.hash, segment: 1)], "transfers for the finished file are dropped")
+        XCTAssertEqual(plan.active.map(\.id), [1, 3], "state starts only while there is room; complete files are skipped")
+        XCTAssertEqual(plan.active.first?.part, startedPart)
+        XCTAssertEqual(prepared, [finishing.hash, fresh.hash])
+    }
+
+    func testRowsShowProgressOnlyOnceAudioArrives() {
+        var part = MediaStore.Part(Fixture.manifest(id: 1, bytes: 9 * 1024 * 1024))
+        XCTAssertNil(Downloads.progress(part, inflight: nil), "queued but not started")
+        XCTAssertNil(Downloads.progress(part, inflight: [:]))
+        XCTAssertEqual(Downloads.progress(part, inflight: [0: 1000]), .init(received: 1000, total: part.bytes))
+        part.done[0] = true
+        XCTAssertEqual(Downloads.progress(part, inflight: nil), .init(received: part.byteRange(0).count, total: part.bytes))
+    }
+
     func testTheSweepKeepsRequestedAndPlayingFiles() {
         var summary = Fixture.episode(3, played: true)
         summary.summary = true
