@@ -33,6 +33,7 @@ final class Downloads {
     }
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var lastLibraryKey = ""
+    @ObservationIgnored private var wasPaired = false
     @ObservationIgnored private var again = false
     @ObservationIgnored var protectedHash: String?
     /// Transfer state of each episode being fetched, and bytes of segments in flight.
@@ -44,6 +45,7 @@ final class Downloads {
     @ObservationIgnored private var failures: [String: Int] = [:]
     /// The artifact an error belongs to; a new publication of the episode clears it.
     @ObservationIgnored private var errorHashes: [Int: String] = [:]
+    @ObservationIgnored private var backoff = Backoff()
     @ObservationIgnored private let store = MediaStore.shared
 
     nonisolated static let requestedKey = "PodsRequestedDownloads"
@@ -89,21 +91,64 @@ final class Downloads {
     /// not for the position saves that bump the revision every few seconds during playback.
     func libraryChanged() {
         let library = Library.shared
+        let paired = library.pairing == .paired
         let key = Self.planKey(listen: library.listen, requested: requested.map { library.episode($0.id) },
-                               preferences: library.device.preferences)
+                               preferences: library.device.preferences, paired: paired)
+        // Just paired (again): what the Mac refused before may work now, so do not wait it out.
+        if paired, !wasPaired { backoff = Backoff() }
+        wasPaired = paired
         guard key != lastLibraryKey else { return }
         lastLibraryKey = key
         run()
     }
 
     /// Everything the download plan depends on, and nothing else (positions change constantly).
-    nonisolated static func planKey(listen: [Episode], requested: [Episode?], preferences: DownloadPreferences) -> String {
+    nonisolated static func planKey(listen: [Episode], requested: [Episode?], preferences: DownloadPreferences, paired: Bool) -> String {
         var key = listen.map { "\($0.id):\($0.manifest?.hash ?? "-"):\($0.isSummary)" }
         key += requested.map { episode in
             episode.map { "r\($0.id):\($0.manifest?.hash ?? "-"):\($0.played_at ?? -1):\($0.archived_at ?? -1):\($0.isSummary)" } ?? "r-"
         }
         key.append("\(preferences.automatic):\(preferences.count):\(preferences.limit)")
+        key.append(paired ? "paired" : "unpaired")
         return key.joined(separator: ",")
+    }
+
+    /// The wait after the Mac fails a transfer outright (an error status, a refused or lost
+    /// connection, or this iPhone not paired), so a Mac that fails fast is not handed the whole
+    /// plan again every minute and on every background wake. 30 seconds, doubling to 30
+    /// minutes; failures of transfers queued before the wait began do not lengthen it. Once it
+    /// is over a single segment goes out as a probe, and the next stored segment ends it.
+    /// Transfers already queued are left alone: after a brief outage they carry on by themselves.
+    struct Backoff: Equatable {
+        private(set) var failures = 0
+        private(set) var until: Date?
+
+        static let first: TimeInterval = 30
+        static let longest: TimeInterval = 30 * 60
+
+        /// True when the wait started or grew.
+        mutating func record(_ outcome: Transfers.Outcome, at now: Date) -> Bool {
+            switch outcome {
+            case .stored:
+                self = Backoff()
+                return false
+            case .unreachable, .unauthorized:
+                if let until, now < until { return false }
+                failures += 1
+                until = now.addingTimeInterval(min(Self.longest, Self.first * pow(2, Double(min(failures, 16) - 1))))
+                return true
+            case .stale, .cancelled, .failed:
+                return false
+            }
+        }
+    }
+
+    /// New segments a pass may queue: none while this iPhone is not paired or the wait runs, then
+    /// one probe (a transfer still queued counts as it), then the whole budget once one is stored.
+    nonisolated static func allowance(_ budget: Int, queued: Int, backoff: Backoff, unpaired: Bool, now: Date) -> Int {
+        if unpaired { return 0 }
+        guard let until = backoff.until else { return budget }
+        return now < until ? 0 : min(budget, max(0, 1 - queued))
     }
 
     /// Files the sweep must leave: Listen, everything wanted, every live request (a summary
@@ -114,10 +159,12 @@ final class Downloads {
         return keep
     }
 
-    /// Room for the whole plan plus the manual requests' missing segments, less what is queued.
+    /// Room for the whole plan plus the manual requests' segments, less what is queued. The
+    /// manual room comes on top of the plan's cap (up to another `maxQueue`), so a request is
+    /// queued even when a large storage limit already fills the queue.
     nonisolated static func budget(preferences: DownloadPreferences, manual: [Manifest], queued: Int) -> Int {
         let extra = manual.map { MediaStore.Part($0).segments }.reduce(0, +)
-        return max(0, min(maxQueue, queueLimit(preferences) + extra) - queued)
+        return max(0, queueLimit(preferences) + min(maxQueue, extra) - queued)
     }
 
     static func fileURL(_ manifest: Manifest) -> URL { MediaStore.shared.finalURL(manifest.hash, manifest.fileExtension) }
@@ -233,9 +280,10 @@ final class Downloads {
             }
         }
 
-        let budget = Self.budget(preferences: library.device.preferences,
-                                 manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
-                                 queued: queued.count)
+        let budget = Self.allowance(Self.budget(preferences: library.device.preferences,
+                                                manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
+                                                queued: queued.count),
+                                    queued: queued.count, backoff: backoff, unpaired: library.pairing == .unpaired, now: Date())
         let store = self.store
         let plan = Self.planPass(wanted: wanted.compactMap { episode in episode.manifest.map { (episode.id, $0) } },
                                  complete: complete, queued: queued, budget: budget,
@@ -250,8 +298,7 @@ final class Downloads {
             parts[part.hash] = part
             shown[part.hash] = id
         }
-        let requestedIDs = Set(requested.map(\.id))
-        awaited = Set(plan.active.enumerated().filter { $0.offset == 0 || requestedIDs.contains($0.element.id) }.map(\.element.part.hash))
+        awaited = Self.awaited(plan.active, requested: Set(requested.map(\.id)))
         let schedule = Self.schedule(plan.active.map(\.part), queued: queued, budget: budget)
         // The order changes (a tap on Play, an episode finishing), so queued transfers follow it too.
         let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
@@ -324,6 +371,12 @@ final class Downloads {
         return plan
     }
 
+    /// Rows that show progress before any audio arrives: the first episode being fetched, and
+    /// every one asked for by hand. The rest of the plan stays quiet until its audio comes in.
+    nonisolated static func awaited(_ active: [(id: Int, part: MediaStore.Part)], requested: Set<Int>) -> Set<String> {
+        Set(active.enumerated().filter { $0.offset == 0 || requested.contains($0.element.id) }.map(\.element.part.hash))
+    }
+
     /// Queued transfers whose priority differs from what the schedule now gives their episode.
     nonisolated static func priorityChanges(_ queued: [(info: Transfers.Info, priority: Float)], _ schedule: Schedule)
         -> [Transfers.Info: Float] {
@@ -344,6 +397,9 @@ final class Downloads {
 
     func finished(_ info: Transfers.Info, _ outcome: Transfers.Outcome) {
         inflight[info.hash]?[info.segment] = nil
+        if backoff.record(outcome, at: Date()), let until = backoff.until {
+            DeviceLog.write("downloads wait \(Int(until.timeIntervalSinceNow.rounded()))s after \(outcome) (failure \(backoff.failures))")
+        }
         switch outcome {
         case .stored(let whole):
             notice = nil
@@ -362,7 +418,7 @@ final class Downloads {
         case .stale, .cancelled:
             updateProgress(info.hash)
         case .unreachable:
-            // Retried on the next foreground, timer tick or background refresh.
+            // Probed again once the wait is over, on the next foreground, timer tick or background refresh.
             notice = "Mac unavailable. Downloads resume when it is reachable."
         case .unauthorized:
             notice = "Pair this iPhone with the Mac to download."

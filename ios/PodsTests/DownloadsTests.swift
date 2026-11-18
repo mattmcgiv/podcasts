@@ -109,14 +109,15 @@ final class DownloadsTests: XCTestCase {
         let preferences = DownloadPreferences()
         let listen = [Fixture.episode(1), Fixture.episode(2)]
         let requested: [Episode?] = [Fixture.episode(5), nil]
-        let key = Downloads.planKey(listen: listen, requested: requested, preferences: preferences)
+        let key = Downloads.planKey(listen: listen, requested: requested, preferences: preferences, paired: true)
         var moved = listen
         moved[0].position_secs = 321
-        XCTAssertEqual(Downloads.planKey(listen: moved, requested: requested, preferences: preferences), key, "a position save")
-        XCTAssertNotEqual(Downloads.planKey(listen: [listen[1], listen[0]], requested: requested, preferences: preferences), key)
+        XCTAssertEqual(Downloads.planKey(listen: moved, requested: requested, preferences: preferences, paired: true), key, "a position save")
+        XCTAssertNotEqual(Downloads.planKey(listen: [listen[1], listen[0]], requested: requested, preferences: preferences, paired: true), key)
         var played = Fixture.episode(5); played.played_at = 1_700_000_500
-        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: [played, nil], preferences: preferences), key)
-        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true)), key)
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: [played, nil], preferences: preferences, paired: true), key)
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true), paired: true), key)
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: preferences, paired: false), key, "pairing again")
     }
 
     func testAPassSkipsFilesThatFinishedSinceItsScan() {
@@ -169,8 +170,48 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [], queued: 6), Downloads.queueLimit(preferences) - 6)
         XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [manual], queued: 0), Downloads.queueLimit(preferences) + 19)
         XCTAssertEqual(Downloads.budget(preferences: DownloadPreferences(limit: 20 * 1024 * 1024 * 1024, count: 100, automatic: true), manual: [manual],
-                                        queued: 0), Downloads.maxQueue)
+                                        queued: 0), Downloads.maxQueue + 19, "a request fits even when the plan fills the queue")
+        XCTAssertEqual(Downloads.budget(preferences: DownloadPreferences(limit: 20 * 1024 * 1024 * 1024, count: 100, automatic: true), manual: [manual],
+                                        queued: Downloads.maxQueue), 19)
         XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [], queued: 9999), 0)
+    }
+
+    func testAFailingMacGetsOneProbeAfterAWait() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var backoff = Downloads.Backoff()
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start), 300)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: true, now: start), 0, "nothing while not paired")
+        XCTAssertTrue(backoff.record(.unreachable, at: start))
+        XCTAssertFalse(backoff.record(.unauthorized, at: start + 5), "the rest of the queue failing does not lengthen the wait")
+        XCTAssertFalse(backoff.record(.failed("bad audio"), at: start + 6))
+        XCTAssertFalse(backoff.record(.cancelled, at: start + 6))
+        XCTAssertEqual(backoff.until, start + 30)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 29), 0)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 30), 1, "one probe")
+        XCTAssertEqual(Downloads.allowance(300, queued: 1, backoff: backoff, unpaired: false, now: start + 31), 0, "a queued transfer is the probe")
+        XCTAssertEqual(Downloads.allowance(0, queued: 0, backoff: backoff, unpaired: false, now: start + 31), 0)
+        // The probe fails too: the wait doubles, up to half an hour.
+        XCTAssertTrue(backoff.record(.unreachable, at: start + 31))
+        XCTAssertEqual(backoff.until, start + 91)
+        for _ in 0..<40 { _ = backoff.record(.unreachable, at: backoff.until!) }
+        let last = backoff.until!
+        XCTAssertTrue(backoff.record(.unreachable, at: last))
+        XCTAssertEqual(backoff.until, last + Downloads.Backoff.longest)
+        // A stored segment ends it.
+        XCTAssertFalse(backoff.record(.stored(complete: false), at: last + 1))
+        XCTAssertEqual(backoff, Downloads.Backoff())
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
+    }
+
+    func testTheNextAndRequestedEpisodesShowProgressAtOnce() {
+        let parts = (1...4).map { MediaStore.Part(Fixture.manifest(id: $0)) }
+        let active = parts.enumerated().map { (id: $0.offset + 1, part: $0.element) }
+        XCTAssertEqual(Downloads.awaited(active, requested: []), [parts[0].hash], "only the next one")
+        XCTAssertEqual(Downloads.awaited(active, requested: [3]), [parts[0].hash, parts[2].hash],
+                       "a request, not the plan after it")
+        // A finished file has no transfer state, so it is not active and never awaited.
+        XCTAssertEqual(Downloads.awaited(Array(active.dropFirst()), requested: [1]), [parts[1].hash])
+        XCTAssertEqual(Downloads.awaited([], requested: [1]), [])
     }
 
     @MainActor
