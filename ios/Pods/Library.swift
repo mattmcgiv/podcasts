@@ -206,10 +206,11 @@ final class Library {
     }
 
     private func receiveSnapshot() async throws {
-        let incoming = try await client.json(Snapshot.self, "/sync?version=2", headers: [
+        var incoming = try await client.json(Snapshot.self, "/sync?version=2", headers: [
             "x-pods-client-id": device.client_id, "x-pods-device": Self.deviceName,
         ], timeout: 120)
         try SyncLogic.validate(incoming)
+        incoming = SyncLogic.keepingDetail(incoming, from: snapshot)
         snapshot = incoming
         lastFullPull = Date()
         DeviceLog.write("pulled library revision=\(incoming.cursor ?? -1) episodes=\(incoming.episodes.count)")
@@ -268,11 +269,8 @@ final class Library {
             rebuild()
             if missing { throw SyncError.message("Mac did not acknowledge every change. Pending changes are saved and will retry.") }
         }
-        // An episode marked unplayed here is still a summary in the local copy; the Mac now
-        // sends it in full. (The local copy, not the overlay, so a pending change cannot loop.)
-        let promoted = snapshot?.episodes.contains { $0.isSummary && $0.isUnplayed } ?? false
         // Push first so the pull below already reflects this device's changes.
-        if sharedWon || promoted {
+        if sharedWon || SyncLogic.needsFullRecords(snapshot) {
             try await receiveSnapshot()
         } else if refresh && !pulled {
             let due = force || lastFullPull.map { Date().timeIntervalSince($0) >= Self.fullPullInterval } ?? true
@@ -285,24 +283,32 @@ final class Library {
         rebuild()
     }
 
-    /// Replace one summarized episode with its full record, for playing or downloading it
-    /// again before the next pull brings it in full.
+    /// Fill in one summarized episode (notes, chapters, chunk hashes) for playing or
+    /// downloading it again. Later pulls keep the detail while the file stays the same.
     func loadFull(_ id: Int) async {
-        guard snapshot?.episodes.first(where: { $0.id == id })?.isSummary == true else { return }
-        do {
-            let full = try await client.json(Episode.self, "/episodes/\(id)/detail", timeout: 30)
-            guard full.id == id, !full.isSummary, SyncLogic.isPublished(full, compact: false)
-            else { throw SyncError.message("Mac supplied an unpublished episode.") }
-            // A pull may have landed meanwhile; only fill in a summary that is still there.
-            guard var current = snapshot, let index = current.episodes.firstIndex(where: { $0.id == id }),
-                  current.episodes[index].isSummary else { return }
-            current.episodes[index] = full
-            snapshot = current
-            saveSnapshot()
-            rebuild()
-        } catch {
-            lastError = error.localizedDescription
+        // Twice at most: a second time only if the Mac republished the episode meanwhile.
+        for _ in 0..<2 {
+            guard snapshot?.episodes.first(where: { $0.id == id })?.isSummary == true else { return }
+            do {
+                let full = try await client.json(Episode.self, "/episodes/\(id)/detail", timeout: 30)
+                guard full.id == id, !full.isSummary, SyncLogic.isPublished(full, compact: false)
+                else { throw SyncError.message("Mac supplied an unpublished episode.") }
+                // A pull may have landed meanwhile: fill in the summary that is there now, and
+                // only from the same file, so its newer play state stays.
+                guard var current = snapshot, let index = current.episodes.firstIndex(where: { $0.id == id }),
+                      current.episodes[index].isSummary else { return }
+                guard let filled = SyncLogic.filled(current.episodes[index], with: full) else { continue }
+                current.episodes[index] = filled
+                snapshot = current
+                saveSnapshot()
+                rebuild()
+                return
+            } catch {
+                lastError = error.localizedDescription
+                return
+            }
         }
+        DeviceLog.write("episode \(id) changed on the Mac while its detail loaded")
     }
 
     private struct ActionsBody: Encodable {

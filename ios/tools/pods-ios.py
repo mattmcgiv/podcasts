@@ -193,14 +193,18 @@ def command_refresh(force):
 
 
 def latest_report():
-    """The newest status and log tail the iPhone app sent the Mac (works without a cable)."""
+    """The newest status and log tail the iPhone sent the Mac (works without a cable).
+    Reports from the Simulator are skipped."""
     reports = []
     for path in REPORTS.glob("*.json"):
         try:
             report = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if str(report.get("report", {}).get("app", "")).startswith("Pods-iOS/"):
+        body = report.get("report")
+        if not isinstance(body, dict) or body.get("simulator") is not False:
+            continue  # the Simulator, or an app too old to say
+        if str(body.get("app", "")).startswith("Pods-iOS/"):
             reports.append(report)
     return max(reports, key=lambda r: r.get("received_at", 0), default=None)
 
@@ -219,7 +223,8 @@ def command_status():
     if report:
         body = report["report"]
         age = time.time() - report.get("received_at", 0)
-        print(f"Last report to the Mac: {age / 60:.0f} min ago ({body.get('reason', '?')}, {body.get('app', '?')})")
+        print(f"Last report to the Mac: {age / 60:.0f} min ago ({body.get('reason', '?')}, {body.get('app', '?')}, "
+              f"client {report.get('client_id', '?')})")
         print("  " + json.dumps(body.get("status", {}), sort_keys=True))
         tail = str(body.get("log", "")).strip().splitlines()[-8:]
         if tail:

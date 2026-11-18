@@ -615,8 +615,6 @@ fn same_action(stored: &str, action: &Value) -> bool {
         .is_ok_and(|original| action_core(&original) == action_core(action))
 }
 
-/// Last-sync moments per device. Recording lives in the HTTP routes so direct
-/// internal `apply_actions` calls (pipeline menu) never appear as devices.
 /// Largest device report kept. The app sends its status and the tail of its log.
 pub const DEVICE_REPORT_BYTES: usize = 256 * 1024;
 
@@ -664,6 +662,8 @@ fn save_device_report(backend: &Backend, client: &str, request: &HttpRequest) ->
     Ok(HttpResponse::no_content())
 }
 
+/// Last-sync moments per device. Recording lives in the HTTP routes so direct
+/// internal `apply_actions` calls (pipeline menu) never appear as devices.
 fn record_sync_device(
     backend: &Backend,
     client: &str,

@@ -107,6 +107,42 @@ enum SyncLogic {
             && manifest.chunks.allSatisfy(isHash)
     }
 
+    /// A summary completed from a full record of the same file: only the parts a summary
+    /// leaves out (notes, chapters, chunk hashes) come from `full`, so newer play state in the
+    /// summary wins. Nil when the two describe different files (the Mac republished it).
+    static func filled(_ summary: Episode, with full: Episode) -> Episode? {
+        guard summary.isSummary, !full.isSummary, summary.id == full.id, var manifest = summary.manifest,
+              let detail = full.manifest, manifest.hash == detail.hash, manifest.bytes == detail.bytes,
+              manifest.chunk_size == detail.chunk_size else { return nil }
+        var episode = summary
+        manifest.chunks = detail.chunks
+        episode.manifest = manifest
+        episode.notes_html = full.notes_html
+        episode.show_notes = full.show_notes
+        episode.summary = nil
+        return isPublished(episode, compact: false) ? episode : nil
+    }
+
+    /// Keep detail this device fetched for a summarized episode (`Library.loadFull`) when a
+    /// new pull still summarizes the same file, so a download or the chapters do not vanish.
+    static func keepingDetail(_ incoming: Snapshot, from previous: Snapshot?) -> Snapshot {
+        guard let previous else { return incoming }
+        let full = Dictionary(previous.episodes.filter { !$0.isSummary }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var result = incoming
+        for index in result.episodes.indices where result.episodes[index].isSummary {
+            if let old = full[result.episodes[index].id], let filled = filled(result.episodes[index], with: old) {
+                result.episodes[index] = filled
+            }
+        }
+        return result
+    }
+
+    /// The local copy summarizes an episode that is unplayed again; the Mac sends it in full.
+    /// (Checked on the local copy, not the overlay, so a pending change cannot loop.)
+    static func needsFullRecords(_ snapshot: Snapshot?) -> Bool {
+        snapshot?.episodes.contains { $0.isSummary && $0.isUnplayed } ?? false
+    }
+
     static func isHash(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }
     }

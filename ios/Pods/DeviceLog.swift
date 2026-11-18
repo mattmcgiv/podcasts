@@ -40,10 +40,15 @@ enum DeviceLog {
             let size = (try? handle.seekToEnd()) ?? 0
             let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
             try? handle.seek(toOffset: start)
-            var text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
-            if start > 0, let newline = text.firstIndex(of: "\n") { text = String(text[text.index(after: newline)...]) }
-            return text
+            return wholeLines((try? handle.readToEnd()) ?? Data(), cut: start > 0)
         }
+    }
+
+    /// A log excerpt as text. One cut from a longer log drops its first, partial line.
+    static func wholeLines(_ data: Data, cut: Bool) -> String {
+        let text = String(decoding: data, as: UTF8.self)
+        guard cut else { return text }
+        return text.firstIndex(of: "\n").map { String(text[text.index(after: $0)...]) } ?? ""
     }
 
     static func writeStatus(_ status: [String: Any]) {

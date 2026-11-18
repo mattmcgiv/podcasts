@@ -2346,7 +2346,9 @@ fn compact_sync_summarizes_finished_episodes_and_detail_restores_them() {
     assert_eq!(detail["manifest"]["chunks"], json!([manifest.hash]));
     assert_eq!(detail["show_notes"][0]["title"], "Intro");
     assert_eq!(detail, full["episodes"][0]);
+    // Episode 2 exists but was never published; 3 does not exist.
     assert_eq!(backend.handle(HttpRequest::new("GET", "/api/episodes/2/detail")).status_code, 404);
+    assert_eq!(backend.handle(HttpRequest::new("GET", "/api/episodes/3/detail")).status_code, 404);
 
     // Marking it unplayed again brings the full record back into the compact snapshot.
     let revision = compact["versions"]["1:played"].as_i64().unwrap();
@@ -2354,6 +2356,28 @@ fn compact_sync_summarizes_finished_episodes_and_detail_restores_them() {
     let restored = get_json(&backend, "/api/sync?version=2");
     assert!(restored["episodes"][0].get("summary").is_none());
     assert_eq!(restored["episodes"][0]["manifest"]["chunks"], json!([manifest.hash]));
+}
+
+#[test]
+fn compact_sync_summarizes_archived_episodes_and_detail_follows_the_visible_set() {
+    let (backend, _temp, manifest) = fixture();
+    backend.db.execute(
+        "INSERT INTO episode_state(episode_id,played_at,archived_at,updated_at) VALUES(1,NULL,100,100)
+         ON CONFLICT(episode_id) DO UPDATE SET played_at=NULL, archived_at=100",
+        [],
+    ).unwrap();
+    let compact = get_json(&backend, "/api/sync?version=2");
+    let archived = &compact["episodes"][0];
+    assert!(archived["played_at"].is_null());
+    assert_eq!(archived["summary"], true, "archived but unplayed is finished too");
+    assert_eq!(archived["manifest"]["chunks"], json!([]));
+    assert_eq!(get_json(&backend, "/api/episodes/1/detail")["manifest"]["chunks"], json!([manifest.hash]));
+
+    // Unsubscribing hides an unplayed episode outside Listen; its detail goes with it.
+    backend.db.execute("UPDATE podcasts SET is_subscribed=0", []).unwrap();
+    backend.db.execute("DELETE FROM listen_episodes", []).unwrap();
+    assert_eq!(get_json(&backend, "/api/sync?version=2")["episodes"], json!([]));
+    assert_eq!(backend.handle(HttpRequest::new("GET", "/api/episodes/1/detail")).status_code, 404);
 }
 
 #[test]

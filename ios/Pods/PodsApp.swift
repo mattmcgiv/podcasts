@@ -49,6 +49,12 @@ final class AppCoordinator {
     private var lastSync = Date()
     private var lastReport: Date?
 
+    #if targetEnvironment(simulator)
+    static let isSimulator = true
+    #else
+    static let isSimulator = false
+    #endif
+
     /// Hosted unit tests load the app but must not sync, play or schedule anything.
     private var testing: Bool { NSClassFromString("XCTestCase") != nil }
 
@@ -163,7 +169,8 @@ final class AppCoordinator {
         guard !library.readOnly, library.pairing == .paired, library.device.lastSync != nil else { return }
         lastReport = Date()
         let payload: [String: Any] = [
-            "reason": reason, "app": MacClient.userAgent, "status": status(), "log": DeviceLog.tail(64 * 1024),
+            "reason": reason, "app": MacClient.userAgent, "simulator": Self.isSimulator, "status": status(),
+            "log": DeviceLog.tail(64 * 1024),
         ]
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
         do {

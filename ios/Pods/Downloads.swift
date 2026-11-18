@@ -4,7 +4,8 @@ import Observation
 import UIKit
 
 /// Keeps processed episode files on the phone. Transfers run in a background
-/// URLSession, so they continue while the app is suspended or closed. Every
+/// URLSession, so they continue while iOS suspends or ends the app (not after a
+/// force-quit from the app switcher, which cancels them). Every
 /// 1 MiB chunk is checked against the Mac's manifest before it is written, and a
 /// file becomes playable only once every chunk is in place.
 @MainActor @Observable
@@ -34,11 +35,13 @@ final class Downloads {
     @ObservationIgnored private var errorHashes: [Int: String] = [:]
     @ObservationIgnored private let store = MediaStore.shared
 
-    /// Segments queued with iOS at once: enough to keep going for a while in the
-    /// background, few enough that the listening order decides what arrives first.
-    static let maxQueued = 24
+    /// Segments queued with iOS at once. iOS runs transfers queued while the app is in
+    /// the background only when it chooses (Wi-Fi, power), so the whole plan is queued
+    /// while the app is on screen: 256 segments cover the default 2 GiB limit. Priority,
+    /// not the queue length, keeps the listening order.
+    nonisolated static let maxQueued = 256
     /// Verification failures before an episode stops retrying until it is requested again.
-    static let maxFailures = 3
+    nonisolated static let maxFailures = 3
 
     init() { scan() }
 
@@ -149,24 +152,23 @@ final class Downloads {
         store.sweep(keep: keep)
         scan()
 
-        var budget = Self.maxQueued - queued.count
+        let budget = Self.maxQueued - queued.count
+        var remaining = budget
         var shown: [String: Int] = [:]
-        for (rank, episode) in wanted.enumerated() {
+        var active: [MediaStore.Part] = []
+        for episode in wanted {
             guard let manifest = episode.manifest, !complete.contains(manifest.hash) else { continue }
             let hasQueued = queued.contains { $0.hash == manifest.hash }
             // Start state for an episode only when it can be queued now or already has some.
-            guard budget > 0 || hasQueued || store.part(manifest.hash) != nil else { continue }
+            guard remaining > 0 || hasQueued || store.part(manifest.hash) != nil else { continue }
             let part = store.prepare(manifest)
             parts[manifest.hash] = part
             shown[manifest.hash] = episode.id
-            for segment in 0..<part.segments where !part.done[segment] && budget > 0 {
-                let info = Transfers.Info(hash: manifest.hash, segment: segment)
-                if queued.contains(info) { continue }
-                transfers.start(info, range: part.byteRange(segment),
-                                priority: rank == 0 ? URLSessionTask.highPriority : URLSessionTask.defaultPriority)
-                queued.insert(info)
-                budget -= 1
-            }
+            active.append(part)
+            remaining -= part.done.indices.filter { !part.done[$0] && !queued.contains(.init(hash: part.hash, segment: $0)) }.count
+        }
+        for planned in Self.schedule(active, queued: queued, budget: budget) {
+            transfers.start(planned.info, range: planned.range, priority: planned.priority)
         }
         episodeIDs = shown
         parts = parts.filter { shown[$0.key] != nil }
@@ -174,6 +176,25 @@ final class Downloads {
         let ids = Set(shown.values)
         progress = progress.filter { ids.contains($0.key) }
         for hash in shown.keys { updateProgress(hash) }
+    }
+
+    struct Planned: Equatable { var info: Transfers.Info; var range: ClosedRange<Int>; var priority: Float }
+
+    /// The segments to queue now: each episode's missing segments in order, episodes in
+    /// listening order, within `budget`. The next episode gets default priority and the
+    /// rest low, so iOS fetches the one about to be played first.
+    nonisolated static func schedule(_ parts: [MediaStore.Part], queued: Set<Transfers.Info>, budget: Int) -> [Planned] {
+        var result: [Planned] = []
+        for (rank, part) in parts.enumerated() {
+            let priority = rank == 0 ? URLSessionTask.highPriority : rank == 1 ? URLSessionTask.defaultPriority : URLSessionTask.lowPriority
+            for segment in part.done.indices where !part.done[segment] {
+                let info = Transfers.Info(hash: part.hash, segment: segment)
+                if queued.contains(info) { continue }
+                guard result.count < budget else { return result }
+                result.append(Planned(info: info, range: part.byteRange(segment), priority: priority))
+            }
+        }
+        return result
     }
 
     // MARK: Transfer events (from `Transfers`)
@@ -253,6 +274,8 @@ final class MediaStore: @unchecked Sendable {
         var chunk_size: Int
         var chunks: [String]
         var done: [Bool]
+        /// New each time an episode starts over, so a write that raced a restart is discarded.
+        var generation: String
 
         init(_ manifest: Manifest) {
             hash = manifest.hash
@@ -261,6 +284,7 @@ final class MediaStore: @unchecked Sendable {
             chunk_size = manifest.chunk_size
             chunks = manifest.chunks
             done = Array(repeating: false, count: (manifest.chunks.count + MediaStore.segmentChunks - 1) / MediaStore.segmentChunks)
+            generation = UUID().uuidString
         }
 
         var segments: Int { done.count }
@@ -298,6 +322,8 @@ final class MediaStore: @unchecked Sendable {
 
     let directory: URL
     private let lock = NSLock()
+    /// Tests only: runs between writing a segment and recording it.
+    var afterWrite: (() -> Void)?
 
     init(directory: URL = DeviceLog.directory.appendingPathComponent("Media", isDirectory: true)) {
         self.directory = directory
@@ -316,9 +342,20 @@ final class MediaStore: @unchecked Sendable {
         (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
     }
 
+    private func fileSize(_ url: URL) -> Int? { try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize }
+
+    private func hasFinal(_ hash: String) -> Bool {
+        ["m4a", "mp4"].contains { FileManager.default.fileExists(atPath: finalURL(hash, $0).path) }
+    }
+
+    /// The transfer state, if it can be trusted: not left next to a finished file, and not
+    /// claiming segments the partial file cannot hold (an interrupted removal or finish).
     private func readPart(_ hash: String) -> Part? {
         guard let data = try? Data(contentsOf: stateURL(hash)), let part = try? JSONDecoder().decode(Part.self, from: data),
-              part.hash == hash, part.isConsistent else { return nil }
+              part.hash == hash, part.isConsistent, !hasFinal(hash) else { return nil }
+        if let last = part.done.lastIndex(of: true) {
+            guard let size = fileSize(partURL(hash)), size > part.byteRange(last).upperBound else { return nil }
+        }
         return part
     }
 
@@ -326,10 +363,10 @@ final class MediaStore: @unchecked Sendable {
         try JSONEncoder().encode(part).write(to: stateURL(part.hash), options: .atomic)
     }
 
-    private func removeFiles(_ hash: String) {
-        for file in files() where file.deletingPathExtension().lastPathComponent == hash {
-            try? FileManager.default.removeItem(at: file)
-        }
+    /// Forget a transfer. A finished file for the same hash stays.
+    private func removeTransfer(_ hash: String) {
+        try? FileManager.default.removeItem(at: partURL(hash))
+        try? FileManager.default.removeItem(at: stateURL(hash))
     }
 
     /// Hashes of complete files, and the space every file in the folder uses.
@@ -358,44 +395,48 @@ final class MediaStore: @unchecked Sendable {
     }
 
     /// Check one finished transfer against the manifest and write it into place. Runs on
-    /// the transfer delegate's queue; `location` is deleted once the delegate returns.
+    /// the transfer delegate's serial queue (the only writer of partial files);
+    /// `location` is deleted once the delegate returns.
     func store(hash: String, segment: Int, from location: URL) throws -> Stored {
         guard let expected = part(hash), expected.done.indices.contains(segment) else { return .stale }
+        if expected.done[segment] { return .segment }
         let range = expected.byteRange(segment)
         let data = try Data(contentsOf: location, options: .mappedIfSafe)
         guard data.count == range.count else { throw Failure.size }
         guard Self.verify(data, chunkSize: expected.chunk_size, hashes: Array(expected.chunks[expected.chunkRange(segment)]))
         else { throw Failure.verification }
+        // Write and flush outside the lock, so the main thread never waits on the disk. If the
+        // episode is removed or restarted meanwhile, the generation check below drops this write;
+        // the bytes it left in a newer partial file sit in a segment still marked missing.
+        let url = partURL(hash)
+        if !FileManager.default.fileExists(atPath: url.path), !FileManager.default.createFile(atPath: url.path, contents: nil) {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        do {
+            try handle.seek(toOffset: UInt64(range.lowerBound))
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+        afterWrite?()
         return try lock.withLock {
-            // The episode may have been removed, or started over, while this transfer ran.
-            guard var part = readPart(hash), part.chunks == expected.chunks, part.done.indices.contains(segment) else { return .stale }
+            guard var part = readPart(hash), part.generation == expected.generation else { return .stale }
             if part.done[segment] { return .segment }
-            let url = partURL(hash)
-            if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
-            let handle = try FileHandle(forWritingTo: url)
-            do {
-                try handle.seek(toOffset: UInt64(range.lowerBound))
-                try handle.write(contentsOf: data)
-                try handle.synchronize()
-                try handle.close()
-            } catch {
-                try? handle.close()
-                throw error
-            }
             part.done[segment] = true
             guard part.isComplete else {
                 try writePart(part)
                 return .segment
             }
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
-            guard size == part.bytes else {
+            guard fileSize(url) == part.bytes else {
                 // Should not happen: every segment landed at its offset. Start the episode over.
-                removeFiles(hash)
+                removeTransfer(hash)
                 throw Failure.size
             }
-            let final = finalURL(hash, part.ext)
-            try? FileManager.default.removeItem(at: final)
-            try FileManager.default.moveItem(at: url, to: final)
+            try FileManager.default.moveItem(at: url, to: finalURL(hash, part.ext))
             try? FileManager.default.removeItem(at: stateURL(hash))
             return .complete
         }
@@ -454,6 +495,8 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     private var outcomes: [Int: Outcome] = [:]
     private var lastProgress: [Int: Date] = [:]
     private var eventsDone: (() -> Void)?
+    /// When the session finished delivering events before iOS handed over its handler.
+    private var eventsFinishedAt: Date?
     private let store = MediaStore.shared
     private(set) var session: URLSession!
 
@@ -478,8 +521,20 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     }
 
     /// Keep the handler iOS passes when it relaunches the app for this session's events.
+    /// The session may already exist (launch and background refresh create it too) and may
+    /// have finished delivering before this runs; then the handler is called right away.
     func handleEvents(_ completion: @escaping () -> Void) {
-        lock.withLock { eventsDone = completion }
+        let finished = lock.withLock { () -> Bool in
+            defer { eventsFinishedAt = nil }
+            if let at = eventsFinishedAt, Date().timeIntervalSince(at) < 60 { return true }
+            eventsDone = completion
+            return false
+        }
+        guard finished else { return }
+        Task { @MainActor in
+            await Downloads.shared.runNow()
+            completion()
+        }
     }
 
     func start(_ info: Info, range: ClosedRange<Int>, priority: Float) {
@@ -525,24 +580,29 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
 
     // MARK: URLSessionDownloadDelegate (on the serial delegate queue)
 
+    /// What one finished transfer leads to: check the response, then verify and store its data.
+    static func process(_ info: Info, status: Int, contentRange: String?, location: URL, store: MediaStore) -> Outcome {
+        let part = store.part(info.hash)
+        let expected = part.flatMap { $0.done.indices.contains(info.segment) ? $0.byteRange(info.segment) : nil }
+        if let outcome = classify(status: status, contentRange: contentRange, expected: expected, total: part?.bytes) {
+            return outcome
+        }
+        do {
+            switch try store.store(hash: info.hash, segment: info.segment, from: location) {
+            case .segment: return .stored(complete: false)
+            case .complete: return .stored(complete: true)
+            case .stale: return .stale
+            }
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let info = Self.info(downloadTask) else { return }
         let http = downloadTask.response as? HTTPURLResponse
-        let part = store.part(info.hash)
-        let expected = part.flatMap { $0.done.indices.contains(info.segment) ? $0.byteRange(info.segment) : nil }
-        var outcome = Self.classify(status: http?.statusCode ?? 0, contentRange: http?.value(forHTTPHeaderField: "content-range"),
-                                    expected: expected, total: part?.bytes)
-        if outcome == nil {
-            do {
-                switch try store.store(hash: info.hash, segment: info.segment, from: location) {
-                case .segment: outcome = .stored(complete: false)
-                case .complete: outcome = .stored(complete: true)
-                case .stale: outcome = .stale
-                }
-            } catch {
-                outcome = .failed(error.localizedDescription)
-            }
-        }
+        let outcome = Self.process(info, status: http?.statusCode ?? 0, contentRange: http?.value(forHTTPHeaderField: "content-range"),
+                                   location: location, store: store)
         lock.withLock { outcomes[downloadTask.taskIdentifier] = outcome }
     }
 
@@ -577,6 +637,7 @@ final class Transfers: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let completion = lock.withLock { () -> (() -> Void)? in
             defer { eventsDone = nil }
+            if eventsDone == nil { eventsFinishedAt = Date() }
             return eventsDone
         }
         Task { @MainActor in

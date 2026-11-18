@@ -76,6 +76,63 @@ final class SyncLogicTests: XCTestCase {
         XCTAssertEqual(SyncLogic.nextBatch(outbox, limit: 1).map(\.id), ["a"])
     }
 
+    private func summarized(_ episode: Episode) -> Episode {
+        var summary = episode
+        summary.summary = true
+        summary.notes_html = ""
+        summary.show_notes = []
+        summary.manifest?.chunks = []
+        return summary
+    }
+
+    func testDetailFillsOnlyWhatASummaryLeavesOut() throws {
+        var full = Fixture.episode(1, played: true)
+        full.notes_html = "<p>Notes</p>"
+        full.show_notes = [ShowNote(id: "n0", start_time: 0, title: "Intro", summary: "")]
+        full.position_secs = 10
+        // Newer play state arrived in a pull while the detail was loading.
+        var summary = summarized(full)
+        summary.position_secs = 400
+        summary.played_at = 1_700_000_900
+        let filled = try XCTUnwrap(SyncLogic.filled(summary, with: full))
+        XCTAssertFalse(filled.isSummary)
+        XCTAssertEqual(filled.manifest?.chunks, full.manifest?.chunks)
+        XCTAssertEqual(filled.notes_html, "<p>Notes</p>")
+        XCTAssertEqual(filled.show_notes?.first?.title, "Intro")
+        XCTAssertEqual(filled.position_secs, 400)
+        XCTAssertEqual(filled.played_at, 1_700_000_900)
+        XCTAssertTrue(SyncLogic.isPublished(filled, compact: false))
+        // A republished episode (another file) is not mixed with the old detail.
+        var republished = summary
+        republished.manifest?.hash = Fixture.hash(99)
+        republished.audio_url = "/_media/\(Fixture.hash(99)).m4a"
+        XCTAssertNil(SyncLogic.filled(republished, with: full))
+        XCTAssertNil(SyncLogic.filled(full, with: full), "only a summary is filled")
+    }
+
+    func testPullsKeepFetchedDetailWhileTheFileIsTheSame() {
+        let full = Fixture.episode(1, played: true), other = Fixture.episode(2, played: true)
+        var previous = Fixture.snapshot([full, summarized(other)])
+        previous.version = 2
+        var incoming = Fixture.snapshot([summarized(full), summarized(other)])
+        incoming.version = 2
+        let kept = SyncLogic.keepingDetail(incoming, from: previous)
+        XCTAssertFalse(kept.episodes[0].isSummary)
+        XCTAssertEqual(kept.episodes[0].manifest?.chunks, full.manifest?.chunks)
+        XCTAssertTrue(kept.episodes[1].isSummary, "nothing was fetched for this one")
+        XCTAssertNoThrow(try SyncLogic.validate(kept))
+        XCTAssertEqual(SyncLogic.keepingDetail(incoming, from: nil), incoming)
+    }
+
+    func testAnUnplayedSummaryAsksForAFullPull() {
+        var summary = summarized(Fixture.episode(1, played: true))
+        XCTAssertFalse(SyncLogic.needsFullRecords(Fixture.snapshot([summary])))
+        summary.played_at = nil
+        XCTAssertTrue(SyncLogic.needsFullRecords(Fixture.snapshot([summary])))
+        XCTAssertFalse(SyncLogic.needsFullRecords(Fixture.snapshot([Fixture.episode(1)])))
+        XCTAssertFalse(SyncLogic.needsFullRecords(nil))
+    }
+
     func testValidateRejectsMalformedEpisodes() throws {
         XCTAssertNoThrow(try SyncLogic.validate(Fixture.snapshot([Fixture.episode(1), Fixture.episode(2)])))
         XCTAssertThrowsError(try SyncLogic.validate(Fixture.snapshot([Fixture.episode(1), Fixture.episode(1)])))
