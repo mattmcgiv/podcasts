@@ -24,7 +24,7 @@ final class Downloads {
 
     @ObservationIgnored private var worker: Task<Void, Never>?
     /// An episode asked for by hand, with its finished state at the time. It stays wanted,
-    /// and its file stays, until that state changes (it is played, archived or played again).
+    /// and its file stays, until that state changes (it is played or archived).
     struct Request: Codable, Equatable { var id: Int; var played_at: Double?; var archived_at: Double? }
     /// Newest first. Saved, because their transfers outlive the app and the first pass
     /// after a relaunch would otherwise cancel them as unwanted.
@@ -87,16 +87,35 @@ final class Downloads {
     /// not for the position saves that bump the revision every few seconds during playback.
     func libraryChanged() {
         let library = Library.shared
-        let preferences = library.device.preferences
-        var key = library.listen.map { "\($0.id):\($0.manifest?.hash ?? "-"):\($0.isSummary)" }
-        key += requested.map { request in
-            library.episode(request.id).map { "r\($0.id):\($0.played_at ?? -1):\($0.archived_at ?? -1):\($0.isSummary)" } ?? "r-"
+        let key = Self.planKey(listen: library.listen, requested: requested.map { library.episode($0.id) },
+                               preferences: library.device.preferences)
+        guard key != lastLibraryKey else { return }
+        lastLibraryKey = key
+        run()
+    }
+
+    /// Everything the download plan depends on, and nothing else (positions change constantly).
+    nonisolated static func planKey(listen: [Episode], requested: [Episode?], preferences: DownloadPreferences) -> String {
+        var key = listen.map { "\($0.id):\($0.manifest?.hash ?? "-"):\($0.isSummary)" }
+        key += requested.map { episode in
+            episode.map { "r\($0.id):\($0.manifest?.hash ?? "-"):\($0.played_at ?? -1):\($0.archived_at ?? -1):\($0.isSummary)" } ?? "r-"
         }
         key.append("\(preferences.automatic):\(preferences.count):\(preferences.limit)")
-        let joined = key.joined(separator: ",")
-        guard joined != lastLibraryKey else { return }
-        lastLibraryKey = joined
-        run()
+        return key.joined(separator: ",")
+    }
+
+    /// Files the sweep must leave: Listen, everything wanted, every live request (a summary
+    /// among them waits for its detail), and the one in the player.
+    nonisolated static func keep(listen: [Episode], wanted: [Episode], requested: [Episode], protected: String?) -> Set<String> {
+        var keep = Set((listen + wanted + requested).compactMap { $0.manifest?.hash })
+        if let protected { keep.insert(protected) }
+        return keep
+    }
+
+    /// Room for the whole plan plus the manual requests' missing segments, less what is queued.
+    nonisolated static func budget(preferences: DownloadPreferences, manual: [Manifest], queued: Int) -> Int {
+        let extra = manual.map { MediaStore.Part($0).segments }.reduce(0, +)
+        return max(0, min(maxQueue, queueLimit(preferences) + extra) - queued)
     }
 
     static func fileURL(_ manifest: Manifest) -> URL { MediaStore.shared.finalURL(manifest.hash, manifest.fileExtension) }
@@ -197,20 +216,24 @@ final class Downloads {
         let wanted = wanted(library)
         let wantedHashes = Set(wanted.compactMap { $0.manifest?.hash })
 
-        // Stop transfers nothing wants now. Their partial files stay while the episode is unplayed.
-        var queued = Set<Transfers.Info>()
-        for (info, task) in running {
-            if wantedHashes.contains(info.hash), task.state != .canceling { queued.insert(info) } else { task.cancel() }
-        }
-        var keep = Set(library.listen.compactMap { $0.manifest?.hash }).union(wantedHashes)
-        if let protectedHash { keep.insert(protectedHash) }
-        store.sweep(keep: keep)
+        let requestedEpisodes = requested.compactMap { library.episode($0.id) }
+        store.sweep(keep: Self.keep(listen: library.listen, wanted: wanted, requested: requestedEpisodes, protected: protectedHash))
         scan()
 
-        // Room for the whole plan, plus whatever was asked for by hand on top of it.
-        let manual = requested.compactMap { library.episode($0.id)?.manifest }.filter { !complete.contains($0.hash) }
-            .map { MediaStore.Part($0).segments }.reduce(0, +)
-        let budget = min(Self.maxQueue, Self.queueLimit(library.device.preferences) + manual) - queued.count
+        // Stop transfers nothing wants now, or for a file that is already complete. Partial
+        // files stay while the episode is unplayed.
+        var queued = Set<Transfers.Info>()
+        for (info, task) in running {
+            if wantedHashes.contains(info.hash), !complete.contains(info.hash), task.state != .canceling {
+                queued.insert(info)
+            } else {
+                task.cancel()
+            }
+        }
+
+        let budget = Self.budget(preferences: library.device.preferences,
+                                 manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
+                                 queued: queued.count)
         var remaining = budget
         var shown: [String: Int] = [:]
         var active: [MediaStore.Part] = []
@@ -220,7 +243,12 @@ final class Downloads {
             // Start state for an episode only when it can be queued now or already has some.
             let existing = store.part(manifest.hash)
             guard remaining > 0 || hasQueued || existing != nil else { continue }
-            let part = existing.flatMap { $0.matches(manifest) ? $0 : nil } ?? store.prepare(manifest)
+            // Nil when the last segment landed since the scan above: the file is complete.
+            guard let part = existing.flatMap({ $0.matches(manifest) ? $0 : nil }) ?? store.prepare(manifest) else {
+                scan()
+                for (info, task) in running where info.hash == manifest.hash { task.cancel(); queued.remove(info) }
+                continue
+            }
             parts[manifest.hash] = part
             shown[manifest.hash] = episode.id
             active.append(part)
@@ -463,8 +491,10 @@ final class MediaStore: @unchecked Sendable {
     func part(_ hash: String) -> Part? { lock.withLock { readPart(hash) } }
 
     /// The transfer state for this manifest, started fresh when there is none or it no longer matches.
-    func prepare(_ manifest: Manifest) -> Part {
+    /// Nil when the file is already complete: no state is started next to a finished file.
+    func prepare(_ manifest: Manifest) -> Part? {
         lock.withLock {
+            if hasFinal(manifest.hash) { return nil }
             if let part = readPart(manifest.hash), part.matches(manifest) { return part }
             try? FileManager.default.removeItem(at: partURL(manifest.hash))
             let part = Part(manifest)

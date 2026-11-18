@@ -105,6 +105,40 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(Downloads.live([requests[1]], episode: { _ in fresh }), [])
     }
 
+    func testOnlyChangesThePlanDependsOnTriggerAReplan() {
+        let preferences = DownloadPreferences()
+        let listen = [Fixture.episode(1), Fixture.episode(2)]
+        let requested: [Episode?] = [Fixture.episode(5), nil]
+        let key = Downloads.planKey(listen: listen, requested: requested, preferences: preferences)
+        var moved = listen
+        moved[0].position_secs = 321
+        XCTAssertEqual(Downloads.planKey(listen: moved, requested: requested, preferences: preferences), key, "a position save")
+        XCTAssertNotEqual(Downloads.planKey(listen: [listen[1], listen[0]], requested: requested, preferences: preferences), key)
+        var played = Fixture.episode(5); played.played_at = 1_700_000_500
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: [played, nil], preferences: preferences), key)
+        XCTAssertNotEqual(Downloads.planKey(listen: listen, requested: requested, preferences: DownloadPreferences(limit: 1, count: 5, automatic: true)), key)
+    }
+
+    func testTheSweepKeepsRequestedAndPlayingFiles() {
+        var summary = Fixture.episode(3, played: true)
+        summary.summary = true
+        summary.manifest?.chunks = []
+        let keep = Downloads.keep(listen: [Fixture.episode(1)], wanted: [Fixture.episode(2)], requested: [summary],
+                                  protected: Fixture.hash(4))
+        XCTAssertEqual(keep, [Fixture.hash(1), Fixture.hash(2), Fixture.hash(3), Fixture.hash(4)],
+                       "a requested summary keeps its file while it waits for its detail")
+    }
+
+    func testManualRequestsGetRoomOnTopOfThePlan() {
+        let preferences = DownloadPreferences()
+        let manual = Fixture.manifest(id: 1, bytes: 150 * 1024 * 1024)   // 19 segments
+        XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [], queued: 6), Downloads.queueLimit(preferences) - 6)
+        XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [manual], queued: 0), Downloads.queueLimit(preferences) + 19)
+        XCTAssertEqual(Downloads.budget(preferences: DownloadPreferences(limit: 20 * 1024 * 1024 * 1024, count: 100, automatic: true), manual: [manual],
+                                        queued: 0), Downloads.maxQueue)
+        XCTAssertEqual(Downloads.budget(preferences: preferences, manual: [], queued: 9999), 0)
+    }
+
     @MainActor
     func testRequestsSurviveARelaunch() throws {
         let suite = "pods-tests-\(UUID().uuidString)"
@@ -157,7 +191,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testSegmentsAssembleInAnyOrderIntoAVerifiedFile() throws {
         let (data, manifest) = artifact(chunks: 2 * MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         XCTAssertEqual(part.segments, 3)
         XCTAssertEqual(part.byteRange(0), 0...(MediaStore.segmentChunks * chunk - 1))
         XCTAssertEqual(part.byteRange(2).upperBound, manifest.bytes - 1)
@@ -176,7 +210,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testCorruptOrShortTransfersAreRefused() throws {
         let (data, manifest) = artifact(chunks: 3)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         var corrupt = data
         corrupt[10] ^= 0xff
         XCTAssertThrowsError(try store.store(hash: manifest.hash, segment: 0, from: transfer(corrupt, part.byteRange(0))))
@@ -187,7 +221,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testRemovedOrUnknownEpisodesAreStale() throws {
         let (data, manifest) = artifact(chunks: 3)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         let file = try transfer(data, part.byteRange(0))
         store.sweep(keep: [])
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 0, from: file), .stale)
@@ -197,12 +231,12 @@ final class MediaStoreTests: XCTestCase {
 
     func testPrepareKeepsMatchingStateAndRestartsChangedManifests() throws {
         let (data, manifest) = artifact(chunks: MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 0, from: transfer(data, part.byteRange(0))), .segment)
-        XCTAssertEqual(store.prepare(manifest).done, [true, false])
+        XCTAssertEqual(store.prepare(manifest)!.done, [true, false])
         var changed = manifest
         changed.chunks[0] = String(repeating: "0", count: 64)
-        XCTAssertEqual(store.prepare(changed).done, [false, false])
+        XCTAssertEqual(store.prepare(changed)!.done, [false, false])
     }
 
     func testSweepKeepsWantedFilesAndDropsUntrustedLeftovers() throws {
@@ -220,7 +254,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testFinishedFilesAreNeverReplacedByLeftoverState() throws {
         let (data, manifest) = artifact(chunks: MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 0, from: transfer(data, part.byteRange(0))), .segment)
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 1, from: transfer(data, part.byteRange(1))), .complete)
         // As if the app died between finishing the file and removing its state.
@@ -230,20 +264,24 @@ final class MediaStoreTests: XCTestCase {
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 0, from: transfer(data, part.byteRange(0))), .stale)
         XCTAssertEqual(try Data(contentsOf: store.finalURL(manifest.hash, "m4a")), data)
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.partURL(manifest.hash).path))
+        // A pass that saw the file as incomplete just before it finished starts nothing new.
+        try FileManager.default.removeItem(at: store.stateURL(manifest.hash))
+        XCTAssertNil(store.prepare(manifest))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.stateURL(manifest.hash).path))
     }
 
     func testStateClaimingMissingSegmentsStartsOver() throws {
         let (data, manifest) = artifact(chunks: 2 * MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 0, from: transfer(data, part.byteRange(0))), .segment)
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 2, from: transfer(data, part.byteRange(2))), .segment)
         // An interrupted removal took the partial file but left its state.
         try FileManager.default.removeItem(at: store.partURL(manifest.hash))
         XCTAssertNil(store.part(manifest.hash))
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 1, from: transfer(data, part.byteRange(1))), .stale)
-        XCTAssertEqual(store.prepare(manifest).done, [false, false, false], "it starts over instead of assembling holes")
+        XCTAssertEqual(store.prepare(manifest)!.done, [false, false, false], "it starts over instead of assembling holes")
         // A partial file shorter than its furthest finished segment is not trusted either.
-        let fresh = store.prepare(manifest)
+        let fresh = store.prepare(manifest)!
         XCTAssertEqual(try store.store(hash: manifest.hash, segment: 2, from: transfer(data, fresh.byteRange(2))), .segment)
         let handle = try FileHandle(forWritingTo: store.partURL(manifest.hash))
         try handle.truncate(atOffset: UInt64(fresh.byteRange(1).upperBound))
@@ -253,7 +291,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testAWriteThatRacedARestartIsDropped() throws {
         let (data, manifest) = artifact(chunks: MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         // The main actor removes the episode and starts it over while this segment is written.
         let shared = store!
         store.afterWrite = { shared.sweep(keep: []); _ = shared.prepare(manifest) }
@@ -268,7 +306,7 @@ final class MediaStoreTests: XCTestCase {
 
     func testTransferOutcomesFromResponseToStorage() throws {
         let (data, manifest) = artifact(chunks: MediaStore.segmentChunks + 1)
-        let part = store.prepare(manifest)
+        let part = store.prepare(manifest)!
         let range = part.byteRange(0)
         let info = Transfers.Info(hash: manifest.hash, segment: 0)
         let good = "bytes \(range.lowerBound)-\(range.upperBound)/\(manifest.bytes)"
