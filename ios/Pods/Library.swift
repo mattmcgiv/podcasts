@@ -22,6 +22,12 @@ final class Library {
 
     @ObservationIgnored private var syncTask: Task<Void, Never>?
     @ObservationIgnored private var refreshRequested = false
+    @ObservationIgnored private var forceRequested = false
+    @ObservationIgnored private var lastFullPull: Date?
+    /// The library is about 5 MB. Between full pulls the app asks the Mac for its revision
+    /// (a few bytes) and pulls only when it moved. Jobs that archive episodes do not move it,
+    /// so a full pull still happens this often.
+    static let fullPullInterval: TimeInterval = 30 * 60
     @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var playbackBases: [String: Int] = [:]
     @ObservationIgnored private let client = MacClient.shared
@@ -157,13 +163,16 @@ final class Library {
         try await client.pair(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
         pairing = .paired
         lastError = nil
-        synchronize(refresh: true)
+        synchronize(force: true)
     }
 
     // MARK: Sync
 
-    func synchronize(refresh: Bool = true) {
-        refreshRequested = refreshRequested || refresh
+    /// Push local changes. `refresh` also pulls the library if the Mac's copy changed;
+    /// `force` pulls it regardless.
+    func synchronize(refresh: Bool = true, force: Bool = false) {
+        refreshRequested = refreshRequested || refresh || force
+        forceRequested = forceRequested || force
         syncAgain = true
         guard syncTask == nil else { return }
         syncing = true
@@ -171,10 +180,11 @@ final class Library {
             guard let self else { return }
             while self.syncAgain {
                 self.syncAgain = false
-                let pull = self.refreshRequested
+                let pull = self.refreshRequested, force = self.forceRequested
                 self.refreshRequested = false
+                self.forceRequested = false
                 do {
-                    try await self.synchronizeOnce(refresh: pull)
+                    try await self.synchronizeOnce(refresh: pull, force: force)
                     self.lastError = nil
                 } catch is CancellationError {
                 } catch {
@@ -190,7 +200,7 @@ final class Library {
 
     /// Await the sync in flight (or a new one). Used by pull-to-refresh.
     func synchronizeAndWait() async {
-        synchronize(refresh: true)
+        synchronize(force: true)
         await syncTask?.value
     }
 
@@ -200,14 +210,18 @@ final class Library {
         ], timeout: 120)
         try SyncLogic.validate(incoming)
         snapshot = incoming
+        lastFullPull = Date()
+        DeviceLog.write("pulled library revision=\(incoming.cursor ?? -1) episodes=\(incoming.episodes.count)")
         pairing = .paired
         saveSnapshot()
         rebuild()
     }
 
-    private func synchronizeOnce(refresh: Bool) async throws {
-        var sharedWon = false
-        if snapshot == nil { try await receiveSnapshot() }
+    private struct MacStatus: Decodable { var revision: Int }
+
+    private func synchronizeOnce(refresh: Bool, force: Bool) async throws {
+        var sharedWon = false, pulled = false
+        if snapshot == nil { try await receiveSnapshot(); pulled = true }
         while !readOnly {
             device.outbox = SyncLogic.coalesce(device.outbox)
             let batch = SyncLogic.nextBatch(device.outbox)
@@ -225,6 +239,9 @@ final class Library {
                     if var current = snapshot, (current.versions[operation.key] ?? 0) <= revision {
                         current = SyncLogic.applyOverlay(current, outbox: [operation])
                         current.versions[operation.key] = revision
+                        // Our own change is now in the local copy. If nothing else happened on the
+                        // Mac in between, the local copy is current at this revision.
+                        if let cursor = current.cursor, revision == cursor + 1 { current.cursor = revision }
                         snapshot = current
                     }
                     device.outbox.removeAll { $0.id == operation.id }
@@ -251,7 +268,13 @@ final class Library {
             if missing { throw SyncError.message("Mac did not acknowledge every change. Pending changes are saved and will retry.") }
         }
         // Push first so the pull below already reflects this device's changes.
-        if refresh || sharedWon { try await receiveSnapshot() }
+        if sharedWon {
+            try await receiveSnapshot()
+        } else if refresh && !pulled {
+            let due = force || lastFullPull.map { Date().timeIntervalSince($0) >= Self.fullPullInterval } ?? true
+            if due { try await receiveSnapshot() }
+            else if try await client.json(MacStatus.self, "/status").revision != snapshot?.cursor { try await receiveSnapshot() }
+        }
         device.lastSync = Date().timeIntervalSince1970
         saveDevice()
         saveSnapshot()
