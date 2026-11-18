@@ -144,11 +144,13 @@ final class DownloadsTests: XCTestCase {
 
     func testRowsShowProgressOnlyOnceAudioArrives() {
         var part = MediaStore.Part(Fixture.manifest(id: 1, bytes: 9 * 1024 * 1024))
-        XCTAssertNil(Downloads.progress(part, inflight: nil), "queued but not started")
-        XCTAssertNil(Downloads.progress(part, inflight: [:]))
-        XCTAssertEqual(Downloads.progress(part, inflight: [0: 1000]), .init(received: 1000, total: part.bytes))
+        XCTAssertNil(Downloads.progress(part, inflight: nil, awaited: false), "queued but not started")
+        XCTAssertNil(Downloads.progress(part, inflight: [:], awaited: false))
+        XCTAssertEqual(Downloads.progress(part, inflight: nil, awaited: true), .init(received: 0, total: part.bytes),
+                       "asked for by hand, or next: shown at once")
+        XCTAssertEqual(Downloads.progress(part, inflight: [0: 1000], awaited: false), .init(received: 1000, total: part.bytes))
         part.done[0] = true
-        XCTAssertEqual(Downloads.progress(part, inflight: nil), .init(received: part.byteRange(0).count, total: part.bytes))
+        XCTAssertEqual(Downloads.progress(part, inflight: nil, awaited: false), .init(received: part.byteRange(0).count, total: part.bytes))
     }
 
     func testTheSweepKeepsRequestedAndPlayingFiles() {

@@ -128,12 +128,25 @@ export function applyOverlay(snapshot: Snapshot, outbox: Operation[]): Snapshot 
       const position = operation.value as { seconds: number; original_seconds?: number };
       const timeline = episode.manifest?.timeline;
       if (position.original_seconds != null && timeline?.length) {
-        const span = timeline.find(s => position.original_seconds! < s.original_end) ?? timeline[timeline.length - 1];
-        episode.position_secs = span.processed_start + Math.max(0, Math.min(span.original_end, position.original_seconds) - span.original_start);
+        episode.position_secs = processedTime(timeline, position.original_seconds);
       } else episode.position_secs = position.seconds;
     }
   }
   return copy;
+}
+
+type TimelineSpan = ArtifactManifest["timeline"][number];
+
+/** Original-recording seconds to processed seconds. A time inside a removed ad maps to where the ad was cut. */
+export function processedTime(timeline: TimelineSpan[], seconds: number): number {
+  const span = timeline.find(s => seconds < s.original_end) ?? timeline[timeline.length - 1];
+  return span.processed_start + Math.max(0, Math.min(span.original_end, seconds) - span.original_start);
+}
+
+/** Processed seconds to the original recording's, or undefined without a timeline. */
+export function originalTime(timeline: TimelineSpan[] | undefined, seconds: number): number | undefined {
+  const span = timeline?.find(s => seconds < s.processed_start + s.original_end - s.original_start) ?? timeline?.at(-1);
+  return span ? Math.min(span.original_end, span.original_start + Math.max(0, seconds - span.processed_start)) : undefined;
 }
 
 export function coalesceOutbox(outbox: Operation[]): Operation[] {
@@ -468,9 +481,7 @@ export async function localRequest<T>(path: string, init: RequestInit = {}, raw 
       const hash = String(body.artifact_hash ?? episode.manifest?.hash);
       const manifest = hash === episode.manifest?.hash ? episode.manifest : await readRecord<ArtifactManifest>("meta", `manifest:${hash}`);
       const seconds = Number(body.seconds);
-      const timeline = manifest?.timeline;
-      const span = timeline?.find(s => seconds < s.processed_start + s.original_end - s.original_start) ?? timeline?.at(-1);
-      const original_seconds = span ? Math.min(span.original_end, span.original_start + Math.max(0, seconds - span.processed_start)) : undefined;
+      const original_seconds = originalTime(manifest?.timeline, seconds);
       await enqueue(String(episode.id), "position", { seconds, artifact_hash: hash, original_seconds });
     }
     else if (match[2] === "show-notes") result = episode.show_notes;

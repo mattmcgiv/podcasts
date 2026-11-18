@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import raw from "./sync-vectors.json?raw";
-import { applyOverlay, coalesceOutbox, nextBatch, validateSnapshot } from "./client";
+import { applyOverlay, coalesceOutbox, nextBatch, originalTime, processedTime, validateSnapshot } from "./client";
 import type { Operation, Snapshot } from "./store";
 
 // The same file drives ios/PodsTests/SyncVectorTests.swift and backend/tests/sync_vectors.rs.
 type Span = { original_start: number; original_end: number; processed_start: number };
+type TimelineCase = { name: string; timeline: Span[]; to_original: [number, number][]; to_processed: [number, number][] };
 type OverlayEpisode = { id: number; podcast_id: number; played: boolean; position: number; timeline?: Span[] };
 type OverlayCase = {
   name: string; shows: { id: number; feed_url: string }[]; settings: Record<string, unknown>; episodes: OverlayEpisode[];
@@ -17,7 +18,7 @@ type ValidateCase = {
   episode_patch?: Record<string, unknown>; manifest_patch?: Record<string, unknown>;
 };
 const vectors = JSON.parse(raw) as {
-  overlay: OverlayCase[]; coalesce: OutboxCase[]; next_batch: OutboxCase[];
+  timeline: TimelineCase[]; overlay: OverlayCase[]; coalesce: OutboxCase[]; next_batch: OutboxCase[];
   validate: { base_episode: Record<string, unknown> & { manifest: Record<string, unknown> }; cases: ValidateCase[] };
 };
 
@@ -36,6 +37,11 @@ function overlaySnapshot(input: OverlayCase): Snapshot {
 }
 
 describe("shared sync vectors", () => {
+  for (const input of vectors.timeline) it(`timeline: ${input.name}`, () => {
+    for (const [processed, original] of input.to_original) expect(originalTime(input.timeline, processed)).toBeCloseTo(original, 9);
+    for (const [original, processed] of input.to_processed) expect(processedTime(input.timeline, original)).toBeCloseTo(processed, 9);
+  });
+
   for (const input of vectors.overlay) it(`overlay: ${input.name}`, () => {
     const result = applyOverlay(overlaySnapshot(input), operations(input.outbox));
     expect(result.shows.map(s => s.id)).toEqual(input.expect.shows);

@@ -39,6 +39,8 @@ final class Downloads {
     @ObservationIgnored private var parts: [String: MediaStore.Part] = [:]
     @ObservationIgnored private var inflight: [String: [Int: Int]] = [:]
     @ObservationIgnored private var episodeIDs: [String: Int] = [:]
+    /// Episodes whose row shows progress before any audio arrives: asked for by hand, or next.
+    @ObservationIgnored private var awaited: Set<String> = []
     @ObservationIgnored private var failures: [String: Int] = [:]
     /// The artifact an error belongs to; a new publication of the episode clears it.
     @ObservationIgnored private var errorHashes: [Int: String] = [:]
@@ -248,6 +250,8 @@ final class Downloads {
             parts[part.hash] = part
             shown[part.hash] = id
         }
+        let requestedIDs = Set(requested.map(\.id))
+        awaited = Set(plan.active.enumerated().filter { $0.offset == 0 || requestedIDs.contains($0.element.id) }.map(\.element.part.hash))
         let schedule = Self.schedule(plan.active.map(\.part), queued: queued, budget: budget)
         // The order changes (a tap on Play, an episode finishing), so queued transfers follow it too.
         let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
@@ -378,14 +382,15 @@ final class Downloads {
 
     private func updateProgress(_ hash: String) {
         guard let id = episodeIDs[hash], let part = parts[hash] else { return }
-        progress[id] = Self.progress(part, inflight: inflight[hash])
+        progress[id] = Self.progress(part, inflight: inflight[hash], awaited: awaited.contains(hash))
     }
 
-    /// What an episode's row shows: nothing until some of it has arrived or is arriving, so
-    /// the rest of the queued plan does not all read "Downloading".
-    nonisolated static func progress(_ part: MediaStore.Part, inflight: [Int: Int]?) -> Progress? {
+    /// What an episode's row shows. The rest of the queued plan shows nothing until some of it
+    /// arrives, so it does not all read "Downloading"; an episode asked for by hand, or the
+    /// next one, shows at once, so a tap visibly did something.
+    nonisolated static func progress(_ part: MediaStore.Part, inflight: [Int: Int]?, awaited: Bool) -> Progress? {
         let moving = inflight?.values.reduce(0, +) ?? 0
-        guard part.receivedBytes > 0 || !(inflight ?? [:]).isEmpty else { return nil }
+        guard awaited || part.receivedBytes > 0 || !(inflight ?? [:]).isEmpty else { return nil }
         return Progress(received: min(part.receivedBytes + moving, part.bytes), total: part.bytes)
     }
 

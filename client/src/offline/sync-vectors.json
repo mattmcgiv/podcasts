@@ -1,5 +1,5 @@
 {
-  "about": "Sync rules every client must agree on. Read by backend/tests/sync_vectors.rs (timeline), ios/PodsTests/SyncVectorTests.swift (all), and client/src/offline/syncVectors.test.ts (all version 1 cases). Change a rule here first, then make every reader pass.",
+  "about": "Sync rules every client must agree on. Read by backend/tests/sync_vectors.rs (timeline), ios/PodsTests/SyncVectorTests.swift (all), and client/src/offline/syncVectors.test.ts (timeline, overlay, outbox and the version 1 validation cases). Change a rule here first, then make every reader pass.",
   "timeline": [
     {
       "name": "ad cut from 100 s to 160 s of the original",
