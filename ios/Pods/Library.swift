@@ -184,9 +184,9 @@ final class Library {
                 self.refreshRequested = false
                 self.forceRequested = false
                 do {
-                    try await self.synchronizeOnce(refresh: pull, force: force)
+                    let reached = try await self.synchronizeOnce(refresh: pull, force: force)
                     self.lastError = nil
-                    Downloads.shared.syncFinished(nil)
+                    if reached { Downloads.shared.syncFinished(nil) }
                 } catch is CancellationError {
                 } catch {
                     if case SyncError.unauthorized = error { self.pairing = .unpaired }
@@ -223,9 +223,10 @@ final class Library {
 
     private struct MacStatus: Decodable { var revision: Int }
 
-    private func synchronizeOnce(refresh: Bool, force: Bool) async throws {
-        var sharedWon = false, pulled = false
-        if snapshot == nil { try await receiveSnapshot(); pulled = true }
+    /// True when it got an answer from the Mac: a sync with nothing to send or pull asks nothing.
+    private func synchronizeOnce(refresh: Bool, force: Bool) async throws -> Bool {
+        var sharedWon = false, pulled = false, answered = false
+        if snapshot == nil { try await receiveSnapshot(); pulled = true; answered = true }
         while !readOnly {
             device.outbox = SyncLogic.coalesce(device.outbox)
             let batch = SyncLogic.nextBatch(device.outbox)
@@ -234,6 +235,7 @@ final class Library {
             for index in device.outbox.indices where ids.contains(device.outbox[index].id) { device.outbox[index].sent = true }
             saveDevice()
             let results = try await post(batch)
+            answered = true
             var missing = false
             for operation in batch {
                 guard let result = results.first(where: { $0.id == operation.id }) else { missing = true; continue }
@@ -274,15 +276,18 @@ final class Library {
         // Push first so the pull below already reflects this device's changes.
         if sharedWon || SyncLogic.needsFullRecords(snapshot) {
             try await receiveSnapshot()
+            answered = true
         } else if refresh && !pulled {
             let due = force || lastFullPull.map { Date().timeIntervalSince($0) >= Self.fullPullInterval } ?? true
             if due { try await receiveSnapshot() }
             else if try await client.json(MacStatus.self, "/status").revision != snapshot?.cursor { try await receiveSnapshot() }
+            answered = true
         }
         device.lastSync = Date().timeIntervalSince1970
         saveDevice()
         saveSnapshot()
         rebuild()
+        return answered
     }
 
     /// Fill in one summarized episode (notes, chapters, chunk hashes) for playing or

@@ -178,17 +178,17 @@ final class DownloadsTests: XCTestCase {
     func testAFailingMacGetsOneProbeAfterAWait() {
         let start = Date(timeIntervalSince1970: 1_000_000)
         var backoff = Downloads.Backoff()
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start), 300)
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: true, now: start), 0, "nothing while not paired")
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start), 300)
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: true, now: start), 0, "nothing while not paired")
         XCTAssertTrue(backoff.record(.unreachable, at: start))
         XCTAssertFalse(backoff.record(.unauthorized, at: start + 5), "the rest of the queue failing does not lengthen the wait")
         XCTAssertFalse(backoff.record(.failed("bad audio"), at: start + 6))
         XCTAssertFalse(backoff.record(.cancelled, at: start + 6))
         XCTAssertEqual(backoff.until, start + 30)
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 29), 0)
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 30), 1, "one probe")
-        XCTAssertEqual(Downloads.allowance(300, queued: 1, backoff: backoff, unpaired: false, now: start + 31), 0, "a queued transfer is the probe")
-        XCTAssertEqual(Downloads.allowance(0, queued: 0, backoff: backoff, unpaired: false, now: start + 31), 0)
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 29), 0)
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 30), 1, "one probe")
+        XCTAssertEqual(Downloads.allowance(300, probes: 1, backoff: backoff, unpaired: false, now: start + 31), 0, "a queued transfer is the probe")
+        XCTAssertEqual(Downloads.allowance(0, probes: 0, backoff: backoff, unpaired: false, now: start + 31), 0)
         // The probe fails too: the wait doubles, up to half an hour.
         XCTAssertTrue(backoff.record(.unreachable, at: start + 31))
         XCTAssertEqual(backoff.until, start + 91)
@@ -199,7 +199,7 @@ final class DownloadsTests: XCTestCase {
         // A stored segment ends it.
         XCTAssertFalse(backoff.record(.stored(complete: false), at: last + 1))
         XCTAssertEqual(backoff, Downloads.Backoff())
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
     }
 
     func testSyncsAndTapsEndTheWait() {
@@ -209,15 +209,39 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(backoff, Downloads.Backoff())
         _ = backoff.record(.unreachable, at: start)
         XCTAssertTrue(backoff.resume())
-        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 1), 1, "a probe at once")
+        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 1), 1, "a probe at once")
         XCTAssertTrue(backoff.record(.unreachable, at: start + 2), "a failed probe still counts")
         XCTAssertEqual(backoff.until, start + 62)
         XCTAssertEqual(Downloads.outcome(ofSync: SyncError.unreachable), .unreachable)
         XCTAssertEqual(Downloads.outcome(ofSync: SyncError.http(502, "")), .unreachable)
         XCTAssertEqual(Downloads.outcome(ofSync: SyncError.unauthorized), .unauthorized)
+        XCTAssertEqual(Downloads.outcome(ofSync: SyncError.http(403, "")), .unauthorized)
         XCTAssertNil(Downloads.outcome(ofSync: SyncError.http(409, "conflict")))
         XCTAssertNil(Downloads.outcome(ofSync: SyncError.message("Unsupported Mac library format.")))
         XCTAssertNil(Downloads.outcome(ofSync: CocoaError(.fileReadCorruptFile)))
+    }
+
+    func testASyncReachingTheMacEndsTheWaitOncePerRunOfTransferFailures() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var backoff = Downloads.Backoff()
+        XCTAssertFalse(backoff.syncReached(afterFailedSync: false, at: start), "no wait")
+        _ = backoff.record(.unreachable, at: start)
+        XCTAssertTrue(backoff.isWaiting(at: start + 1))
+        // A sync after the wait already ended does not use up the one resume.
+        XCTAssertFalse(backoff.syncReached(afterFailedSync: false, at: start + 45))
+        XCTAssertFalse(backoff.resumedBySync)
+        _ = backoff.record(.unreachable, at: start + 46)
+        XCTAssertTrue(backoff.syncReached(afterFailedSync: false, at: start + 47), "the Mac answered: probe at once")
+        XCTAssertFalse(backoff.isWaiting(at: start + 47))
+        // The probe fails (one bad file while syncs work): later syncs leave the wait alone.
+        _ = backoff.record(.unreachable, at: start + 48)
+        XCTAssertFalse(backoff.syncReached(afterFailedSync: false, at: start + 49))
+        XCTAssertTrue(backoff.isWaiting(at: start + 49))
+        XCTAssertTrue(backoff.syncReached(afterFailedSync: true, at: start + 50), "after a failed sync it is news")
+        // A stored segment starts a fresh run.
+        _ = backoff.record(.stored(complete: false), at: start + 51)
+        _ = backoff.record(.unauthorized, at: start + 52)
+        XCTAssertTrue(backoff.syncReached(afterFailedSync: false, at: start + 53))
     }
 
     func testTransfersQueuedInTheBackgroundAreQueuedAgainOnScreen() throws {
@@ -225,6 +249,11 @@ final class DownloadsTests: XCTestCase {
         XCTAssertFalse(Downloads.requeue(foreground: false, received: 1, active: true), "already moving")
         XCTAssertFalse(Downloads.requeue(foreground: true, received: 0, active: true))
         XCTAssertFalse(Downloads.requeue(foreground: false, received: 0, active: false), "not while in the background")
+        // During a backoff they stay queued, but on screen one that has not started is no probe.
+        XCTAssertFalse(Downloads.canProbe(foreground: false, received: 0, onScreen: true))
+        XCTAssertTrue(Downloads.canProbe(foreground: false, received: 5, onScreen: true))
+        XCTAssertTrue(Downloads.canProbe(foreground: true, received: 0, onScreen: true))
+        XCTAssertTrue(Downloads.canProbe(foreground: false, received: 0, onScreen: false))
         let record = Transfers.Description(hash: Fixture.hash(1), segment: 3, foreground: true)
         let description = try XCTUnwrap(String(data: JSONEncoder().encode(record), encoding: .utf8))
         XCTAssertEqual(Transfers.info(description), Transfers.Info(hash: Fixture.hash(1), segment: 3))

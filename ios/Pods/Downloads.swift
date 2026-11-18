@@ -114,11 +114,13 @@ final class Downloads {
     /// minute and on every background wake. 30 seconds, doubling to 30 minutes. Failures that
     /// arrive while the wait runs (the rest of the queue) do not lengthen it; any failure after
     /// it ends counts as a failed probe. Once it is over a single segment goes out as a probe,
-    /// and the next stored segment ends it. Transfers already queued are left alone: after a
-    /// brief outage they carry on by themselves.
+    /// and the next stored segment ends it. Transfers already queued are left alone while it
+    /// runs: after a brief outage they carry on by themselves.
     struct Backoff: Equatable {
         private(set) var failures = 0
         private(set) var until: Date?
+        /// A sync has already ended a wait in this run of failures without a failed sync first.
+        private(set) var resumedBySync = false
 
         static let first: TimeInterval = 30
         static let longest: TimeInterval = 30 * 60
@@ -139,12 +141,26 @@ final class Downloads {
             }
         }
 
+        func isWaiting(at now: Date) -> Bool { until.map { now < $0 } ?? false }
+
         /// End the wait now, so the next pass sends its probe. A failed probe still lengthens
         /// the next wait. True when there was a wait.
         mutating func resume() -> Bool {
             guard until != nil else { return false }
             until = .distantPast
             return true
+        }
+
+        /// A sync just reached the Mac. After a failed sync that is news, and the wait ends. A
+        /// running wait that transfers alone started ends only the first time in a run of
+        /// failures: syncs working says less about the files (one bad file can fail while syncs
+        /// work), and syncs during playback come every few seconds.
+        mutating func syncReached(afterFailedSync: Bool, at now: Date) -> Bool {
+            guard until != nil else { return false }
+            if afterFailedSync { return resume() }
+            guard isWaiting(at: now), !resumedBySync else { return false }
+            resumedBySync = true
+            return resume()
         }
     }
 
@@ -154,6 +170,7 @@ final class Downloads {
         switch error as? SyncError {
         case .unreachable?: return .unreachable
         case .unauthorized?: return .unauthorized
+        case .http(403, _)?: return .unauthorized
         case .http(let status, _)? where status >= 500: return .unreachable
         default: return nil
         }
@@ -161,12 +178,13 @@ final class Downloads {
 
     /// Called by `Library` after each sync. A failure that means the Mac is down starts the wait,
     /// so a background launch during an outage queues nothing. The first sync that reaches
-    /// the Mac after one (it is back, or this iPhone was paired again) ends the wait at once.
+    /// the Mac after one (it is back, or this iPhone was paired again) ends the wait at once;
+    /// see `Backoff.syncReached` for a wait that only transfers started.
     func syncFinished(_ error: Error?) {
         guard let error else {
-            guard syncFailed else { return }
+            let afterFailure = syncFailed
             syncFailed = false
-            if backoff.resume() { run() }
+            if backoff.syncReached(afterFailedSync: afterFailure, at: Date()) { run() }
             return
         }
         guard let outcome = Self.outcome(ofSync: error) else { return }
@@ -177,11 +195,11 @@ final class Downloads {
     }
 
     /// New segments a pass may queue: none while this iPhone is not paired or the wait runs, then
-    /// one probe (a transfer still queued counts as it), then the whole budget once one is stored.
-    nonisolated static func allowance(_ budget: Int, queued: Int, backoff: Backoff, unpaired: Bool, now: Date) -> Int {
-        if unpaired { return 0 }
-        guard let until = backoff.until else { return budget }
-        return now < until ? 0 : min(budget, max(0, 1 - queued))
+    /// one probe unless a queued transfer can serve as it (`probes`, see `canProbe`), then the
+    /// whole budget once one is stored.
+    nonisolated static func allowance(_ budget: Int, probes: Int, backoff: Backoff, unpaired: Bool, now: Date) -> Int {
+        if unpaired || backoff.isWaiting(at: now) { return 0 }
+        return backoff.until == nil ? budget : min(budget, max(0, 1 - probes))
     }
 
     /// Files the sweep must leave: Listen, everything wanted, every live request (a summary
@@ -306,13 +324,21 @@ final class Downloads {
 
         // Stop transfers nothing wants now, or for a file that is already complete. Partial
         // files stay while the episode is unplayed. On screen, transfers queued in the background
-        // that have not started are queued again, so iOS runs them now.
-        let active = UIApplication.shared.applicationState == .active
+        // that have not started are queued again, so iOS runs them now. (Inactive counts as on
+        // screen: launching, or Control Center pulled down. iOS treats it as the foreground.)
+        // Only while the queue is open (paired, no backoff), so the whole plan can be queued in
+        // their place; during a backoff they stay, and the probe is queued beside them.
+        let foreground = UIApplication.shared.applicationState != .background
+        let now = Date(), unpaired = library.pairing == .unpaired
+        let open = !unpaired && backoff.until == nil
         var queued = Set<Transfers.Info>()
+        var probes = 0
         for (info, task) in running {
-            let restart = Self.requeue(foreground: Transfers.queuedInForeground(task), received: task.countOfBytesReceived, active: active)
+            let queuedOnScreen = Transfers.queuedInForeground(task), received = task.countOfBytesReceived
+            let restart = Self.requeue(foreground: queuedOnScreen, received: received, active: foreground && open)
             if wantedHashes.contains(info.hash), !complete.contains(info.hash), task.state != .canceling, !restart {
                 queued.insert(info)
+                if Self.canProbe(foreground: queuedOnScreen, received: received, onScreen: foreground) { probes += 1 }
             } else {
                 task.cancel()
             }
@@ -321,7 +347,7 @@ final class Downloads {
         let budget = Self.allowance(Self.budget(preferences: library.device.preferences,
                                                 manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
                                                 queued: queued.count),
-                                    queued: queued.count, backoff: backoff, unpaired: library.pairing == .unpaired, now: Date())
+                                    probes: probes, backoff: backoff, unpaired: unpaired, now: now)
         let store = self.store
         let plan = Self.planPass(wanted: wanted.compactMap { episode in episode.manifest.map { (episode.id, $0) } },
                                  complete: complete, queued: queued, budget: budget,
@@ -342,7 +368,7 @@ final class Downloads {
         let changes = Self.priorityChanges(running.filter { queued.contains($0.info) }.map { ($0.info, $0.task.priority) }, schedule)
         for (info, task) in running { if let priority = changes[info] { task.priority = priority } }
         for planned in schedule.start {
-            transfers.start(planned.info, range: planned.range, priority: planned.priority, foreground: active)
+            transfers.start(planned.info, range: planned.range, priority: planned.priority, foreground: foreground)
         }
         episodeIDs = shown
         parts = parts.filter { shown[$0.key] != nil }
@@ -409,11 +435,17 @@ final class Downloads {
         return plan
     }
 
-    /// A queued transfer to queue again: on screen, one queued while the app was in the background
-    /// that has not started. iOS runs those only when it chooses (often only on Wi-Fi and power),
-    /// so they could hold up the queue, the probe among them, for hours.
+    /// A queued transfer to queue again: on screen, and when the pass can queue in its place, one
+    /// queued while the app was in the background that has not started. iOS runs those only when
+    /// it chooses (often only on Wi-Fi and power), so they could hold up the queue for hours.
     nonisolated static func requeue(foreground: Bool, received: Int64, active: Bool) -> Bool {
         active && !foreground && received == 0
+    }
+
+    /// Whether a queued transfer can serve as the probe during a backoff: in the background any
+    /// can; on screen, not one queued in the background that has not started (iOS may hold it).
+    nonisolated static func canProbe(foreground: Bool, received: Int64, onScreen: Bool) -> Bool {
+        !requeue(foreground: foreground, received: received, active: onScreen)
     }
 
     /// Rows that show progress before any audio arrives: the first episode being fetched, and
