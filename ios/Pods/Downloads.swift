@@ -195,11 +195,10 @@ final class Downloads {
     }
 
     /// New segments a pass may queue: none while this iPhone is not paired or the wait runs, then
-    /// one probe unless a queued transfer can serve as it (`probes`, see `canProbe`), then the
-    /// whole budget once one is stored.
-    nonisolated static func allowance(_ budget: Int, probes: Int, backoff: Backoff, unpaired: Bool, now: Date) -> Int {
+    /// one probe (a transfer still queued counts as it), then the whole budget once one is stored.
+    nonisolated static func allowance(_ budget: Int, queued: Int, backoff: Backoff, unpaired: Bool, now: Date) -> Int {
         if unpaired || backoff.isWaiting(at: now) { return 0 }
-        return backoff.until == nil ? budget : min(budget, max(0, 1 - probes))
+        return backoff.until == nil ? budget : min(budget, max(0, 1 - queued))
     }
 
     /// Files the sweep must leave: Listen, everything wanted, every live request (a summary
@@ -322,32 +321,24 @@ final class Downloads {
         store.sweep(keep: Self.keep(listen: library.listen, wanted: wanted, requested: requestedEpisodes, protected: protectedHash))
         scan()
 
-        // Stop transfers nothing wants now, or for a file that is already complete. Partial
-        // files stay while the episode is unplayed. On screen, transfers queued in the background
-        // that have not started are queued again, so iOS runs them now. (Inactive counts as on
-        // screen: launching, or Control Center pulled down. iOS treats it as the foreground.)
-        // Only while the queue is open (paired, no backoff), so the whole plan can be queued in
-        // their place; during a backoff they stay, and the probe is queued beside them.
+        // Stop transfers nothing wants now, or for a file that is already complete (partial
+        // files stay while the episode is unplayed), and on screen restart untouched ones queued
+        // in the background (see `triage`).
         let foreground = UIApplication.shared.applicationState != .background
         let now = Date(), unpaired = library.pairing == .unpaired
-        let open = !unpaired && backoff.until == nil
+        let keep = Self.triage(running.map { Running(info: $0.info, foreground: Transfers.queuedInForeground($0.task),
+                                                     received: $0.task.countOfBytesReceived, cancelling: $0.task.state == .canceling) },
+                               wanted: wantedHashes, complete: complete,
+                               restart: Self.restartsBackgroundTransfers(onScreen: foreground, unpaired: unpaired, backoff: backoff, now: now))
         var queued = Set<Transfers.Info>()
-        var probes = 0
-        for (info, task) in running {
-            let queuedOnScreen = Transfers.queuedInForeground(task), received = task.countOfBytesReceived
-            let restart = Self.requeue(foreground: queuedOnScreen, received: received, active: foreground && open)
-            if wantedHashes.contains(info.hash), !complete.contains(info.hash), task.state != .canceling, !restart {
-                queued.insert(info)
-                if Self.canProbe(foreground: queuedOnScreen, received: received, onScreen: foreground) { probes += 1 }
-            } else {
-                task.cancel()
-            }
+        for (index, (info, task)) in running.enumerated() {
+            if keep[index] { queued.insert(info) } else { task.cancel() }
         }
 
         let budget = Self.allowance(Self.budget(preferences: library.device.preferences,
                                                 manual: requestedEpisodes.compactMap(\.manifest).filter { !complete.contains($0.hash) },
                                                 queued: queued.count),
-                                    probes: probes, backoff: backoff, unpaired: unpaired, now: now)
+                                    queued: queued.count, backoff: backoff, unpaired: unpaired, now: now)
         let store = self.store
         let plan = Self.planPass(wanted: wanted.compactMap { episode in episode.manifest.map { (episode.id, $0) } },
                                  complete: complete, queued: queued, budget: budget,
@@ -435,17 +426,31 @@ final class Downloads {
         return plan
     }
 
-    /// A queued transfer to queue again: on screen, and when the pass can queue in its place, one
-    /// queued while the app was in the background that has not started. iOS runs those only when
-    /// it chooses (often only on Wi-Fi and power), so they could hold up the queue for hours.
+    /// A queued transfer to queue again: when `restartsBackgroundTransfers`, one queued while the
+    /// app was in the background that has not started. iOS runs those only when it chooses
+    /// (often only on Wi-Fi and power), so they could hold up the queue for hours.
     nonisolated static func requeue(foreground: Bool, received: Int64, active: Bool) -> Bool {
         active && !foreground && received == 0
     }
 
-    /// Whether a queued transfer can serve as the probe during a backoff: in the background any
-    /// can; on screen, not one queued in the background that has not started (iOS may hold it).
-    nonisolated static func canProbe(foreground: Bool, received: Int64, onScreen: Bool) -> Bool {
-        !requeue(foreground: foreground, received: received, active: onScreen)
+    /// Restart untouched background-queued transfers only on screen (inactive counts: launching,
+    /// or Control Center pulled down, which iOS treats as the foreground), and not while the
+    /// wait runs or this iPhone is unpaired, when nothing could take their place. After a wait
+    /// only the probe takes their place; the rest are queued again once it is stored.
+    nonisolated static func restartsBackgroundTransfers(onScreen: Bool, unpaired: Bool, backoff: Backoff, now: Date) -> Bool {
+        onScreen && !unpaired && !backoff.isWaiting(at: now)
+    }
+
+    struct Running { var info: Transfers.Info; var foreground: Bool; var received: Int64; var cancelling: Bool }
+
+    /// For each running transfer, whether it stays queued: still wanted, its file not complete, not
+    /// being cancelled, and not one to restart. The rest are cancelled; whatever is still missing
+    /// is queued again within the pass's allowance.
+    nonisolated static func triage(_ running: [Running], wanted: Set<String>, complete: Set<String>, restart: Bool) -> [Bool] {
+        running.map { transfer in
+            wanted.contains(transfer.info.hash) && !complete.contains(transfer.info.hash) && !transfer.cancelling
+                && !requeue(foreground: transfer.foreground, received: transfer.received, active: restart)
+        }
     }
 
     /// Rows that show progress before any audio arrives: the first episode being fetched, and

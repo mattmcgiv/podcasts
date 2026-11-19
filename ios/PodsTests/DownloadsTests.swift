@@ -178,17 +178,17 @@ final class DownloadsTests: XCTestCase {
     func testAFailingMacGetsOneProbeAfterAWait() {
         let start = Date(timeIntervalSince1970: 1_000_000)
         var backoff = Downloads.Backoff()
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start), 300)
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: true, now: start), 0, "nothing while not paired")
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start), 300)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: true, now: start), 0, "nothing while not paired")
         XCTAssertTrue(backoff.record(.unreachable, at: start))
         XCTAssertFalse(backoff.record(.unauthorized, at: start + 5), "the rest of the queue failing does not lengthen the wait")
         XCTAssertFalse(backoff.record(.failed("bad audio"), at: start + 6))
         XCTAssertFalse(backoff.record(.cancelled, at: start + 6))
         XCTAssertEqual(backoff.until, start + 30)
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 29), 0)
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 30), 1, "one probe")
-        XCTAssertEqual(Downloads.allowance(300, probes: 1, backoff: backoff, unpaired: false, now: start + 31), 0, "a queued transfer is the probe")
-        XCTAssertEqual(Downloads.allowance(0, probes: 0, backoff: backoff, unpaired: false, now: start + 31), 0)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 29), 0)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 30), 1, "one probe")
+        XCTAssertEqual(Downloads.allowance(300, queued: 1, backoff: backoff, unpaired: false, now: start + 31), 0, "a queued transfer is the probe")
+        XCTAssertEqual(Downloads.allowance(0, queued: 0, backoff: backoff, unpaired: false, now: start + 31), 0)
         // The probe fails too: the wait doubles, up to half an hour.
         XCTAssertTrue(backoff.record(.unreachable, at: start + 31))
         XCTAssertEqual(backoff.until, start + 91)
@@ -199,7 +199,7 @@ final class DownloadsTests: XCTestCase {
         // A stored segment ends it.
         XCTAssertFalse(backoff.record(.stored(complete: false), at: last + 1))
         XCTAssertEqual(backoff, Downloads.Backoff())
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: last + 1), 300)
     }
 
     func testSyncsAndTapsEndTheWait() {
@@ -209,7 +209,7 @@ final class DownloadsTests: XCTestCase {
         XCTAssertEqual(backoff, Downloads.Backoff())
         _ = backoff.record(.unreachable, at: start)
         XCTAssertTrue(backoff.resume())
-        XCTAssertEqual(Downloads.allowance(300, probes: 0, backoff: backoff, unpaired: false, now: start + 1), 1, "a probe at once")
+        XCTAssertEqual(Downloads.allowance(300, queued: 0, backoff: backoff, unpaired: false, now: start + 1), 1, "a probe at once")
         XCTAssertTrue(backoff.record(.unreachable, at: start + 2), "a failed probe still counts")
         XCTAssertEqual(backoff.until, start + 62)
         XCTAssertEqual(Downloads.outcome(ofSync: SyncError.unreachable), .unreachable)
@@ -249,11 +249,6 @@ final class DownloadsTests: XCTestCase {
         XCTAssertFalse(Downloads.requeue(foreground: false, received: 1, active: true), "already moving")
         XCTAssertFalse(Downloads.requeue(foreground: true, received: 0, active: true))
         XCTAssertFalse(Downloads.requeue(foreground: false, received: 0, active: false), "not while in the background")
-        // During a backoff they stay queued, but on screen one that has not started is no probe.
-        XCTAssertFalse(Downloads.canProbe(foreground: false, received: 0, onScreen: true))
-        XCTAssertTrue(Downloads.canProbe(foreground: false, received: 5, onScreen: true))
-        XCTAssertTrue(Downloads.canProbe(foreground: true, received: 0, onScreen: true))
-        XCTAssertTrue(Downloads.canProbe(foreground: false, received: 0, onScreen: false))
         let record = Transfers.Description(hash: Fixture.hash(1), segment: 3, foreground: true)
         let description = try XCTUnwrap(String(data: JSONEncoder().encode(record), encoding: .utf8))
         XCTAssertEqual(Transfers.info(description), Transfers.Info(hash: Fixture.hash(1), segment: 3))
@@ -264,6 +259,47 @@ final class DownloadsTests: XCTestCase {
         XCTAssertFalse(Transfers.queuedInForeground(old))
         XCTAssertNil(Transfers.info("not json"))
         XCTAssertNil(Transfers.info(nil))
+    }
+
+    func testAfterAWaitOnScreenTheProbeReplacesTransfersHeldInTheBackground() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        let part = MediaStore.Part(Fixture.manifest(id: 1, bytes: 20 * 1024 * 1024))   // 3 segments
+        let held = part.done.indices.map {
+            Downloads.Running(info: .init(hash: part.hash, segment: $0), foreground: false, received: 0, cancelling: false)
+        }
+        func pass(_ backoff: Downloads.Backoff, onScreen: Bool, at now: Date) -> (kept: Set<Transfers.Info>, start: [Transfers.Info]) {
+            let restart = Downloads.restartsBackgroundTransfers(onScreen: onScreen, unpaired: false, backoff: backoff, now: now)
+            let keep = Downloads.triage(held, wanted: [part.hash], complete: [], restart: restart)
+            let kept = Set(zip(held, keep).filter(\.1).map(\.0.info))
+            let budget = Downloads.allowance(300, queued: kept.count, backoff: backoff, unpaired: false, now: now)
+            return (kept, Downloads.schedule([part], queued: kept, budget: budget).start.map(\.info))
+        }
+        var backoff = Downloads.Backoff()
+        _ = backoff.record(.unreachable, at: start)
+        // While the wait runs nothing is touched or queued, on screen or not.
+        XCTAssertEqual(pass(backoff, onScreen: true, at: start + 1).kept.count, 3)
+        XCTAssertEqual(pass(backoff, onScreen: true, at: start + 1).start, [])
+        // The wait is over (a sync reached the Mac): on screen the held transfers make way for one probe.
+        _ = backoff.syncReached(afterFailedSync: true, at: start + 5)
+        XCTAssertEqual(pass(backoff, onScreen: true, at: start + 6).kept, [])
+        XCTAssertEqual(pass(backoff, onScreen: true, at: start + 6).start, [.init(hash: part.hash, segment: 0)])
+        // In the background they stay and serve as the probe.
+        XCTAssertEqual(pass(backoff, onScreen: false, at: start + 6).kept.count, 3)
+        XCTAssertEqual(pass(backoff, onScreen: false, at: start + 6).start, [])
+        // Once a segment is stored everything missing is queued again.
+        _ = backoff.record(.stored(complete: false), at: start + 7)
+        XCTAssertEqual(pass(backoff, onScreen: true, at: start + 8).start.count, 3)
+        // Started, on-screen-queued transfers always stay; unwanted, finished or cancelling ones go.
+        let other = Fixture.hash(2)
+        let mixed = [
+            Downloads.Running(info: .init(hash: part.hash, segment: 0), foreground: false, received: 10, cancelling: false),
+            Downloads.Running(info: .init(hash: part.hash, segment: 1), foreground: true, received: 0, cancelling: false),
+            Downloads.Running(info: .init(hash: other, segment: 0), foreground: true, received: 0, cancelling: false),
+            Downloads.Running(info: .init(hash: part.hash, segment: 2), foreground: true, received: 0, cancelling: true),
+        ]
+        XCTAssertEqual(Downloads.triage(mixed, wanted: [part.hash, other], complete: [other], restart: true), [true, true, false, false])
+        XCTAssertEqual(Downloads.triage(mixed, wanted: [part.hash], complete: [], restart: true), [true, true, false, false])
+        XCTAssertFalse(Downloads.restartsBackgroundTransfers(onScreen: true, unpaired: true, backoff: Downloads.Backoff(), now: start))
     }
 
     func testTheNextAndRequestedEpisodesShowProgressAtOnce() {
