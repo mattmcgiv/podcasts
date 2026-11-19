@@ -29,9 +29,8 @@ struct PlayerSheet: View {
                     }
                     Scrubber()
                     Transport()
+                    SpeedButtons()
                     VStack(spacing: 0) {
-                        SpeedMenu()
-                        Divider().padding(.leading, 34)
                         Menu {
                             ForEach([false, true], id: \.self) { mac in
                                 Button {
@@ -143,21 +142,32 @@ private struct ControlRow: View {
     }
 }
 
-private struct SpeedMenu: View {
+private struct SpeedButtons: View {
     @Environment(Player.self) private var player
 
     var body: some View {
-        Menu {
+        HStack(spacing: 8) {
             ForEach(Player.speeds, id: \.self) { value in
+                let selected = value == player.speed
                 Button { player.setSpeed(value) } label: {
-                    if value == player.speed { Label(Format.speed(value), systemImage: "checkmark") } else { Text(Format.speed(value)) }
+                    Text(Format.speed(value))
+                        .font(.subheadline.weight(selected ? .bold : .regular))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .padding(.horizontal, 8)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        .background(selected ? Color.accentColor.opacity(0.1) : Color.clear, in: Capsule())
+                        .overlay { Capsule().strokeBorder(selected ? Color.accentColor : Color(uiColor: .separator)) }
                 }
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
-        } label: {
-            ControlRow(title: "Playback speed", icon: "speedometer", value: Format.speed(player.speed))
         }
+        .buttonStyle(.plain)
+        .disabled(player.speakerBusy)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Playback speed")
-        .accessibilityValue(Format.speed(player.speed))
     }
 }
 

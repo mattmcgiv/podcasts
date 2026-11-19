@@ -56,14 +56,15 @@ final class PodsUITests: XCTestCase {
         app.buttons["Back 15 seconds"].tap()
         XCTAssertLessThan(position, beforeSkip + 25)
 
-        let speed = app.buttons["Playback speed"]
-        let original = speed.value as? String ?? ""
-        let target = original == "2×" ? "1.5×" : "2×"
-        speed.tap()
-        app.buttons[target].tap()
-        XCTAssertEqual(speed.value as? String, target, "the speed menu changes speed")
-        speed.tap()
-        app.buttons[original].tap()
+        let speeds = ["1×", "1.5×", "2×", "2.5×", "3×"].map { app.buttons[$0] }
+        XCTAssertTrue(speeds.allSatisfy { $0.exists })
+        let original = try XCTUnwrap(speeds.first { $0.isSelected })
+        let target = try XCTUnwrap(speeds.first { !$0.isSelected })
+        target.tap()
+        XCTAssertTrue(target.isSelected)
+        XCTAssertFalse(original.isSelected)
+        original.tap()
+        XCTAssertTrue(original.isSelected)
 
         pause.tap()
         XCTAssertTrue(app.buttons["Play"].firstMatch.waitForExistence(timeout: 5))
