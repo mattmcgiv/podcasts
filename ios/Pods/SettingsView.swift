@@ -97,7 +97,7 @@ struct SettingsView: View {
             if let notice = downloads.notice { Text(notice).font(.footnote).foregroundStyle(.orange) }
             Button("Remove all downloads", role: .destructive) { confirmingRemove = true }
                 .confirmationDialog("Remove every downloaded episode from this iPhone?", isPresented: $confirmingRemove, titleVisibility: .visible) {
-                    Button("Remove downloads", role: .destructive) { player.close(); downloads.removeAll() }
+                    Button("Remove downloads", role: .destructive) { player.close { downloads.removeAll() } }
                 }
         } header: { Text("Downloads") }
     }

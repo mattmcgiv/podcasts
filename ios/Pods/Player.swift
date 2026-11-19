@@ -20,6 +20,14 @@ final class Player {
     private(set) var duration: Double = 0
     private(set) var speed: Double = 1
     var expanded = false
+    private(set) var playingOnMac = false
+    private(set) var speakerBusy = false
+    private(set) var speakerError: String?
+
+    @ObservationIgnored private let speaker = MacSpeaker()
+    @ObservationIgnored private var speakerGeneration: UInt64?
+    @ObservationIgnored private var speakerPoll: Task<Void, Never>?
+    @ObservationIgnored private var speakerRevision = 0
 
     @ObservationIgnored let avPlayer = AVPlayer()
     @ObservationIgnored private var context: Context = .listen
@@ -43,9 +51,11 @@ final class Player {
         timeObserver = avPlayer.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 2), queue: .main) { [weak self] time in
             MainActor.assumeIsolated { self?.tick(time.seconds) }
         }
-        statusObserver = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
-            let playing = player.timeControlStatus != .paused
-            Task { @MainActor in self?.playingChanged(playing) }
+        statusObserver = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self, !self.playingOnMac, !self.speakerBusy else { return }
+                self.playingChanged(self.avPlayer.timeControlStatus != .paused)
+            }
         }
         let center = NotificationCenter.default
         center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
@@ -73,8 +83,17 @@ final class Player {
     }
 
     func play(_ episode: Episode, context: Context) {
+        guard !speakerBusy else { return }
         if current?.id == episode.id { expanded = true; if !isPlaying { resume() }; return }
         guard downloads.isDownloaded(episode) else { downloads.request(episode); return }
+        if let generation = speakerGeneration {
+            onSpeaker {
+                self.expanded = true
+                try await self.changeMacEpisode(episode, context: context, generation: generation)
+            }
+            return
+        }
+        speakerError = nil
         savePosition(sync: false)
         if let current { library.endPlayback(current) }
         load(episode, context: context, autoplay: true)
@@ -109,9 +128,26 @@ final class Player {
         DeviceLog.write("load episode=\(episode.id) at=\(Int(position)) autoplay=\(autoplay)")
     }
 
-    func close() {
-        savePosition(sync: true)
+    func close(then completion: @escaping () -> Void) {
+        guard !speakerBusy else { return }
+        if playingOnMac {
+            onSpeaker {
+                _ = try await self.stopMac()
+                self.savePosition(sync: true)
+                self.clearCurrent()
+                completion()
+            }
+        } else {
+            savePosition(sync: true)
+            clearCurrent()
+            completion()
+        }
+    }
+
+    private func clearCurrent() {
         if let current { library.endPlayback(current) }
+        clearMacOutput()
+        isPlaying = false
         wantsPlay = false
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
@@ -125,6 +161,12 @@ final class Player {
     // MARK: Transport
 
     func resume() {
+        guard !speakerBusy else { return }
+        if playingOnMac { sendSpeaker(.play); return }
+        resumeOnPhone()
+    }
+
+    private func resumeOnPhone() {
         guard current != nil else { restore(); if current != nil { resume() }; return }
         wantsPlay = true
         do { try AVAudioSession.sharedInstance().setActive(true) }
@@ -135,6 +177,8 @@ final class Player {
     }
 
     func pause() {
+        guard !speakerBusy else { return }
+        if playingOnMac { sendSpeaker(.pause); return }
         wantsPlay = false
         car.disarm()
         avPlayer.pause()
@@ -145,17 +189,25 @@ final class Player {
     func toggle() { isPlaying ? pause() : resume() }
 
     func seek(to seconds: Double) {
-        guard current != nil else { return }
+        guard current != nil, !speakerBusy else { return }
         let target = max(0, duration > 0 ? min(seconds, max(0, duration - 0.5)) : seconds)
+        if playingOnMac { sendSpeaker(.seek, value: target); return }
         position = target
-        avPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            Task { @MainActor in self?.publishNowPlaying(); self?.savePosition(sync: true) }
+        let item = avPlayer.currentItem
+        avPlayer.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor in
+                guard finished, let self, !self.playingOnMac, self.avPlayer.currentItem === item else { return }
+                self.publishNowPlaying()
+                self.savePosition(sync: true)
+            }
         }
     }
 
     func skip(_ delta: Double) { seek(to: position + delta) }
 
     func setSpeed(_ value: Double) {
+        guard !speakerBusy else { return }
+        if playingOnMac { sendSpeaker(.rate, value: value); return }
         speed = value
         avPlayer.defaultRate = Float(value)
         if isPlaying { avPlayer.rate = Float(value) }
@@ -164,16 +216,209 @@ final class Player {
     }
 
     func markCurrentPlayed() {
-        guard let episode = current else { return }
-        close()
-        library.setPlayed(episode, true)
-        downloads.run()
+        guard let episode = current, !speakerBusy else { return }
+        close {
+            self.library.setPlayed(episode, true)
+            self.downloads.run()
+        }
+    }
+
+    // MARK: Mac speaker
+
+    func switchOutput() {
+        guard let episode = current, !library.readOnly, !speakerBusy else { return }
+        if playingOnMac {
+            onSpeaker {
+                do {
+                    let shouldResume = try await self.stopMac()
+                    self.returnToPhone(autoplay: shouldResume)
+                } catch {
+                    self.returnToPhone(autoplay: false)
+                    throw SyncError.message("Could not confirm that the Mac stopped. Playback is paused on this iPhone.")
+                }
+            }
+        } else {
+            onSpeaker {
+                let status = try await self.speaker.status()
+                guard status.available else { throw SyncError.message(status.error ?? "Mac speaker is unavailable.") }
+                let shouldResume = self.wantsPlay
+                self.car.disarm()
+                self.wantsPlay = false
+                self.avPlayer.pause()
+                self.isPlaying = false
+                let localTime = self.avPlayer.currentTime().seconds
+                if localTime.isFinite, localTime >= 0 { self.position = localTime }
+                do {
+                    let loaded = try await self.speaker.load(episode, generation: status.generation,
+                                                             position: self.position, rate: self.speed)
+                    try self.adoptMac(loaded, episode: episode)
+                } catch {
+                    if shouldResume { self.resumeOnPhone() }
+                    throw error
+                }
+                if shouldResume { try await self.updateSpeaker(.play) }
+            }
+        }
+    }
+
+    private func onSpeaker(_ action: @escaping @MainActor () async throws -> Void) {
+        guard !speakerBusy else { return }
+        speakerBusy = true
+        speakerError = nil
+        speakerRevision += 1
+        Task {
+            defer {
+                speakerBusy = false
+                if !playingOnMac { playingChanged(avPlayer.timeControlStatus != .paused) }
+            }
+            do { try await action() }
+            catch { speakerError = error.localizedDescription }
+        }
+    }
+
+    private func adoptMac(_ status: MacSpeaker.Status, episode: Episode) throws {
+        guard speaker.owns(status, episode: episode) else {
+            throw SyncError.message(status.error ?? "The Mac speaker did not load this episode.")
+        }
+        speakerGeneration = status.generation
+        playingOnMac = true
+        applySpeakerStatus(status)
+        startSpeakerPolling()
+    }
+
+    private func applySpeakerStatus(_ status: MacSpeaker.Status) {
+        position = status.position
+        if status.duration > 0 { duration = status.duration }
+        speed = status.rate
+        isPlaying = !status.paused && !status.ended
+        publishNowPlaying()
+    }
+
+    private func sendSpeaker(_ command: MacSpeaker.Command, value: Double? = nil) {
+        onSpeaker { try await self.updateSpeaker(command, value: value) }
+    }
+
+    private func updateSpeaker(_ command: MacSpeaker.Command, value: Double? = nil) async throws {
+        guard let generation = speakerGeneration, let episode = current else { return }
+        let status = try await speaker.command(command, generation: generation, value: value)
+        guard speaker.owns(status, episode: episode), status.generation == generation else {
+            throw SyncError.message("The Mac speaker has switched to another session.")
+        }
+        applySpeakerStatus(status)
+        if command == .rate { library.setSetting("speed", .number(speed)) }
+        if command == .pause || command == .seek { savePosition(sync: true) }
+    }
+
+    private func stopMac() async throws -> Bool {
+        guard let episode = current, let generation = speakerGeneration else { return false }
+        let status = try await speaker.status()
+        guard speaker.owns(status, episode: episode), status.generation == generation else { return false }
+        applySpeakerStatus(status)
+        let stopped = try await speaker.command(.disconnect, generation: generation)
+        position = stopped.position
+        return !status.paused && !status.ended
+    }
+
+    private func clearMacOutput() {
+        speakerGeneration = nil
+        speakerPoll?.cancel()
+        speakerPoll = nil
+        playingOnMac = false
+    }
+
+    private func returnToPhone(autoplay: Bool) {
+        savePosition(sync: true)
+        clearMacOutput()
+        isPlaying = false
+        avPlayer.defaultRate = Float(speed)
+        avPlayer.seek(to: CMTime(seconds: position, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        if autoplay { resumeOnPhone() }
+        else { publishNowPlaying() }
+    }
+
+    private func changeMacEpisode(_ episode: Episode, context: Context, generation: UInt64,
+                                  finished: Episode? = nil) async throws {
+        let loaded = try await speaker.load(episode, generation: generation,
+                                            position: episode.position_secs > 1 ? episode.position_secs : 0, rate: speed)
+        guard speaker.owns(loaded, episode: episode) else {
+            throw SyncError.message(loaded.error ?? "The Mac speaker did not load this episode.")
+        }
+        savePosition(sync: false)
+        if let current { library.endPlayback(current) }
+        if let finished { library.setPlayed(finished, true) }
+        load(episode, context: context, autoplay: false)
+        library.beginPlayback(episode)
+        try adoptMac(loaded, episode: episode)
+        try await updateSpeaker(.play)
+    }
+
+    private func startSpeakerPolling() {
+        guard speakerPoll == nil else { return }
+        speakerPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                await self?.pollSpeaker()
+            }
+        }
+    }
+
+    private func pollSpeaker() async {
+        guard !speakerBusy, let generation = speakerGeneration, let episode = current else { return }
+        let revision = speakerRevision
+        do {
+            let status = try await speaker.status()
+            guard revision == speakerRevision, speakerGeneration == generation else { return }
+            guard speaker.owns(status, episode: episode), status.generation == generation else {
+                returnToPhone(autoplay: false)
+                speakerError = status.error ?? "The Mac speaker session ended. Playback is paused on this iPhone."
+                return
+            }
+            if speakerError == "Could not reach the Mac speaker." { speakerError = nil }
+            applySpeakerStatus(status)
+            if status.ended {
+                finishOnMac(episode, generation: generation)
+            } else if isPlaying, Date().timeIntervalSince(lastSave) >= 5 {
+                savesSinceSync += 1
+                savePosition(sync: savesSinceSync >= 6)
+            }
+        } catch {
+            guard revision == speakerRevision, speakerGeneration == generation else { return }
+            speakerError = "Could not reach the Mac speaker."
+        }
+    }
+
+    private func finishOnMac(_ episode: Episode, generation: UInt64) {
+        let next = library.autoplay
+            ? SyncLogic.next(after: episode, in: library.episodes, sameShowOnly: context == .show, isDownloaded: downloads.isDownloaded)
+            : nil
+        onSpeaker {
+            defer { self.downloads.run() }
+            do {
+                if let next {
+                    try await self.changeMacEpisode(next, context: self.context, generation: generation, finished: episode)
+                } else {
+                    _ = try await self.stopMac()
+                    self.savePosition(sync: true)
+                    self.clearCurrent()
+                    self.library.setPlayed(episode, true)
+                }
+            } catch {
+                // The last confirmed status was ended. Any replacement was loaded paused.
+                if self.current?.id == episode.id {
+                    self.returnToPhone(autoplay: false)
+                    self.library.endPlayback(episode)
+                    self.library.setPlayed(episode, true)
+                }
+                throw error
+            }
+        }
     }
 
     // MARK: Events
 
     private func tick(_ seconds: Double) {
-        guard current != nil, seconds.isFinite else { return }
+        guard !playingOnMac, !speakerBusy, current != nil, seconds.isFinite else { return }
         position = seconds
         if let item = avPlayer.currentItem, item.duration.seconds.isFinite, item.duration.seconds > 0 { duration = item.duration.seconds }
         if isPlaying, Date().timeIntervalSince(lastSave) >= 5 {
@@ -190,7 +435,7 @@ final class Player {
 
     private func savePosition(sync: Bool) {
         guard let current, avPlayer.currentItem != nil else { return }
-        let seconds = avPlayer.currentTime().seconds
+        let seconds = playingOnMac ? position : avPlayer.currentTime().seconds
         guard seconds.isFinite, seconds >= 0 else { return }
         lastSave = Date()
         if sync { savesSinceSync = 0 }
@@ -198,7 +443,7 @@ final class Player {
     }
 
     private func ended() {
-        guard let finished = current else { return }
+        guard !playingOnMac, !speakerBusy, let finished = current else { return }
         DeviceLog.write("ended episode=\(finished.id) autoplay=\(library.autoplay)")
         let next = library.autoplay
             ? SyncLogic.next(after: finished, in: library.episodes, sameShowOnly: context == .show, isDownloaded: downloads.isDownloaded)
@@ -221,6 +466,7 @@ final class Player {
     }
 
     private func interrupted(_ type: AVAudioSession.InterruptionType?, _ options: AVAudioSession.InterruptionOptions) {
+        guard !playingOnMac, !speakerBusy else { return }
         switch type {
         case .began:
             savePosition(sync: true)
@@ -231,6 +477,7 @@ final class Player {
     }
 
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason?, _ previous: AVAudioSessionRouteDescription?) {
+        guard !playingOnMac, !speakerBusy else { return }
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
         DeviceLog.write("route reason=\(reason?.rawValue ?? 99) outputs=\(outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ","))")
         if reason == .oldDeviceUnavailable {

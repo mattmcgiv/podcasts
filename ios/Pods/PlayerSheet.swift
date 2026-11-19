@@ -4,6 +4,7 @@ import SwiftUI
 /// position updates redraw only the scrubber and chapter highlight.
 struct PlayerSheet: View {
     @Environment(Player.self) private var player
+    @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -28,6 +29,17 @@ struct PlayerSheet: View {
                     }
                     Scrubber()
                     Transport()
+                    if !library.readOnly {
+                        Button { player.switchOutput() } label: {
+                            Label(player.playingOnMac ? "Play on iPhone" : "Play on Mac",
+                                  systemImage: player.playingOnMac ? "iphone" : "laptopcomputer")
+                                .frame(minHeight: 44)
+                        }
+                        .disabled(player.speakerBusy || episode.manifest == nil)
+                        if let error = player.speakerError {
+                            Text(error).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
                     HStack {
                         SpeedMenu()
                         Spacer()
