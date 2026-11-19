@@ -29,23 +29,40 @@ struct PlayerSheet: View {
                     }
                     Scrubber()
                     Transport()
-                    if !library.readOnly {
-                        Button { player.switchOutput() } label: {
-                            Label(player.playingOnMac ? "Play on iPhone" : "Play on Mac",
-                                  systemImage: player.playingOnMac ? "iphone" : "laptopcomputer")
-                                .frame(minHeight: 44)
-                        }
-                        .disabled(player.speakerBusy || episode.manifest == nil)
-                        if let error = player.speakerError {
-                            Text(error).font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                    HStack {
+                    VStack(spacing: 0) {
                         SpeedMenu()
-                        Spacer()
-                        Button { player.markCurrentPlayed() } label: {
-                            Label("Mark played", systemImage: "checkmark.circle").frame(minHeight: 44)
+                        Divider().padding(.leading, 34)
+                        Menu {
+                            ForEach([false, true], id: \.self) { mac in
+                                Button {
+                                    if mac != player.playingOnMac { player.switchOutput() }
+                                } label: {
+                                    if mac == player.playingOnMac {
+                                        Label(mac ? "Mac" : "iPhone", systemImage: "checkmark")
+                                    } else {
+                                        Text(mac ? "Mac" : "iPhone")
+                                    }
+                                }
+                            }
+                        } label: {
+                            ControlRow(title: "Play on", icon: "laptopcomputer",
+                                       value: player.playingOnMac ? "Mac" : "iPhone")
                         }
+                        .accessibilityLabel("Play on")
+                        .accessibilityValue(player.playingOnMac ? "Mac" : "iPhone")
+                        .disabled(library.readOnly || episode.manifest == nil)
+                        Divider().padding(.leading, 34)
+                        Button { player.markCurrentPlayed() } label: {
+                            ControlRow(title: "Mark played", icon: "checkmark.circle")
+                        }
+                        .accessibilityLabel("Mark played")
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(player.speakerBusy)
+                    .padding(.horizontal, 16)
+                    .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+                    if let error = player.speakerError {
+                        Text(error).font(.footnote).foregroundStyle(.secondary)
                     }
                     Chapters(notes: (episode.show_notes ?? [])
                         .filter { $0.start_time.isFinite && $0.start_time >= 0 }
@@ -102,6 +119,30 @@ private struct Transport: View {
     }
 }
 
+private struct ControlRow: View {
+    let title: String
+    let icon: String
+    var value: String?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).frame(width: 22).accessibilityHidden(true)
+            Text(title)
+            Spacer(minLength: 6)
+            if let value {
+                HStack(spacing: 4) {
+                    Text(value).monospacedDigit()
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .contentShape(Rectangle())
+    }
+}
+
 private struct SpeedMenu: View {
     @Environment(Player.self) private var player
 
@@ -113,8 +154,7 @@ private struct SpeedMenu: View {
                 }
             }
         } label: {
-            Text(Format.speed(player.speed)).font(.body.weight(.semibold).monospacedDigit())
-                .frame(minWidth: 56, minHeight: 44)
+            ControlRow(title: "Playback speed", icon: "speedometer", value: Format.speed(player.speed))
         }
         .accessibilityLabel("Playback speed")
         .accessibilityValue(Format.speed(player.speed))
